@@ -1,5 +1,6 @@
 require("./load-env-local");
 const http = require("http");
+const pkg = require("./package.json");
 const {
   getAccessToken,
   getAccessTokenForMlUser,
@@ -168,6 +169,7 @@ const server = http.createServer(async (req, res) => {
       JSON.stringify({
         ok: true,
         service: "webhook-receiver",
+        version: pkg.version,
         webhook: WEBHOOK_PATH,
         multi_cuentas_ml:
           "POST /admin/ml-accounts (cabecera X-Admin-Secret) registra refresh por ml_user_id",

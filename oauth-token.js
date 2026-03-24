@@ -266,6 +266,23 @@ async function getAccessTokenForMlUser(mlUserId) {
   return p;
 }
 
+/**
+ * Convierte `resource` del webhook en path de API (p. ej. messages trae id sin "/").
+ * Si ML cambia el endpoint, sobreescribe con ML_MESSAGES_PATH_PREFIX o el path completo en ML_*.
+ */
+function normalizeMlResourcePath(topic, resource) {
+  if (!resource || typeof resource !== "string") return null;
+  const r = resource.trim();
+  if (!r) return null;
+  if (r.startsWith("/")) return r;
+  if (topic === "messages") {
+    const prefix = process.env.ML_MESSAGES_PATH_PREFIX || "/messages";
+    const base = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+    return `${base}/${r}`;
+  }
+  return `/${r}`;
+}
+
 async function mercadoLibreGetWithToken(getToken, resourcePath) {
   const token = await getToken();
   const base = process.env.ML_API_BASE || "https://api.mercadolibre.com";
@@ -283,6 +300,36 @@ async function mercadoLibreGetWithToken(getToken, resourcePath) {
   } catch {
     return text;
   }
+}
+
+/**
+ * GET autenticado sin lanzar si HTTP != 2xx; devuelve status y cuerpo parseado o texto.
+ */
+async function mercadoLibreFetchForUser(mlUserId, resourcePath) {
+  const token = await getAccessTokenForMlUser(mlUserId);
+  const base = process.env.ML_API_BASE || "https://api.mercadolibre.com";
+  const path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
+  const url = `${base}${path}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const text = await res.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+  return {
+    ok: res.ok,
+    status: res.status,
+    path,
+    url,
+    data,
+    rawText: text,
+  };
 }
 
 /** GET autenticado (cuenta unica por variables de entorno). */
@@ -344,6 +391,8 @@ module.exports = {
   getAccessTokenForMlUser,
   mercadoLibreGet,
   mercadoLibreGetForUser,
+  mercadoLibreFetchForUser,
+  normalizeMlResourcePath,
   getTokenStatus,
   getTokenStatusForMlUser,
   warmAllMlAccountsRefresh,

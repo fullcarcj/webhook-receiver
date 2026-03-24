@@ -25,6 +25,22 @@ db.exec(`
     nickname TEXT,
     updated_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS ml_topic_fetches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ml_user_id INTEGER NOT NULL,
+    topic TEXT,
+    resource TEXT NOT NULL,
+    request_path TEXT NOT NULL,
+    http_status INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL,
+    notification_id TEXT,
+    payload TEXT,
+    error TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_topic_fetches_user ON ml_topic_fetches(ml_user_id);
+  CREATE INDEX IF NOT EXISTS idx_ml_topic_fetches_topic ON ml_topic_fetches(topic);
+  CREATE INDEX IF NOT EXISTS idx_ml_topic_fetches_fetched ON ml_topic_fetches(fetched_at);
 `);
 
 const insertStmt = db.prepare(
@@ -111,6 +127,43 @@ function deleteMlAccount(mlUserId) {
   return db.prepare(`DELETE FROM ml_accounts WHERE ml_user_id = ?`).run(mlUserId).changes;
 }
 
+const insertTopicFetchStmt = db.prepare(
+  `INSERT INTO ml_topic_fetches (
+     ml_user_id, topic, resource, request_path, http_status, fetched_at,
+     notification_id, payload, error
+   ) VALUES (
+     @ml_user_id, @topic, @resource, @request_path, @http_status, @fetched_at,
+     @notification_id, @payload, @error
+   )`
+);
+
+function insertTopicFetch(row) {
+  const info = insertTopicFetchStmt.run({
+    ml_user_id: row.ml_user_id,
+    topic: row.topic != null ? String(row.topic) : null,
+    resource: row.resource,
+    request_path: row.request_path,
+    http_status: row.http_status,
+    fetched_at: row.fetched_at,
+    notification_id: row.notification_id != null ? String(row.notification_id) : null,
+    payload: row.payload != null ? String(row.payload) : null,
+    error: row.error != null ? String(row.error) : null,
+  });
+  return Number(info.lastInsertRowid);
+}
+
+function listTopicFetches(limit, maxAllowed) {
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 50, 1), cap);
+  return db
+    .prepare(
+      `SELECT id, ml_user_id, topic, resource, request_path, http_status, fetched_at,
+              notification_id, payload, error
+       FROM ml_topic_fetches ORDER BY id DESC LIMIT ?`
+    )
+    .all(n);
+}
+
 module.exports = {
   insertWebhook,
   listWebhooks,
@@ -120,4 +173,6 @@ module.exports = {
   getMlAccount,
   listMlAccounts,
   deleteMlAccount,
+  insertTopicFetch,
+  listTopicFetches,
 };

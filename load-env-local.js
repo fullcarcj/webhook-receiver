@@ -11,7 +11,11 @@ if (fs.existsSync(file)) {
   try {
     const j = JSON.parse(fs.readFileSync(file, "utf8"));
     for (const [k, v] of Object.entries(j)) {
-      if (v != null && v !== "" && process.env[k] === undefined) {
+      if (v == null || v === "") continue;
+      const current = process.env[k];
+      // Si la variable existe pero está vacía (p. ej. variable de sistema en Windows), usar el JSON.
+      const missing = current === undefined || current === "";
+      if (missing) {
         process.env[k] = String(v);
       }
     }

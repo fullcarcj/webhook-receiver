@@ -5,6 +5,8 @@ const {
   getAccessToken,
   getAccessTokenForMlUser,
   mercadoLibreGetForUser,
+  mercadoLibreFetchForUser,
+  normalizeMlResourcePath,
   warmAllMlAccountsRefresh,
   getTokenStatus,
   getTokenStatusForMlUser,
@@ -16,12 +18,17 @@ const {
   upsertMlAccount,
   listMlAccounts,
   deleteMlAccount,
+  insertTopicFetch,
+  listTopicFetches,
+  getMlAccount,
 } = require("./db");
 
 const PORT = Number(process.env.PORT) || 3000;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
 const REG_PATH = process.env.REG_PATH || "/reg";
 const WEBHOOK_SAVE_DB = process.env.WEBHOOK_SAVE_DB === "1";
+/** GET al resource del webhook y guarda respuesta en tabla ml_topic_fetches (requiere cuenta en ml_accounts). */
+const ML_WEBHOOK_FETCH_RESOURCE = process.env.ML_WEBHOOK_FETCH_RESOURCE === "1";
 
 function matchesRegPath(pathname) {
   if (pathname === REG_PATH) return true;
@@ -35,6 +42,10 @@ function isCuentasPath(pathname) {
 
 function isHooksPath(pathname) {
   return pathname === "/hooks" || pathname === "/hooks/";
+}
+
+function isFetchesPath(pathname) {
+  return pathname === "/fetches" || pathname === "/fetches/";
 }
 
 function rejectIngestSecret(req, res) {
@@ -121,6 +132,14 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+function tryParseJson(s) {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s;
+  }
+}
+
 function parseJsonBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -164,6 +183,113 @@ function logWebhook(body, req) {
   console.log("[webhook]", line);
 }
 
+/**
+ * Tras el webhook: GET al recurso de ML y guarda en ml_topic_fetches (no bloquea la respuesta HTTP).
+ */
+function scheduleTopicFetchFromWebhook(body) {
+  if (!ML_WEBHOOK_FETCH_RESOURCE) return;
+  const uid = body && body.user_id;
+  const resource = body && body.resource;
+  if (uid == null || resource == null || resource === "") return;
+
+  setImmediate(() => {
+    const mlUserId = Number(uid);
+    const topic = typeof body.topic === "string" ? body.topic : null;
+    const resourceStr = String(resource);
+    const notifId = body._id != null ? String(body._id) : null;
+    let requestPath = "";
+
+    (async () => {
+      try {
+        const acc = getMlAccount(mlUserId);
+        if (!acc) {
+          insertTopicFetch({
+            ml_user_id: mlUserId,
+            topic,
+            resource: resourceStr,
+            request_path: "",
+            http_status: 0,
+            fetched_at: new Date().toISOString(),
+            notification_id: notifId,
+            payload: null,
+            error: `No hay cuenta en ml_accounts para user_id=${mlUserId}`,
+          });
+          console.error("[ml fetch] sin cuenta ml_user_id=%s", mlUserId);
+          return;
+        }
+
+        requestPath = normalizeMlResourcePath(topic, resourceStr);
+        if (!requestPath) {
+          insertTopicFetch({
+            ml_user_id: mlUserId,
+            topic,
+            resource: resourceStr,
+            request_path: "",
+            http_status: 0,
+            fetched_at: new Date().toISOString(),
+            notification_id: notifId,
+            payload: null,
+            error: "resource vacío o inválido",
+          });
+          return;
+        }
+
+        const result = await mercadoLibreFetchForUser(mlUserId, requestPath);
+        let payloadStr = null;
+        if (result.data != null) {
+          payloadStr =
+            typeof result.data === "string"
+              ? result.data
+              : JSON.stringify(result.data);
+        }
+        const errMsg = result.ok
+          ? null
+          : (result.rawText || `HTTP ${result.status}`).slice(0, 4000);
+
+        insertTopicFetch({
+          ml_user_id: mlUserId,
+          topic,
+          resource: resourceStr,
+          request_path: result.path || requestPath,
+          http_status: result.status,
+          fetched_at: new Date().toISOString(),
+          notification_id: notifId,
+          payload: payloadStr,
+          error: errMsg,
+        });
+        if (!result.ok) {
+          console.error(
+            "[ml fetch] user_id=%s topic=%s %s → %s",
+            mlUserId,
+            topic,
+            requestPath,
+            result.status
+          );
+        } else {
+          console.log("[ml fetch] ok user_id=%s topic=%s %s", mlUserId, topic, requestPath);
+        }
+      } catch (e) {
+        try {
+          insertTopicFetch({
+            ml_user_id: mlUserId,
+            topic,
+            resource: resourceStr,
+            request_path: requestPath || "",
+            http_status: 0,
+            fetched_at: new Date().toISOString(),
+            notification_id: notifId,
+            payload: null,
+            error: e.message || String(e),
+          });
+        } catch (dbErr) {
+          console.error("[ml fetch] DB:", dbErr.message);
+        }
+        console.error("[ml fetch] user_id=%s: %s", mlUserId, e.message);
+      }
+    })();
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
 
@@ -183,6 +309,8 @@ const server = http.createServer(async (req, res) => {
           "GET /cuentas?k=ADMIN_SECRET (lista cuentas; mismo valor que variable ADMIN_SECRET)",
         hooks_recibidos:
           "GET /hooks?k=ADMIN_SECRET (webhooks guardados en DB; activar WEBHOOK_SAVE_DB o POST /reg)",
+        topic_fetches_ml:
+          "GET /fetches?k=ADMIN_SECRET (respuestas API guardadas; activar ML_WEBHOOK_FETCH_RESOURCE=1)",
       })
     );
     return;
@@ -481,6 +609,101 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Respuestas GET a la API de ML guardadas (ml_topic_fetches); misma clave que /hooks. */
+  if (req.method === "GET" && isFetchesPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Fetches</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Fetches</title><p>Acceso denegado. Usa <code>/fetches?k=TU_CLAVE</code> (misma que <code>ADMIN_SECRET</code>).</p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    let rows;
+    try {
+      rows = listTopicFetches(lim, 2000);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      const items = rows.map((r) => ({
+        id: r.id,
+        ml_user_id: r.ml_user_id,
+        topic: r.topic,
+        resource: r.resource,
+        request_path: r.request_path,
+        http_status: r.http_status,
+        fetched_at: r.fetched_at,
+        notification_id: r.notification_id,
+        error: r.error,
+        data: r.payload ? tryParseJson(r.payload) : null,
+      }));
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, count: items.length, items }));
+      return;
+    }
+    const tableRows = rows
+      .map((r) => {
+        const payloadPreview = r.payload
+          ? escapeHtml(r.payload.length > 800 ? `${r.payload.slice(0, 800)}…` : r.payload)
+          : "—";
+        const errCell = r.error ? `<span class="err">${escapeHtml(r.error.slice(0, 200))}</span>` : "—";
+        return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td class="muted">${escapeHtml(r.fetched_at)}</td>
+  <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.topic)}</td>
+  <td>${escapeHtml(r.request_path)}</td>
+  <td>${escapeHtml(r.http_status)}</td>
+  <td>${errCell}</td>
+  <td><pre class="payload">${payloadPreview}</pre></td>
+</tr>`;
+      })
+      .join("");
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>ML topic fetches</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 1200px; margin-top: 1rem; font-size: 0.85rem; }
+    th, td { border: 1px solid #38444d; padding: 0.45rem 0.55rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.8rem; }
+    .err { color: #f4212e; font-size: 0.8rem; word-break: break-word; }
+    pre.payload { margin: 0; max-height: 220px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+  </style>
+</head>
+<body>
+  <h1>Respuestas API (ml_topic_fetches)</h1>
+  <p class="lead">${rows.length} registro(s). Activa <code>ML_WEBHOOK_FETCH_RESOURCE=1</code> y registra cuentas en <code>ml_accounts</code>. JSON: <code>?format=json</code>.</p>
+  <table>
+    <thead><tr><th>id</th><th>fetched_at</th><th>user_id</th><th>topic</th><th>request_path</th><th>http</th><th>error</th><th>payload</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="8">No hay fetches guardados.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
     let body;
     try {
@@ -493,13 +716,18 @@ const server = http.createServer(async (req, res) => {
 
     logWebhook(body, req);
 
+    scheduleTopicFetchFromWebhook(body);
+
     if (
+      !ML_WEBHOOK_FETCH_RESOURCE &&
       process.env.ML_WEBHOOK_FETCH_ORDER === "1" &&
       body.user_id &&
       body.resource
     ) {
       setImmediate(() => {
-        mercadoLibreGetForUser(body.user_id, body.resource).catch((e) =>
+        const path = normalizeMlResourcePath(body.topic, String(body.resource));
+        if (!path) return;
+        mercadoLibreGetForUser(body.user_id, path).catch((e) =>
           console.error("[ml] API cuenta user_id=%s: %s", body.user_id, e.message)
         );
       });
@@ -695,6 +923,12 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Cuentas ML: GET|POST|DELETE http://localhost:${PORT}/admin/ml-accounts (cabecera X-Admin-Secret)`);
     console.log(`Cuentas (navegador): http://localhost:${PORT}/cuentas?k=TU_ADMIN_SECRET`);
     console.log(`Hooks guardados: http://localhost:${PORT}/hooks?k=TU_ADMIN_SECRET`);
+    console.log(`Fetches ML: http://localhost:${PORT}/fetches?k=TU_ADMIN_SECRET (ML_WEBHOOK_FETCH_RESOURCE=1)`);
+  } else {
+    console.warn(
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches responderán 503. " +
+        "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
+    );
   }
   console.log(`Token (enmascarado): GET http://localhost:${PORT}/oauth/token-status`);
 });

@@ -1,8 +1,12 @@
 require("./load-env-local");
+const { ensureMlCookiesDir } = require("./ml-cookies-path");
+ensureMlCookiesDir();
 const http = require("http");
 const pkg = require("./package.json");
 const { extractSkuTitleFromMlResponse } = require("./ml-payload-extract");
+const { extractOrderIdFromOrder } = require("./ml-pack-extract");
 const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
+const { fetchVentasDetalleAndStore } = require("./ml-ventas-detalle-fetch");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
@@ -33,6 +37,7 @@ const {
   updatePostSaleMessage,
   deletePostSaleMessage,
   listPostSaleAutoSendLog,
+  listMlVentasDetalleWeb,
   getMlAccount,
   deletePostSaleSent,
 } = require("./db");
@@ -43,6 +48,8 @@ const REG_PATH = process.env.REG_PATH || "/reg";
 const WEBHOOK_SAVE_DB = process.env.WEBHOOK_SAVE_DB === "1";
 /** GET al resource del webhook y guarda respuesta en tabla ml_topic_fetches (requiere cuenta en ml_accounts). */
 const ML_WEBHOOK_FETCH_RESOURCE = process.env.ML_WEBHOOK_FETCH_RESOURCE === "1";
+/** Tras GET orden OK: GET HTML ventas/.../detalle con cookies (.txt) y guarda en ml_ventas_detalle_web. */
+const ML_WEBHOOK_FETCH_VENTAS_DETALLE = process.env.ML_WEBHOOK_FETCH_VENTAS_DETALLE === "1";
 
 function matchesRegPath(pathname) {
   if (pathname === REG_PATH) return true;
@@ -72,6 +79,10 @@ function isPostSaleMessagesPath(pathname) {
 
 function isPostSaleEnviosPath(pathname) {
   return pathname === "/envios-postventa" || pathname === "/envios-postventa/";
+}
+
+function isVentasDetalleWebPath(pathname) {
+  return pathname === "/ventas-detalle-web" || pathname === "/ventas-detalle-web/";
 }
 
 function rejectIngestSecret(req, res) {
@@ -326,6 +337,21 @@ function scheduleTopicFetchFromWebhook(body) {
                 }).catch((e) => console.error("[post-sale]", e.message));
               });
             }
+            if (
+              result.ok &&
+              ML_WEBHOOK_FETCH_VENTAS_DETALLE &&
+              topic &&
+              (topic === "orders_v2" || String(topic).startsWith("orders"))
+            ) {
+              const ventasOrderId = extractOrderIdFromOrder(parsed);
+              if (ventasOrderId) {
+                setImmediate(() => {
+                  fetchVentasDetalleAndStore({ mlUserId, orderId: ventasOrderId }).catch((e) =>
+                    console.error("[ventas-detalle]", e.message)
+                  );
+                });
+              }
+            }
           }
         }
 
@@ -406,6 +432,10 @@ const server = http.createServer(async (req, res) => {
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=orders_v2,messages (tras fetch OK; usa id de orden; texto max 350)",
         log_envios_postventa:
           "GET /envios-postventa?k=ADMIN_SECRET (historial). POST /envios-postventa/retry?k=… JSON {order_id,ml_user_id,buyer_id?} opcional force, topic",
+        cookies_ml_web:
+          "ML_COOKIES_DIR: carpeta con cookies por cuenta ({ml_user_id}.txt). Por defecto carpeta data/ (ignorada en git).",
+        ventas_detalle_web:
+          "ML_WEBHOOK_FETCH_VENTAS_DETALLE=1 + ML_WEBHOOK_FETCH_RESOURCE=1: GET HTML ventas/.../detalle (.ve) con cookies Netscape; tabla ml_ventas_detalle_web. GET /ventas-detalle-web?k=ADMIN_SECRET",
       })
     );
     return;
@@ -1155,6 +1185,89 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Snapshots GET detalle ventas .ve (HTML en ml_ventas_detalle_web). */
+  if (req.method === "GET" && isVentasDetalleWebPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Ventas detalle</title><p>Define <code>ADMIN_SECRET</code>.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Ventas detalle</title><p>Acceso denegado.</p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    let rows;
+    try {
+      rows = listMlVentasDetalleWeb(lim, 500);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, count: rows.length, items: rows }));
+      return;
+    }
+    const tableRows = rows
+      .map((r) => {
+        const prev =
+          r.body_preview && r.body_preview.length > 200
+            ? `${escapeHtml(r.body_preview.slice(0, 200))}…`
+            : escapeHtml(r.body_preview);
+        return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td class="muted">${escapeHtml(r.created_at)}</td>
+  <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.order_id)}</td>
+  <td class="muted">${escapeHtml(r.request_url)}</td>
+  <td>${escapeHtml(r.http_status)}</td>
+  <td>${escapeHtml(r.body_len)}</td>
+  <td>${escapeHtml(r.error)}</td>
+  <td><pre class="payload">${prev || "—"}</pre></td>
+</tr>`;
+      })
+      .join("");
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Detalle ventas web ML</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 1400px; margin-top: 1rem; font-size: 0.78rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.72rem; word-break: break-all; }
+    pre.payload { margin: 0; max-height: 120px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+  </style>
+</head>
+<body>
+  <h1>GET detalle ventas (.ve) con cookies</h1>
+  <p class="lead">Tabla <code>ml_ventas_detalle_web</code> · HTML guardado al recibir orden (<code>ML_WEBHOOK_FETCH_VENTAS_DETALLE=1</code>). ${rows.length} fila(s). JSON: <code>?format=json</code>.</p>
+  <table>
+    <thead><tr><th>id</th><th>created_at</th><th>user_id</th><th>order_id</th><th>url</th><th>http</th><th>body_len</th><th>error</th><th>body preview</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="9">Sin registros.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
     let body;
     try {
@@ -1383,9 +1496,10 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
     console.log(`Log envíos post-venta: http://localhost:${PORT}/envios-postventa?k=TU_ADMIN_SECRET`);
+    console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

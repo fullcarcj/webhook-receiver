@@ -83,6 +83,19 @@ db.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS ml_ventas_detalle_web (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    ml_user_id INTEGER NOT NULL,
+    order_id INTEGER NOT NULL,
+    request_url TEXT NOT NULL,
+    http_status INTEGER,
+    body TEXT,
+    error TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_ventas_detalle_user_order ON ml_ventas_detalle_web(ml_user_id, order_id);
+  CREATE INDEX IF NOT EXISTS idx_ventas_detalle_created ON ml_ventas_detalle_web(created_at);
 `);
 
 (function migratePostSalePackIdToOrderId() {
@@ -449,6 +462,41 @@ function listPostSaleAutoSendLog(limit, maxAllowed) {
     .all(n);
 }
 
+const insertMlVentasDetalleWebStmt = db.prepare(
+  `INSERT INTO ml_ventas_detalle_web (
+     created_at, ml_user_id, order_id, request_url, http_status, body, error
+   ) VALUES (
+     @created_at, @ml_user_id, @order_id, @request_url, @http_status, @body, @error
+   )`
+);
+
+function insertMlVentasDetalleWeb(row) {
+  const info = insertMlVentasDetalleWebStmt.run({
+    created_at: row.created_at || new Date().toISOString(),
+    ml_user_id: Number(row.ml_user_id),
+    order_id: Number(row.order_id),
+    request_url: String(row.request_url).slice(0, 4000),
+    http_status: row.http_status != null ? Number(row.http_status) : null,
+    body: row.body != null ? String(row.body) : null,
+    error: row.error != null ? String(row.error).slice(0, 4000) : null,
+  });
+  return Number(info.lastInsertRowid);
+}
+
+function listMlVentasDetalleWeb(limit, maxAllowed) {
+  const cap = maxAllowed != null ? maxAllowed : 500;
+  const n = Math.min(Math.max(Number(limit) || 50, 1), cap);
+  return db
+    .prepare(
+      `SELECT id, created_at, ml_user_id, order_id, request_url, http_status,
+              LENGTH(body) AS body_len,
+              CASE WHEN body IS NULL THEN NULL ELSE SUBSTR(body, 1, 400) END AS body_preview,
+              error
+       FROM ml_ventas_detalle_web ORDER BY id DESC LIMIT ?`
+    )
+    .all(n);
+}
+
 module.exports = {
   insertWebhook,
   listWebhooks,
@@ -474,4 +522,6 @@ module.exports = {
   deletePostSaleSent,
   insertPostSaleAutoSendLog,
   listPostSaleAutoSendLog,
+  insertMlVentasDetalleWeb,
+  listMlVentasDetalleWeb,
 };

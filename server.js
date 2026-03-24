@@ -33,6 +33,10 @@ function isCuentasPath(pathname) {
   return pathname === "/cuentas" || pathname === "/cuentas/";
 }
 
+function isHooksPath(pathname) {
+  return pathname === "/hooks" || pathname === "/hooks/";
+}
+
 function rejectIngestSecret(req, res) {
   const secret = process.env.INGEST_SECRET;
   if (!secret) return false;
@@ -177,6 +181,8 @@ const server = http.createServer(async (req, res) => {
           "GET /oauth/token-status  o  ?ml_user_id=  (token enmascarado, sin secreto completo)",
         cuentas_ml:
           "GET /cuentas?k=ADMIN_SECRET (lista cuentas; mismo valor que variable ADMIN_SECRET)",
+        hooks_recibidos:
+          "GET /hooks?k=ADMIN_SECRET (webhooks guardados en DB; activar WEBHOOK_SAVE_DB o POST /reg)",
       })
     );
     return;
@@ -399,6 +405,82 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Webhooks guardados en SQLite (misma clave ADMIN_SECRET que /cuentas). */
+  if (req.method === "GET" && isHooksPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Hooks</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Hooks</title><p>Acceso denegado. Usa <code>/hooks?k=TU_CLAVE</code> (misma que <code>ADMIN_SECRET</code>).</p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    let items;
+    try {
+      items = listWebhooks(lim, 2000);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, count: items.length, items }));
+      return;
+    }
+    const hookRows = items
+      .map((row) => {
+        const js = escapeHtml(JSON.stringify(row.data, null, 2));
+        return `<tr>
+  <td>${escapeHtml(row.id)}</td>
+  <td class="muted">${escapeHtml(row.received_at)}</td>
+  <td>${escapeHtml(row.topic)}</td>
+  <td>${escapeHtml(row.resource)}</td>
+  <td><pre class="payload">${js}</pre></td>
+</tr>`;
+      })
+      .join("");
+    const hooksHtml = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Webhooks recibidos</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 1200px; margin-top: 1rem; font-size: 0.85rem; }
+    th, td { border: 1px solid #38444d; padding: 0.45rem 0.55rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.8rem; }
+    pre.payload { margin: 0; max-height: 220px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+  </style>
+</head>
+<body>
+  <h1>Webhooks guardados</h1>
+  <p class="lead">${items.length} registro(s). Solo aparecen los que se guardaron (POST a <code>/reg</code> o <code>WEBHOOK_SAVE_DB=1</code> en <code>/webhook</code>). Parametro <code>limit</code> (max 2000).</p>
+  <table>
+    <thead><tr><th>id</th><th>Recibido</th><th>topic</th><th>resource</th><th>JSON</th></tr></thead>
+    <tbody>${hookRows || '<tr><td colspan="5">No hay webhooks en la base.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(hooksHtml);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
     let body;
     try {
@@ -612,6 +694,7 @@ server.listen(PORT, "0.0.0.0", () => {
   if (process.env.ADMIN_SECRET) {
     console.log(`Cuentas ML: GET|POST|DELETE http://localhost:${PORT}/admin/ml-accounts (cabecera X-Admin-Secret)`);
     console.log(`Cuentas (navegador): http://localhost:${PORT}/cuentas?k=TU_ADMIN_SECRET`);
+    console.log(`Hooks guardados: http://localhost:${PORT}/hooks?k=TU_ADMIN_SECRET`);
   }
   console.log(`Token (enmascarado): GET http://localhost:${PORT}/oauth/token-status`);
 });

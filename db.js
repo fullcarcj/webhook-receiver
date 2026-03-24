@@ -50,8 +50,9 @@ function insertWebhook(payloadObj) {
   return Number(info.lastInsertRowid);
 }
 
-function listWebhooks(limit) {
-  const n = Math.min(Math.max(Number(limit) || 50, 1), 500);
+function listWebhooks(limit, maxAllowed) {
+  const cap = maxAllowed != null ? maxAllowed : 500;
+  const n = Math.min(Math.max(Number(limit) || 50, 1), cap);
   const rows = db
     .prepare(
       `SELECT id, received_at, payload, topic, resource

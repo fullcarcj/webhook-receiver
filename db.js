@@ -53,7 +53,35 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_ml_buyers_updated ON ml_buyers(updated_at);
+
+  CREATE TABLE IF NOT EXISTS post_sale_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT 'Predeterminado',
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
 `);
+
+const DEFAULT_POST_SALE_BODY = `TELÉFONOS:  04241394269   04242701513  Atiende DIEGO / DANIEL / CESAR
+
+DIRECCIÓN: Calle Coromoto a una cuadra de la salida del CC El Recreo, Qta Cruz Maria, Urbanizacion Bello Monte Tocar el timbre.
+
+HORARIO  Lunes a Viernes Corrido de 8:00 am a 5:00 pm. Sábado 9AM - 4 PM.
+
+ENVÍO GRATIS - ZOOM (SE COLOCAN A LAS 3 PM) PEDIDOS YA Y YUMMI MAS DE 10$
+
+NO Ofertar Varias veces por favor`;
+
+(function seedPostSaleMessagesIfEmpty() {
+  const row = db.prepare("SELECT COUNT(*) AS c FROM post_sale_messages").get();
+  if (row && row.c === 0) {
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO post_sale_messages (name, body, created_at, updated_at) VALUES (?, ?, ?, ?)`
+    ).run("Predeterminado", DEFAULT_POST_SALE_BODY, now, now);
+  }
+})();
 
 (function migrateMlTopicFetchesSkuTitle() {
   const cols = db.prepare("PRAGMA table_info(ml_topic_fetches)").all();
@@ -246,6 +274,57 @@ function listMlBuyers(limit, maxAllowed) {
     .all(n);
 }
 
+const insertPostSaleMessageStmt = db.prepare(
+  `INSERT INTO post_sale_messages (name, body, created_at, updated_at)
+   VALUES (@name, @body, @created_at, @updated_at)`
+);
+
+function getPostSaleMessage(id) {
+  return db
+    .prepare(`SELECT id, name, body, created_at, updated_at FROM post_sale_messages WHERE id = ?`)
+    .get(id);
+}
+
+function listPostSaleMessages() {
+  return db
+    .prepare(`SELECT id, name, body, created_at, updated_at FROM post_sale_messages ORDER BY id ASC`)
+    .all();
+}
+
+function insertPostSaleMessage(row) {
+  const now = new Date().toISOString();
+  const name =
+    row.name != null && String(row.name).trim() !== "" ? String(row.name).trim() : "Sin nombre";
+  const body = row.body != null ? String(row.body) : "";
+  const info = insertPostSaleMessageStmt.run({
+    name,
+    body,
+    created_at: now,
+    updated_at: now,
+  });
+  return Number(info.lastInsertRowid);
+}
+
+function updatePostSaleMessage(id, row) {
+  const existing = getPostSaleMessage(id);
+  if (!existing) return 0;
+  const now = new Date().toISOString();
+  const name =
+    row.name !== undefined
+      ? String(row.name).trim() !== ""
+        ? String(row.name).trim()
+        : existing.name
+      : existing.name;
+  const body = row.body !== undefined ? String(row.body) : existing.body;
+  return db
+    .prepare(`UPDATE post_sale_messages SET name = ?, body = ?, updated_at = ? WHERE id = ?`)
+    .run(name, body, now, id).changes;
+}
+
+function deletePostSaleMessage(id) {
+  return db.prepare(`DELETE FROM post_sale_messages WHERE id = ?`).run(id).changes;
+}
+
 module.exports = {
   insertWebhook,
   listWebhooks,
@@ -260,4 +339,9 @@ module.exports = {
   listDistinctFetchTopics,
   upsertMlBuyer,
   listMlBuyers,
+  getPostSaleMessage,
+  listPostSaleMessages,
+  insertPostSaleMessage,
+  updatePostSaleMessage,
+  deletePostSaleMessage,
 };

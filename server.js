@@ -4,6 +4,7 @@ const pkg = require("./package.json");
 const { extractSkuTitleFromMlResponse } = require("./ml-payload-extract");
 const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
+const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
 const {
   getAccessToken,
   getAccessTokenForMlUser,
@@ -26,6 +27,10 @@ const {
   listDistinctFetchTopics,
   upsertMlBuyer,
   listMlBuyers,
+  listPostSaleMessages,
+  insertPostSaleMessage,
+  updatePostSaleMessage,
+  deletePostSaleMessage,
   getMlAccount,
 } = require("./db");
 
@@ -56,6 +61,10 @@ function isFetchesPath(pathname) {
 
 function isBuyersPath(pathname) {
   return pathname === "/buyers" || pathname === "/buyers/";
+}
+
+function isPostSaleMessagesPath(pathname) {
+  return pathname === "/mensajes-postventa" || pathname === "/mensajes-postventa/";
 }
 
 function rejectIngestSecret(req, res) {
@@ -140,6 +149,17 @@ function escapeHtml(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+/** Atributos HTML y contenido de textarea (no convierte vacío en —). */
+function escapeAttr(s) {
+  if (s == null || s === undefined) return "";
+  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+function escapeTextareaContent(s) {
+  if (s == null || s === undefined) return "";
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function tryParseJson(s) {
@@ -363,6 +383,8 @@ const server = http.createServer(async (req, res) => {
           "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1)",
         buyers_ml:
           "GET /buyers?k=ADMIN_SECRET (compradores desde orders_v2; ML_WEBHOOK_FETCH_RESOURCE=1)",
+        mensajes_postventa:
+          "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
       })
     );
     return;
@@ -867,6 +889,109 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Plantillas de mensajes post-venta (post_sale_messages). */
+  if (isPostSaleMessagesPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Mensajes</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Mensajes</title><p>Acceso denegado. Usa <code>/mensajes-postventa?k=TU_CLAVE</code>.</p>"
+      );
+      return;
+    }
+
+    if (req.method === "DELETE") {
+      const id = Number(url.searchParams.get("id"));
+      if (!Number.isFinite(id) || id <= 0) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "usa ?id=NUMERO" }));
+        return;
+      }
+      try {
+        const deleted = deletePostSaleMessage(id);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, deleted: deleted > 0 }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    if (req.method === "POST") {
+      let body;
+      try {
+        body = await parseJsonBody(req);
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        return;
+      }
+      try {
+        if (body.id != null && body.id !== "") {
+          const id = Number(body.id);
+          if (!Number.isFinite(id) || id <= 0) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "id invalido" }));
+            return;
+          }
+          const ch = updatePostSaleMessage(id, { name: body.name, body: body.body });
+          if (ch === 0) {
+            res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "no encontrado" }));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, id }));
+          return;
+        }
+        const newId = insertPostSaleMessage({ name: body.name, body: body.body });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, id: newId }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    if (req.method === "GET") {
+      let rows;
+      try {
+        rows = listPostSaleMessages();
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+        return;
+      }
+      if (url.searchParams.get("format") === "json") {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, count: rows.length, items: rows }));
+        return;
+      }
+      const html = renderPostSaleMessagesPage(rows, {
+        escapeHtml,
+        escapeAttr,
+        escapeTextareaContent,
+      });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
+      return;
+    }
+
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "metodo no permitido" }));
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
     let body;
     try {
@@ -1088,9 +1213,10 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Hooks guardados: http://localhost:${PORT}/hooks?k=TU_ADMIN_SECRET`);
     console.log(`Fetches ML: http://localhost:${PORT}/fetches?k=TU_ADMIN_SECRET (ML_WEBHOOK_FETCH_RESOURCE=1)`);
     console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
+    console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

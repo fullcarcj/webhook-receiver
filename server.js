@@ -1,6 +1,8 @@
 require("./load-env-local");
 const http = require("http");
 const pkg = require("./package.json");
+const { extractSkuTitleFromMlResponse } = require("./ml-payload-extract");
+const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const {
   getAccessToken,
   getAccessTokenForMlUser,
@@ -20,6 +22,7 @@ const {
   deleteMlAccount,
   insertTopicFetch,
   listTopicFetches,
+  listDistinctFetchTopics,
   getMlAccount,
 } = require("./db");
 
@@ -213,6 +216,8 @@ function scheduleTopicFetchFromWebhook(body) {
             notification_id: notifId,
             payload: null,
             error: `No hay cuenta en ml_accounts para user_id=${mlUserId}`,
+            sku: null,
+            title: null,
           });
           console.error("[ml fetch] sin cuenta ml_user_id=%s", mlUserId);
           return;
@@ -230,6 +235,8 @@ function scheduleTopicFetchFromWebhook(body) {
             notification_id: notifId,
             payload: null,
             error: "resource vacío o inválido",
+            sku: null,
+            title: null,
           });
           return;
         }
@@ -246,6 +253,24 @@ function scheduleTopicFetchFromWebhook(body) {
           ? null
           : (result.rawText || `HTTP ${result.status}`).slice(0, 4000);
 
+        let sku = null;
+        let title = null;
+        if (result.ok && result.data != null) {
+          let parsed = result.data;
+          if (typeof parsed === "string") {
+            try {
+              parsed = JSON.parse(parsed);
+            } catch {
+              parsed = null;
+            }
+          }
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const extracted = extractSkuTitleFromMlResponse(topic, parsed);
+            sku = extracted.sku;
+            title = extracted.title;
+          }
+        }
+
         insertTopicFetch({
           ml_user_id: mlUserId,
           topic,
@@ -256,6 +281,8 @@ function scheduleTopicFetchFromWebhook(body) {
           notification_id: notifId,
           payload: payloadStr,
           error: errMsg,
+          sku,
+          title,
         });
         if (!result.ok) {
           console.error(
@@ -280,6 +307,8 @@ function scheduleTopicFetchFromWebhook(body) {
             notification_id: notifId,
             payload: null,
             error: e.message || String(e),
+            sku: null,
+            title: null,
           });
         } catch (dbErr) {
           console.error("[ml fetch] DB:", dbErr.message);
@@ -310,7 +339,7 @@ const server = http.createServer(async (req, res) => {
         hooks_recibidos:
           "GET /hooks?k=ADMIN_SECRET (webhooks guardados en DB; activar WEBHOOK_SAVE_DB o POST /reg)",
         topic_fetches_ml:
-          "GET /fetches?k=ADMIN_SECRET (respuestas API guardadas; activar ML_WEBHOOK_FETCH_RESOURCE=1)",
+          "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1)",
       })
     );
     return;
@@ -628,9 +657,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const lim = url.searchParams.get("limit");
+    const rawTopic = url.searchParams.get("topic");
+    const topicFilter =
+      rawTopic != null && String(rawTopic).trim() !== "" ? String(rawTopic).trim() : null;
+    let topicsInDb = [];
     let rows;
     try {
-      rows = listTopicFetches(lim, 2000);
+      topicsInDb = listDistinctFetchTopics();
+      rows = await enrichNicknameForFetches(listTopicFetches(lim, 2000, topicFilter));
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -640,19 +674,42 @@ const server = http.createServer(async (req, res) => {
       const items = rows.map((r) => ({
         id: r.id,
         ml_user_id: r.ml_user_id,
+        nickname: r.nickname,
         topic: r.topic,
         resource: r.resource,
         request_path: r.request_path,
         http_status: r.http_status,
         fetched_at: r.fetched_at,
         notification_id: r.notification_id,
+        sku: r.sku,
+        title: r.title,
         error: r.error,
         data: r.payload ? tryParseJson(r.payload) : null,
       }));
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, count: items.length, items }));
+      res.end(
+        JSON.stringify({
+          ok: true,
+          topic_filter: topicFilter,
+          topics_in_db: topicsInDb,
+          count: items.length,
+          items,
+        })
+      );
       return;
     }
+    const kEnc = encodeURIComponent(adminSecret);
+    const baseFetchesUrl = `/fetches?k=${kEnc}`;
+    const topicFilterLinks = (() => {
+      const parts = [`<a href="${baseFetchesUrl}">Todos los topics</a>`];
+      for (const t of topicsInDb) {
+        const active = topicFilter === t ? ' class="active"' : "";
+        parts.push(
+          `<a${active} href="${baseFetchesUrl}&topic=${encodeURIComponent(t)}">${escapeHtml(t)}</a>`
+        );
+      }
+      return parts.join(" · ");
+    })();
     const tableRows = rows
       .map((r) => {
         const payloadPreview = r.payload
@@ -663,7 +720,10 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.id)}</td>
   <td class="muted">${escapeHtml(r.fetched_at)}</td>
   <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.nickname)}</td>
   <td>${escapeHtml(r.topic)}</td>
+  <td>${escapeHtml(r.sku)}</td>
+  <td>${escapeHtml(r.title)}</td>
   <td>${escapeHtml(r.request_path)}</td>
   <td>${escapeHtml(r.http_status)}</td>
   <td>${errCell}</td>
@@ -688,14 +748,19 @@ const server = http.createServer(async (req, res) => {
     .muted { color: #8b98a5; font-size: 0.8rem; }
     .err { color: #f4212e; font-size: 0.8rem; word-break: break-word; }
     pre.payload { margin: 0; max-height: 220px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+    .topic-filters { margin-top: 0.75rem; font-size: 0.9rem; line-height: 1.6; }
+    .topic-filters a { color: #1d9bf0; text-decoration: none; }
+    .topic-filters a:hover { text-decoration: underline; }
+    .topic-filters a.active { font-weight: 600; color: #e7e9ea; }
   </style>
 </head>
 <body>
   <h1>Respuestas API (ml_topic_fetches)</h1>
-  <p class="lead">${rows.length} registro(s). Activa <code>ML_WEBHOOK_FETCH_RESOURCE=1</code> y registra cuentas en <code>ml_accounts</code>. JSON: <code>?format=json</code>.</p>
+  <p class="lead">${rows.length} registro(s)${topicFilter ? ` · filtro: <code>${escapeHtml(topicFilter)}</code>` : ""}. Orden: <strong>por topic</strong> (A→Z), dentro de cada topic el <strong>id</strong> más reciente primero. SKU/título: <code>orders_v2</code> / <code>items</code>. JSON: <code>?format=json</code>.</p>
+  <p class="topic-filters">${topicFilterLinks}</p>
   <table>
-    <thead><tr><th>id</th><th>fetched_at</th><th>user_id</th><th>topic</th><th>request_path</th><th>http</th><th>error</th><th>payload</th></tr></thead>
-    <tbody>${tableRows || '<tr><td colspan="8">No hay fetches guardados.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>fetched_at</th><th>user_id</th><th>nickname</th><th>topic</th><th>sku</th><th>title</th><th>request_path</th><th>http</th><th>error</th><th>payload</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="11">No hay fetches guardados.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

@@ -36,12 +36,25 @@ db.exec(`
     fetched_at TEXT NOT NULL,
     notification_id TEXT,
     payload TEXT,
-    error TEXT
+    error TEXT,
+    sku TEXT,
+    title TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_ml_topic_fetches_user ON ml_topic_fetches(ml_user_id);
   CREATE INDEX IF NOT EXISTS idx_ml_topic_fetches_topic ON ml_topic_fetches(topic);
   CREATE INDEX IF NOT EXISTS idx_ml_topic_fetches_fetched ON ml_topic_fetches(fetched_at);
 `);
+
+(function migrateMlTopicFetchesSkuTitle() {
+  const cols = db.prepare("PRAGMA table_info(ml_topic_fetches)").all();
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has("sku")) {
+    db.exec("ALTER TABLE ml_topic_fetches ADD COLUMN sku TEXT");
+  }
+  if (!names.has("title")) {
+    db.exec("ALTER TABLE ml_topic_fetches ADD COLUMN title TEXT");
+  }
+})();
 
 const insertStmt = db.prepare(
   `INSERT INTO webhook_events (received_at, payload, topic, resource)
@@ -130,10 +143,10 @@ function deleteMlAccount(mlUserId) {
 const insertTopicFetchStmt = db.prepare(
   `INSERT INTO ml_topic_fetches (
      ml_user_id, topic, resource, request_path, http_status, fetched_at,
-     notification_id, payload, error
+     notification_id, payload, error, sku, title
    ) VALUES (
      @ml_user_id, @topic, @resource, @request_path, @http_status, @fetched_at,
-     @notification_id, @payload, @error
+     @notification_id, @payload, @error, @sku, @title
    )`
 );
 
@@ -148,20 +161,46 @@ function insertTopicFetch(row) {
     notification_id: row.notification_id != null ? String(row.notification_id) : null,
     payload: row.payload != null ? String(row.payload) : null,
     error: row.error != null ? String(row.error) : null,
+    sku: row.sku != null && row.sku !== "" ? String(row.sku) : null,
+    title: row.title != null && row.title !== "" ? String(row.title) : null,
   });
   return Number(info.lastInsertRowid);
 }
 
-function listTopicFetches(limit, maxAllowed) {
+/**
+ * @param {string} [topicFilter] - Si se indica, solo filas con ese topic (exacto).
+ * Sin filtro: orden por topic (A→Z) y dentro de cada topic por id descendente.
+ */
+function listTopicFetches(limit, maxAllowed, topicFilter) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 50, 1), cap);
+  const tf =
+    topicFilter != null && String(topicFilter).trim() !== ""
+      ? String(topicFilter).trim()
+      : null;
+
+  const selectFrom = `SELECT f.id, f.ml_user_id, f.topic, f.resource, f.request_path, f.http_status, f.fetched_at,
+              f.notification_id, f.payload, f.error, f.sku, f.title,
+              a.nickname AS nickname
+       FROM ml_topic_fetches f
+       LEFT JOIN ml_accounts a ON a.ml_user_id = f.ml_user_id`;
+
+  if (tf) {
+    return db.prepare(`${selectFrom} WHERE f.topic = ? ORDER BY f.id DESC LIMIT ?`).all(tf, n);
+  }
+  return db
+    .prepare(`${selectFrom} ORDER BY COALESCE(f.topic, '') ASC, f.id DESC LIMIT ?`)
+    .all(n);
+}
+
+/** Topics distintos que hay en la tabla (para filtros en /fetches). */
+function listDistinctFetchTopics() {
   return db
     .prepare(
-      `SELECT id, ml_user_id, topic, resource, request_path, http_status, fetched_at,
-              notification_id, payload, error
-       FROM ml_topic_fetches ORDER BY id DESC LIMIT ?`
+      `SELECT DISTINCT topic FROM ml_topic_fetches WHERE topic IS NOT NULL AND TRIM(topic) != '' ORDER BY topic`
     )
-    .all(n);
+    .all()
+    .map((r) => r.topic);
 }
 
 module.exports = {
@@ -175,4 +214,5 @@ module.exports = {
   deleteMlAccount,
   insertTopicFetch,
   listTopicFetches,
+  listDistinctFetchTopics,
 };

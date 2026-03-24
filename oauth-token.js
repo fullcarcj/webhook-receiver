@@ -343,7 +343,7 @@ async function mercadoLibreGetForUser(mlUserId, resourcePath) {
 }
 
 /**
- * POST JSON autenticado (p. ej. mensajes post-venta action_guide).
+ * POST JSON autenticado (p. ej. mensajes post-venta packs/sellers).
  */
 async function mercadoLibrePostJsonForUser(mlUserId, resourcePath, bodyObj) {
   const token = await getAccessTokenForMlUser(mlUserId);

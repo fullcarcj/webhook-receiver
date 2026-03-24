@@ -52,4 +52,41 @@ function extractBuyerFromOrderPayload(data) {
   };
 }
 
-module.exports = { extractBuyerFromOrderPayload };
+/**
+ * Id del comprador para post-venta (orden GET /orders, orden anidada, o hilo de mensajes).
+ * @param {object} data
+ * @param {number} [sellerUserId] — si viene, en payloads `from`/`to` se elige el otro usuario.
+ * @returns {number|null}
+ */
+function extractBuyerIdForPostSale(data, sellerUserId) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const fromOrder = extractBuyerFromOrderPayload(data);
+  if (fromOrder) return fromOrder.buyer_id;
+  if (data.order && typeof data.order === "object") {
+    const nested = extractBuyerFromOrderPayload(data.order);
+    if (nested) return nested.buyer_id;
+  }
+  const sid =
+    sellerUserId != null && Number.isFinite(Number(sellerUserId))
+      ? Number(sellerUserId)
+      : null;
+  if (sid != null && sid > 0) {
+    const fromUid = readParticipantUserId(data.from);
+    const toUidVal = readParticipantUserId(data.to);
+    if (fromUid && toUidVal && fromUid !== toUidVal) {
+      if (fromUid === sid) return toUidVal;
+      if (toUidVal === sid) return fromUid;
+    }
+  }
+  return null;
+}
+
+function readParticipantUserId(part) {
+  if (!part || typeof part !== "object") return null;
+  const raw = part.user_id ?? part.id;
+  if (raw == null) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+module.exports = { extractBuyerFromOrderPayload, extractBuyerIdForPostSale };

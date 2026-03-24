@@ -55,9 +55,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ml_buyers_updated ON ml_buyers(updated_at);
 
   CREATE TABLE IF NOT EXISTS ml_post_sale_sent (
-    pack_id INTEGER PRIMARY KEY,
+    order_id INTEGER PRIMARY KEY,
     sent_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS ml_post_sale_auto_send_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    ml_user_id INTEGER NOT NULL,
+    topic TEXT,
+    notification_id TEXT,
+    order_id INTEGER,
+    outcome TEXT NOT NULL,
+    skip_reason TEXT,
+    http_status INTEGER,
+    option_id TEXT,
+    request_path TEXT,
+    response_body TEXT,
+    error_message TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_ps_auto_log_created ON ml_post_sale_auto_send_log(created_at);
 
   CREATE TABLE IF NOT EXISTS post_sale_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,6 +84,35 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 `);
+
+(function migratePostSalePackIdToOrderId() {
+  try {
+    const t1 = db.prepare("PRAGMA table_info(ml_post_sale_sent)").all();
+    const n1 = new Set(t1.map((c) => c.name));
+    if (n1.has("pack_id") && !n1.has("order_id")) {
+      db.exec("ALTER TABLE ml_post_sale_sent RENAME COLUMN pack_id TO order_id");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_post_sale_sent:", e.message);
+  }
+  try {
+    const t2 = db.prepare("PRAGMA table_info(ml_post_sale_auto_send_log)").all();
+    const n2 = new Set(t2.map((c) => c.name));
+    if (n2.has("pack_id") && !n2.has("order_id")) {
+      db.exec("ALTER TABLE ml_post_sale_auto_send_log RENAME COLUMN pack_id TO order_id");
+      db.exec("DROP INDEX IF EXISTS idx_ps_auto_log_pack");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_post_sale_auto_send_log:", e.message);
+  }
+  try {
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_ps_auto_log_order ON ml_post_sale_auto_send_log(order_id)"
+    );
+  } catch (e) {
+    console.error("[db] idx_ps_auto_log_order:", e.message);
+  }
+})();
 
 /** Máximo alineado con API ML (option OTHER) y UI /mensajes-postventa. */
 const POST_SALE_MESSAGE_BODY_MAX = 350;
@@ -344,16 +390,63 @@ function getFirstPostSaleMessageBody() {
   return row && row.body != null ? String(row.body) : null;
 }
 
-function wasPostSaleSent(packId) {
-  const id = Number(packId);
+function wasPostSaleSent(orderId) {
+  const id = Number(orderId);
   if (!Number.isFinite(id) || id <= 0) return false;
-  return Boolean(db.prepare(`SELECT 1 FROM ml_post_sale_sent WHERE pack_id = ?`).get(id));
+  return Boolean(db.prepare(`SELECT 1 FROM ml_post_sale_sent WHERE order_id = ?`).get(id));
 }
 
-function markPostSaleSent(packId) {
-  const id = Number(packId);
+function markPostSaleSent(orderId) {
+  const id = Number(orderId);
   const now = new Date().toISOString();
-  db.prepare(`INSERT OR REPLACE INTO ml_post_sale_sent (pack_id, sent_at) VALUES (?, ?)`).run(id, now);
+  db.prepare(`INSERT OR REPLACE INTO ml_post_sale_sent (order_id, sent_at) VALUES (?, ?)`).run(id, now);
+}
+
+/** Quita marca de enviado para permitir otro intento (uso con reintento manual). */
+function deletePostSaleSent(orderId) {
+  const id = Number(orderId);
+  if (!Number.isFinite(id) || id <= 0) return 0;
+  return db.prepare(`DELETE FROM ml_post_sale_sent WHERE order_id = ?`).run(id).changes;
+}
+
+const insertPostSaleAutoSendLogStmt = db.prepare(
+  `INSERT INTO ml_post_sale_auto_send_log (
+     created_at, ml_user_id, topic, notification_id, order_id, outcome, skip_reason,
+     http_status, option_id, request_path, response_body, error_message
+   ) VALUES (
+     @created_at, @ml_user_id, @topic, @notification_id, @order_id, @outcome, @skip_reason,
+     @http_status, @option_id, @request_path, @response_body, @error_message
+   )`
+);
+
+function insertPostSaleAutoSendLog(row) {
+  const info = insertPostSaleAutoSendLogStmt.run({
+    created_at: row.created_at || new Date().toISOString(),
+    ml_user_id: row.ml_user_id,
+    topic: row.topic != null ? String(row.topic) : null,
+    notification_id: row.notification_id != null ? String(row.notification_id) : null,
+    order_id: row.order_id != null ? Number(row.order_id) : null,
+    outcome: String(row.outcome),
+    skip_reason: row.skip_reason != null ? String(row.skip_reason).slice(0, 2000) : null,
+    http_status: row.http_status != null ? Number(row.http_status) : null,
+    option_id: row.option_id != null ? String(row.option_id) : null,
+    request_path: row.request_path != null ? String(row.request_path).slice(0, 2000) : null,
+    response_body: row.response_body != null ? String(row.response_body).slice(0, 8000) : null,
+    error_message: row.error_message != null ? String(row.error_message).slice(0, 4000) : null,
+  });
+  return Number(info.lastInsertRowid);
+}
+
+function listPostSaleAutoSendLog(limit, maxAllowed) {
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  return db
+    .prepare(
+      `SELECT id, created_at, ml_user_id, topic, notification_id, order_id, outcome, skip_reason,
+              http_status, option_id, request_path, response_body, error_message
+       FROM ml_post_sale_auto_send_log ORDER BY id DESC LIMIT ?`
+    )
+    .all(n);
 }
 
 module.exports = {
@@ -378,4 +471,7 @@ module.exports = {
   getFirstPostSaleMessageBody,
   wasPostSaleSent,
   markPostSaleSent,
+  deletePostSaleSent,
+  insertPostSaleAutoSendLog,
+  listPostSaleAutoSendLog,
 };

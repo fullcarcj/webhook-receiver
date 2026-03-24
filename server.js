@@ -32,7 +32,9 @@ const {
   insertPostSaleMessage,
   updatePostSaleMessage,
   deletePostSaleMessage,
+  listPostSaleAutoSendLog,
   getMlAccount,
+  deletePostSaleSent,
 } = require("./db");
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -66,6 +68,10 @@ function isBuyersPath(pathname) {
 
 function isPostSaleMessagesPath(pathname) {
   return pathname === "/mensajes-postventa" || pathname === "/mensajes-postventa/";
+}
+
+function isPostSaleEnviosPath(pathname) {
+  return pathname === "/envios-postventa" || pathname === "/envios-postventa/";
 }
 
 function rejectIngestSecret(req, res) {
@@ -397,7 +403,9 @@ const server = http.createServer(async (req, res) => {
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         envio_auto_postventa:
-          "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=orders_v2,messages (tras fetch OK; requiere pack_id; texto max 350)",
+          "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=orders_v2,messages (tras fetch OK; usa id de orden; texto max 350)",
+        log_envios_postventa:
+          "GET /envios-postventa?k=ADMIN_SECRET (historial). POST /envios-postventa/retry?k=… JSON {order_id,ml_user_id,buyer_id?} opcional force, topic",
       })
     );
     return;
@@ -1005,6 +1013,148 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Reintento manual de envío post-venta (misma lógica que el webhook). */
+  if (req.method === "POST" && url.pathname === "/envios-postventa/retry") {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret || k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+      return;
+    }
+    let body;
+    try {
+      body = await parseJsonBody(req);
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+      return;
+    }
+    const mlUserId = Number(body.ml_user_id);
+    const orderId = Number(body.order_id);
+    const buyerIdRaw = body.buyer_id;
+    const buyerId =
+      buyerIdRaw != null && String(buyerIdRaw).trim() !== ""
+        ? Number(buyerIdRaw)
+        : null;
+    const force = body.force === true || body.force === "1";
+    const topic =
+      body.topic && String(body.topic).trim()
+        ? String(body.topic).trim()
+        : "orders_v2";
+    if (!Number.isFinite(mlUserId) || mlUserId <= 0 || !Number.isFinite(orderId) || orderId <= 0) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "ml_user_id y order_id numéricos requeridos" }));
+      return;
+    }
+    if (force) {
+      deletePostSaleSent(orderId);
+    }
+    const retryPayload =
+      buyerId != null && Number.isFinite(buyerId) && buyerId > 0
+        ? { id: orderId, buyer: { id: buyerId } }
+        : { id: orderId };
+    try {
+      const result = await trySendDefaultPostSaleMessage({
+        mlUserId,
+        topic,
+        payload: retryPayload,
+        notificationId: "manual-retry",
+      });
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, result }));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+    }
+    return;
+  }
+
+  /** Historial de intentos de envío automático post-venta (ml_post_sale_auto_send_log). */
+  if (req.method === "GET" && isPostSaleEnviosPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Envíos</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Envíos</title><p>Acceso denegado. Usa <code>/envios-postventa?k=TU_CLAVE</code>.</p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    let rows;
+    try {
+      rows = listPostSaleAutoSendLog(lim, 2000);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, count: rows.length, items: rows }));
+      return;
+    }
+    const tableRows = rows
+      .map((r) => {
+        const prev =
+          r.response_body && r.response_body.length > 160
+            ? `${escapeHtml(r.response_body.slice(0, 160))}…`
+            : escapeHtml(r.response_body);
+        return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td class="muted">${escapeHtml(r.created_at)}</td>
+  <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.topic)}</td>
+  <td>${escapeHtml(r.order_id)}</td>
+  <td>${escapeHtml(r.outcome)}</td>
+  <td>${escapeHtml(r.skip_reason)}</td>
+  <td>${escapeHtml(r.http_status)}</td>
+  <td>${escapeHtml(r.option_id)}</td>
+  <td>${escapeHtml(r.error_message)}</td>
+  <td><pre class="payload">${prev || "—"}</pre></td>
+</tr>`;
+      })
+      .join("");
+    const enviosHtml = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Log envíos post-venta</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 1400px; margin-top: 1rem; font-size: 0.78rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.75rem; }
+    pre.payload { margin: 0; max-height: 100px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+  </style>
+</head>
+<body>
+  <h1>Log envíos automáticos post-venta</h1>
+  <p class="lead">Tabla <code>ml_post_sale_auto_send_log</code> · <code>order_id</code> = id de orden en la URL de mensajería ML. ${rows.length} fila(s). JSON: <code>?format=json</code>. Reintento manual: <code>POST /envios-postventa/retry?k=…</code> con JSON <code>order_id</code>, <code>ml_user_id</code>, opcional <code>buyer_id</code> (comprador), <code>force</code>.</p>
+  <table>
+    <thead><tr><th>id</th><th>created_at</th><th>user_id</th><th>topic</th><th>order_id</th><th>outcome</th><th>skip_reason</th><th>http</th><th>option</th><th>error</th><th>response (preview)</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="11">Sin registros.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(enviosHtml);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
     let body;
     try {
@@ -1232,9 +1382,10 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Fetches ML: http://localhost:${PORT}/fetches?k=TU_ADMIN_SECRET (ML_WEBHOOK_FETCH_RESOURCE=1)`);
     console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
+    console.log(`Log envíos post-venta: http://localhost:${PORT}/envios-postventa?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

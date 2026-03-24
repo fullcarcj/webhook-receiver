@@ -1,5 +1,5 @@
 /**
- * pack_id para mensajería post-venta (action_guide) desde respuestas de la API ML.
+ * Id de orden para mensajería post-venta (ruta ML: .../packs/{id}/option — aquí id = order id).
  */
 
 function toPositiveInt(v) {
@@ -8,19 +8,27 @@ function toPositiveInt(v) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function extractPackIdFromOrder(data) {
+/** Respuesta GET /orders/{id}: id de la orden. */
+function extractOrderIdFromOrder(data) {
   if (!data || typeof data !== "object") return null;
-  return toPositiveInt(data.pack_id ?? data.pack?.id);
+  return toPositiveInt(data.id ?? data.order_id ?? data.pack_id ?? data.pack?.id);
 }
 
-function extractPackIdFromMessage(data) {
+/** Respuesta GET /messages/...: prioriza order_id si viene en el JSON. */
+function extractOrderIdFromMessage(data) {
   if (!data || typeof data !== "object") return null;
   return toPositiveInt(
-    data.pack_id ??
+    data.order_id ??
+      data.order?.id ??
+      data.pack_id ??
       data.pack?.id ??
+      (data.message && data.message.order_id) ??
       (data.message && data.message.pack_id) ??
       data.resource?.pack_id
   );
 }
 
-module.exports = { extractPackIdFromOrder, extractPackIdFromMessage };
+module.exports = {
+  extractOrderIdFromOrder,
+  extractOrderIdFromMessage,
+};

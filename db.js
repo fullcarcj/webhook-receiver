@@ -43,6 +43,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ml_topic_fetches_user ON ml_topic_fetches(ml_user_id);
   CREATE INDEX IF NOT EXISTS idx_ml_topic_fetches_topic ON ml_topic_fetches(topic);
   CREATE INDEX IF NOT EXISTS idx_ml_topic_fetches_fetched ON ml_topic_fetches(fetched_at);
+
+  CREATE TABLE IF NOT EXISTS ml_buyers (
+    buyer_id INTEGER PRIMARY KEY,
+    nickname TEXT,
+    phone_1 TEXT,
+    phone_2 TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_buyers_updated ON ml_buyers(updated_at);
 `);
 
 (function migrateMlTopicFetchesSkuTitle() {
@@ -203,6 +213,39 @@ function listDistinctFetchTopics() {
     .map((r) => r.topic);
 }
 
+const upsertMlBuyerStmt = db.prepare(
+  `INSERT INTO ml_buyers (buyer_id, nickname, phone_1, phone_2, created_at, updated_at)
+   VALUES (@buyer_id, @nickname, @phone_1, @phone_2, @created_at, @updated_at)
+   ON CONFLICT(buyer_id) DO UPDATE SET
+     nickname = COALESCE(NULLIF(excluded.nickname, ''), ml_buyers.nickname),
+     phone_1 = COALESCE(excluded.phone_1, ml_buyers.phone_1),
+     phone_2 = COALESCE(excluded.phone_2, ml_buyers.phone_2),
+     updated_at = excluded.updated_at`
+);
+
+function upsertMlBuyer(row) {
+  const now = new Date().toISOString();
+  upsertMlBuyerStmt.run({
+    buyer_id: row.buyer_id,
+    nickname: row.nickname != null ? String(row.nickname) : null,
+    phone_1: row.phone_1 != null ? String(row.phone_1) : null,
+    phone_2: row.phone_2 != null ? String(row.phone_2) : null,
+    created_at: now,
+    updated_at: now,
+  });
+}
+
+function listMlBuyers(limit, maxAllowed) {
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  return db
+    .prepare(
+      `SELECT buyer_id, nickname, phone_1, phone_2, created_at, updated_at
+       FROM ml_buyers ORDER BY updated_at DESC LIMIT ?`
+    )
+    .all(n);
+}
+
 module.exports = {
   insertWebhook,
   listWebhooks,
@@ -215,4 +258,6 @@ module.exports = {
   insertTopicFetch,
   listTopicFetches,
   listDistinctFetchTopics,
+  upsertMlBuyer,
+  listMlBuyers,
 };

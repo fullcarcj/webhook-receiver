@@ -2,6 +2,7 @@ require("./load-env-local");
 const http = require("http");
 const pkg = require("./package.json");
 const { extractSkuTitleFromMlResponse } = require("./ml-payload-extract");
+const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const {
   getAccessToken,
@@ -23,6 +24,8 @@ const {
   insertTopicFetch,
   listTopicFetches,
   listDistinctFetchTopics,
+  upsertMlBuyer,
+  listMlBuyers,
   getMlAccount,
 } = require("./db");
 
@@ -49,6 +52,10 @@ function isHooksPath(pathname) {
 
 function isFetchesPath(pathname) {
   return pathname === "/fetches" || pathname === "/fetches/";
+}
+
+function isBuyersPath(pathname) {
+  return pathname === "/buyers" || pathname === "/buyers/";
 }
 
 function rejectIngestSecret(req, res) {
@@ -268,6 +275,20 @@ function scheduleTopicFetchFromWebhook(body) {
             const extracted = extractSkuTitleFromMlResponse(topic, parsed);
             sku = extracted.sku;
             title = extracted.title;
+            if (
+              result.ok &&
+              topic &&
+              (topic === "orders_v2" || String(topic).startsWith("orders"))
+            ) {
+              const buyer = extractBuyerFromOrderPayload(parsed);
+              if (buyer) {
+                try {
+                  upsertMlBuyer(buyer);
+                } catch (errBuyer) {
+                  console.error("[ml buyers]", errBuyer.message);
+                }
+              }
+            }
           }
         }
 
@@ -340,6 +361,8 @@ const server = http.createServer(async (req, res) => {
           "GET /hooks?k=ADMIN_SECRET (webhooks guardados en DB; activar WEBHOOK_SAVE_DB o POST /reg)",
         topic_fetches_ml:
           "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1)",
+        buyers_ml:
+          "GET /buyers?k=ADMIN_SECRET (compradores desde orders_v2; ML_WEBHOOK_FETCH_RESOURCE=1)",
       })
     );
     return;
@@ -769,6 +792,81 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Compradores ML (ml_buyers); misma clave ADMIN_SECRET. */
+  if (req.method === "GET" && isBuyersPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Buyers</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Buyers</title><p>Acceso denegado. Usa <code>/buyers?k=TU_CLAVE</code> (misma que <code>ADMIN_SECRET</code>).</p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    let rows;
+    try {
+      rows = listMlBuyers(lim, 2000);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, count: rows.length, items: rows }));
+      return;
+    }
+    const buyerRows = rows
+      .map(
+        (r) => `<tr>
+  <td>${escapeHtml(r.buyer_id)}</td>
+  <td>${escapeHtml(r.nickname)}</td>
+  <td>${escapeHtml(r.phone_1)}</td>
+  <td>${escapeHtml(r.phone_2)}</td>
+  <td class="muted">${escapeHtml(r.created_at)}</td>
+  <td class="muted">${escapeHtml(r.updated_at)}</td>
+</tr>`
+      )
+      .join("");
+    const buyersHtml = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>ML buyers</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 960px; margin-top: 1rem; font-size: 0.85rem; }
+    th, td { border: 1px solid #38444d; padding: 0.45rem 0.55rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <h1>Compradores (ml_buyers)</h1>
+  <p class="lead">${rows.length} registro(s). Se rellenan al guardar fetches de <code>orders_v2</code> (objeto <code>buyer</code> de la API). JSON: <code>?format=json</code>.</p>
+  <table>
+    <thead><tr><th>buyer_id</th><th>nickname</th><th>phone_1</th><th>phone_2</th><th>created_at</th><th>updated_at</th></tr></thead>
+    <tbody>${buyerRows || '<tr><td colspan="6">No hay compradores guardados.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(buyersHtml);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === WEBHOOK_PATH) {
     let body;
     try {
@@ -989,6 +1087,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Cuentas (navegador): http://localhost:${PORT}/cuentas?k=TU_ADMIN_SECRET`);
     console.log(`Hooks guardados: http://localhost:${PORT}/hooks?k=TU_ADMIN_SECRET`);
     console.log(`Fetches ML: http://localhost:${PORT}/fetches?k=TU_ADMIN_SECRET (ML_WEBHOOK_FETCH_RESOURCE=1)`);
+    console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
       "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches responderán 503. " +

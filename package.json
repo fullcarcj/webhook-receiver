@@ -1,0 +1,20 @@
+{
+  "name": "webhook-receiver",
+  "version": "1.0.0",
+  "description": "Receptor de webhooks (orders_v2 y similares)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "exchange-code": "node exchange-auth-code.js",
+    "test-conexion": "node test-conexion.js",
+    "registrar-cuenta": "node registrar-cuenta-ml.js",
+    "ver-token": "node ver-token.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0"
+  }
+}

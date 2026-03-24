@@ -5,6 +5,7 @@ const { extractSkuTitleFromMlResponse } = require("./ml-payload-extract");
 const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
+const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
 const {
   getAccessToken,
   getAccessTokenForMlUser,
@@ -309,6 +310,16 @@ function scheduleTopicFetchFromWebhook(body) {
                 }
               }
             }
+            if (result.ok) {
+              setImmediate(() => {
+                trySendDefaultPostSaleMessage({
+                  mlUserId,
+                  topic,
+                  payload: parsed,
+                  notificationId: notifId,
+                }).catch((e) => console.error("[post-sale]", e.message));
+              });
+            }
           }
         }
 
@@ -385,6 +396,8 @@ const server = http.createServer(async (req, res) => {
           "GET /buyers?k=ADMIN_SECRET (compradores desde orders_v2; ML_WEBHOOK_FETCH_RESOURCE=1)",
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
+        envio_auto_postventa:
+          "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=orders_v2,messages (tras fetch OK; requiere pack_id; texto max 350)",
       })
     );
     return;
@@ -1207,6 +1220,11 @@ server.listen(PORT, "0.0.0.0", () => {
       .catch((e) => console.error("OAuth:", e.message));
   }
   warmAllMlAccountsRefresh();
+  if (process.env.ML_AUTO_SEND_POST_SALE === "1") {
+    console.log(
+      `[post-sale] envío automático ON (ML_AUTO_SEND_TOPICS=${process.env.ML_AUTO_SEND_TOPICS || "orders_v2"})`
+    );
+  }
   if (process.env.ADMIN_SECRET) {
     console.log(`Cuentas ML: GET|POST|DELETE http://localhost:${PORT}/admin/ml-accounts (cabecera X-Admin-Secret)`);
     console.log(`Cuentas (navegador): http://localhost:${PORT}/cuentas?k=TU_ADMIN_SECRET`);

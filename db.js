@@ -54,6 +54,11 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_ml_buyers_updated ON ml_buyers(updated_at);
 
+  CREATE TABLE IF NOT EXISTS ml_post_sale_sent (
+    pack_id INTEGER PRIMARY KEY,
+    sent_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS post_sale_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL DEFAULT 'Predeterminado',
@@ -62,6 +67,14 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 `);
+
+/** Máximo alineado con API ML (option OTHER) y UI /mensajes-postventa. */
+const POST_SALE_MESSAGE_BODY_MAX = 350;
+
+function clipPostSaleBody(s) {
+  const t = s != null ? String(s) : "";
+  return t.length > POST_SALE_MESSAGE_BODY_MAX ? t.slice(0, POST_SALE_MESSAGE_BODY_MAX) : t;
+}
 
 const DEFAULT_POST_SALE_BODY = `TELÉFONOS:  04241394269   04242701513  Atiende DIEGO / DANIEL / CESAR
 
@@ -79,7 +92,7 @@ NO Ofertar Varias veces por favor`;
     const now = new Date().toISOString();
     db.prepare(
       `INSERT INTO post_sale_messages (name, body, created_at, updated_at) VALUES (?, ?, ?, ?)`
-    ).run("Predeterminado", DEFAULT_POST_SALE_BODY, now, now);
+    ).run("Predeterminado", clipPostSaleBody(DEFAULT_POST_SALE_BODY), now, now);
   }
 })();
 
@@ -295,7 +308,7 @@ function insertPostSaleMessage(row) {
   const now = new Date().toISOString();
   const name =
     row.name != null && String(row.name).trim() !== "" ? String(row.name).trim() : "Sin nombre";
-  const body = row.body != null ? String(row.body) : "";
+  const body = clipPostSaleBody(row.body != null ? String(row.body) : "");
   const info = insertPostSaleMessageStmt.run({
     name,
     body,
@@ -315,7 +328,8 @@ function updatePostSaleMessage(id, row) {
         ? String(row.name).trim()
         : existing.name
       : existing.name;
-  const body = row.body !== undefined ? String(row.body) : existing.body;
+  const body =
+    row.body !== undefined ? clipPostSaleBody(String(row.body)) : existing.body;
   return db
     .prepare(`UPDATE post_sale_messages SET name = ?, body = ?, updated_at = ? WHERE id = ?`)
     .run(name, body, now, id).changes;
@@ -323,6 +337,23 @@ function updatePostSaleMessage(id, row) {
 
 function deletePostSaleMessage(id) {
   return db.prepare(`DELETE FROM post_sale_messages WHERE id = ?`).run(id).changes;
+}
+
+function getFirstPostSaleMessageBody() {
+  const row = db.prepare(`SELECT body FROM post_sale_messages ORDER BY id ASC LIMIT 1`).get();
+  return row && row.body != null ? String(row.body) : null;
+}
+
+function wasPostSaleSent(packId) {
+  const id = Number(packId);
+  if (!Number.isFinite(id) || id <= 0) return false;
+  return Boolean(db.prepare(`SELECT 1 FROM ml_post_sale_sent WHERE pack_id = ?`).get(id));
+}
+
+function markPostSaleSent(packId) {
+  const id = Number(packId);
+  const now = new Date().toISOString();
+  db.prepare(`INSERT OR REPLACE INTO ml_post_sale_sent (pack_id, sent_at) VALUES (?, ?)`).run(id, now);
 }
 
 module.exports = {
@@ -344,4 +375,7 @@ module.exports = {
   insertPostSaleMessage,
   updatePostSaleMessage,
   deletePostSaleMessage,
+  getFirstPostSaleMessageBody,
+  wasPostSaleSent,
+  markPostSaleSent,
 };

@@ -342,6 +342,41 @@ async function mercadoLibreGetForUser(mlUserId, resourcePath) {
   return mercadoLibreGetWithToken(() => getAccessTokenForMlUser(mlUserId), resourcePath);
 }
 
+/**
+ * POST JSON autenticado (p. ej. mensajes post-venta action_guide).
+ */
+async function mercadoLibrePostJsonForUser(mlUserId, resourcePath, bodyObj) {
+  const token = await getAccessTokenForMlUser(mlUserId);
+  const base = process.env.ML_API_BASE || "https://api.mercadolibre.com";
+  const path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
+  const url = `${base}${path}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(bodyObj),
+  });
+  const text = await res.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+  return {
+    ok: res.ok,
+    status: res.status,
+    path,
+    url,
+    data,
+    rawText: text,
+  };
+}
+
 readTokenFile();
 if (process.env.OAUTH_REFRESH_TOKEN || process.env.ML_REFRESH_TOKEN) {
   cache.refresh_token =
@@ -392,6 +427,7 @@ module.exports = {
   mercadoLibreGet,
   mercadoLibreGetForUser,
   mercadoLibreFetchForUser,
+  mercadoLibrePostJsonForUser,
   normalizeMlResourcePath,
   getTokenStatus,
   getTokenStatusForMlUser,

@@ -3,11 +3,9 @@ const path = require("path");
 
 const Database = require("better-sqlite3");
 
+// Por defecto ./data (incl. Render). Para disco persistente: DB_PATH=/var/data/webhooks.db y disco montado en /var/data.
 const dbPath =
-  process.env.DB_PATH ||
-  (process.env.RENDER
-    ? path.join("/var/data", "webhooks.db")
-    : path.join(__dirname, "data", "webhooks.db"));
+  process.env.DB_PATH || path.join(__dirname, "data", "webhooks.db");
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
 const db = new Database(dbPath);
@@ -444,6 +442,11 @@ function listDistinctFetchTopics() {
     .map((r) => r.topic);
 }
 
+/** Borra todas las filas de ml_topic_fetches. Devuelve número de filas eliminadas. */
+function deleteAllTopicFetches() {
+  return db.prepare("DELETE FROM ml_topic_fetches").run().changes;
+}
+
 const upsertMlBuyerStmt = db.prepare(
   `INSERT INTO ml_buyers (buyer_id, nickname, phone_1, phone_2, created_at, updated_at)
    VALUES (@buyer_id, @nickname, @phone_1, @phone_2, @created_at, @updated_at)
@@ -733,6 +736,7 @@ module.exports = {
   FETCH_PROCESS_STATUS_DONE,
   FETCH_PROCESS_STATUS_POST_SALE_FAILED,
   listDistinctFetchTopics,
+  deleteAllTopicFetches,
   upsertMlBuyer,
   listMlBuyers,
   getMlBuyer,

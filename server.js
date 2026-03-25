@@ -472,6 +472,13 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         service: "webhook-receiver",
         version: pkg.version,
+        database: {
+          backend:
+            process.env.DATABASE_URL && String(process.env.DATABASE_URL).trim()
+              ? "postgresql"
+              : "sqlite",
+          info: dbPath,
+        },
         webhook: WEBHOOK_PATH,
         multi_cuentas_ml:
           "POST /admin/ml-accounts (cabecera X-Admin-Secret) registra refresh por ml_user_id",

@@ -151,10 +151,10 @@ function scheduleProactiveRefreshForMlUser(mlUserId) {
  * Al arrancar el servidor: pide token para cada cuenta en DB y deja programado el siguiente refresh (~21600 s).
  * Escalonado para no disparar N llamadas al mismo tiempo.
  */
-function warmAllMlAccountsRefresh() {
+async function warmAllMlAccountsRefresh() {
   if (process.env.OAUTH_PROACTIVE_REFRESH === "0") return;
   const { listMlAccounts } = require("./db");
-  const rows = listMlAccounts();
+  const rows = await listMlAccounts();
   if (!rows.length) return;
   const { id: cid, secret: csec } = envClient();
   if (!cid || !csec) {
@@ -228,7 +228,7 @@ async function getAccessTokenForMlUser(mlUserId) {
   if (!Number.isFinite(id) || id <= 0) {
     throw new Error("mlUserId invalido");
   }
-  const row = getMlAccount(id);
+  const row = await getMlAccount(id);
   if (!row || !row.refresh_token) {
     throw new Error(
       `No hay refresh_token guardado para user_id=${id}. Registra la cuenta (POST /admin/ml-accounts).`
@@ -253,7 +253,7 @@ async function getAccessTokenForMlUser(mlUserId) {
       refresh_token: data.refresh_token || row.refresh_token,
     };
     if (data.refresh_token) {
-      upsertMlAccount(id, data.refresh_token, row.nickname);
+      await upsertMlAccount(id, data.refresh_token, row.nickname);
     }
     cacheByMlUser.set(id, next);
     scheduleProactiveRefreshForMlUser(id);

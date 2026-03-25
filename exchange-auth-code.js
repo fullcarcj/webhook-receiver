@@ -54,7 +54,7 @@ async function main() {
 
   if (process.env.ML_SAVE_ACCOUNT === "1" && data.user_id && data.refresh_token) {
     const { upsertMlAccount } = require("./db");
-    upsertMlAccount(
+    await upsertMlAccount(
       data.user_id,
       data.refresh_token,
       typeof data.nickname === "string" ? data.nickname : null

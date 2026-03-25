@@ -79,7 +79,7 @@ async function main() {
     (!testUserId || !Number.isFinite(testUserId) || testUserId <= 0) &&
     !tieneRefreshEnv()
   ) {
-    const rows = listMlAccounts();
+    const rows = await listMlAccounts();
     if (rows.length) {
       testUserId = rows[0].ml_user_id;
       console.log(

@@ -256,9 +256,9 @@ function scheduleTopicFetchFromWebhook(body) {
     (async () => {
       let pendingId = null;
       try {
-        const acc = getMlAccount(mlUserId);
+        const acc = await getMlAccount(mlUserId);
         if (!acc) {
-          insertTopicFetch({
+          await insertTopicFetch({
             ml_user_id: mlUserId,
             topic,
             resource: resourceStr,
@@ -278,7 +278,7 @@ function scheduleTopicFetchFromWebhook(body) {
 
         requestPath = normalizeMlResourcePath(topic, resourceStr);
         if (!requestPath) {
-          insertTopicFetch({
+          await insertTopicFetch({
             ml_user_id: mlUserId,
             topic,
             resource: resourceStr,
@@ -295,7 +295,7 @@ function scheduleTopicFetchFromWebhook(body) {
           return;
         }
 
-        pendingId = insertTopicFetch({
+        pendingId = await insertTopicFetch({
           ml_user_id: mlUserId,
           topic,
           resource: resourceStr,
@@ -347,7 +347,7 @@ function scheduleTopicFetchFromWebhook(body) {
               const buyer = extractBuyerFromOrderPayload(parsed);
               if (buyer) {
                 try {
-                  upsertMlBuyer(buyer);
+                  await upsertMlBuyer(buyer);
                 } catch (errBuyer) {
                   console.error("[ml buyers]", errBuyer.message);
                 }
@@ -407,7 +407,7 @@ function scheduleTopicFetchFromWebhook(body) {
           });
         }
 
-        updateTopicFetch(pendingId, {
+        await updateTopicFetch(pendingId, {
           request_path: result.path || requestPath,
           http_status: result.status,
           fetched_at: new Date().toISOString(),
@@ -431,13 +431,13 @@ function scheduleTopicFetchFromWebhook(body) {
       } catch (e) {
         try {
           if (pendingId != null) {
-            updateTopicFetch(pendingId, {
+            await updateTopicFetch(pendingId, {
               error: e.message || String(e),
               http_status: 0,
               process_status: FETCH_PROCESS_STATUS_DONE,
             });
           } else {
-            insertTopicFetch({
+            await insertTopicFetch({
               ml_user_id: mlUserId,
               topic,
               resource: resourceStr,
@@ -610,7 +610,7 @@ const server = http.createServer(async (req, res) => {
     }
     let accounts;
     try {
-      accounts = listMlAccounts();
+      accounts = await listMlAccounts();
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -737,7 +737,7 @@ const server = http.createServer(async (req, res) => {
     const lim = url.searchParams.get("limit");
     let items;
     try {
-      items = listWebhooks(lim, 2000);
+      items = await listWebhooks(lim, 2000);
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -817,8 +817,8 @@ const server = http.createServer(async (req, res) => {
     let topicsInDb = [];
     let rows;
     try {
-      topicsInDb = listDistinctFetchTopics();
-      rows = await enrichNicknameForFetches(listTopicFetches(lim, 2000, topicFilter));
+      topicsInDb = await listDistinctFetchTopics();
+      rows = await enrichNicknameForFetches(await listTopicFetches(lim, 2000, topicFilter));
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -961,7 +961,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       try {
-        const buyer = updateMlBuyerPhones(buyerId, {
+        const buyer = await updateMlBuyerPhones(buyerId, {
           phone_1: body.phone_1,
           phone_2: body.phone_2,
         });
@@ -1002,7 +1002,7 @@ const server = http.createServer(async (req, res) => {
     const lim = url.searchParams.get("limit");
     let rows;
     try {
-      rows = listMlBuyers(lim, 2000);
+      rows = await listMlBuyers(lim, 2000);
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -1083,7 +1083,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       try {
-        const deleted = deletePostSaleMessage(id);
+        const deleted = await deletePostSaleMessage(id);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, deleted: deleted > 0 }));
       } catch (e) {
@@ -1110,7 +1110,7 @@ const server = http.createServer(async (req, res) => {
             res.end(JSON.stringify({ ok: false, error: "id invalido" }));
             return;
           }
-          const ch = updatePostSaleMessage(id, { name: body.name, body: body.body });
+          const ch = await updatePostSaleMessage(id, { name: body.name, body: body.body });
           if (ch === 0) {
             res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
             res.end(JSON.stringify({ ok: false, error: "no encontrado" }));
@@ -1120,7 +1120,7 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ ok: true, id }));
           return;
         }
-        const newId = insertPostSaleMessage({ name: body.name, body: body.body });
+        const newId = await insertPostSaleMessage({ name: body.name, body: body.body });
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, id: newId }));
       } catch (e) {
@@ -1133,7 +1133,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET") {
       let rows;
       try {
-        rows = listPostSaleMessages();
+        rows = await listPostSaleMessages();
       } catch (e) {
         res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
         res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -1194,7 +1194,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (force) {
-      deletePostSaleSent(orderId);
+      await deletePostSaleSent(orderId);
     }
     const retryPayload =
       buyerId != null && Number.isFinite(buyerId) && buyerId > 0
@@ -1272,7 +1272,7 @@ const server = http.createServer(async (req, res) => {
     const lim = url.searchParams.get("limit");
     let rows;
     try {
-      rows = listPostSaleAutoSendLog(lim, 2000);
+      rows = await listPostSaleAutoSendLog(lim, 2000);
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -1359,7 +1359,7 @@ const server = http.createServer(async (req, res) => {
       url.searchParams.get("include_raw") === "1" || url.searchParams.get("include_raw") === "true";
     let rows;
     try {
-      rows = listMlVentasDetalleWeb(lim, 500, includeRaw);
+      rows = await listMlVentasDetalleWeb(lim, 500, includeRaw);
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -1453,7 +1453,7 @@ const server = http.createServer(async (req, res) => {
 
     if (WEBHOOK_SAVE_DB) {
       try {
-        const id = insertWebhook(body);
+        const id = await insertWebhook(body);
         console.log("[db] guardado id=%s", id);
       } catch (e) {
         console.error("[db]", e.message);
@@ -1478,7 +1478,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET") {
       if (rejectAdminSecret(req, res)) return;
       try {
-        const accounts = listMlAccounts();
+        const accounts = await listMlAccounts();
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, accounts }));
       } catch (e) {
@@ -1510,7 +1510,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       try {
-        upsertMlAccount(mlUid, rt.trim(), typeof body.nickname === "string" ? body.nickname : null);
+        await upsertMlAccount(mlUid, rt.trim(), typeof body.nickname === "string" ? body.nickname : null);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, ml_user_id: mlUid }));
       } catch (e) {
@@ -1528,7 +1528,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       try {
-        const deleted = deleteMlAccount(uid);
+        const deleted = await deleteMlAccount(uid);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, deleted: deleted > 0 }));
       } catch (e) {
@@ -1555,7 +1555,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       try {
-        const id = insertWebhook(body);
+        const id = await insertWebhook(body);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, id }));
       } catch (e) {
@@ -1569,7 +1569,7 @@ const server = http.createServer(async (req, res) => {
       if (rejectIngestSecret(req, res)) return;
       const limit = url.searchParams.get("limit");
       try {
-        const items = listWebhooks(limit);
+        const items = await listWebhooks(limit);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, items }));
       } catch (e) {
@@ -1592,7 +1592,7 @@ const server = http.createServer(async (req, res) => {
         .map((s) => parseInt(s.trim(), 10))
         .filter((n) => n > 0);
       try {
-        const deleted = deleteWebhooks(ids);
+        const deleted = await deleteWebhooks(ids);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, deleted }));
       } catch (e) {
@@ -1612,7 +1612,11 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`[db] SQLite: ${dbPath}`);
+  const dbKind =
+    String(dbPath).startsWith("postgresql:") || String(dbPath).includes("postgresql://")
+      ? "PostgreSQL"
+      : "SQLite";
+  console.log(`[db] ${dbKind}: ${dbPath}`);
   const forwards = getForwardPostUrls();
   console.log(`Escuchando en http://localhost:${PORT} (todas las interfaces, para tunel loclx/ngrok)`);
   console.log(`Webhook POST: http://localhost:${PORT}${WEBHOOK_PATH}`);
@@ -1637,7 +1641,7 @@ server.listen(PORT, "0.0.0.0", () => {
       .then(() => console.log("OAuth: conexión OK (access_token listo)"))
       .catch((e) => console.error("OAuth:", e.message));
   }
-  warmAllMlAccountsRefresh();
+  warmAllMlAccountsRefresh().catch((e) => console.error("[OAuth warm accounts]", e.message));
   if (process.env.ML_AUTO_SEND_POST_SALE === "1") {
     console.log(
       `[post-sale] envío automático ON (ML_AUTO_SEND_TOPICS=${process.env.ML_AUTO_SEND_TOPICS || "orders_v2"})`

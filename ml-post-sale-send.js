@@ -41,9 +41,9 @@ function parseTopicsEnv() {
     .filter(Boolean);
 }
 
-function logAutoSend(row) {
+async function logAutoSend(row) {
   try {
-    insertPostSaleAutoSendLog(row);
+    await insertPostSaleAutoSendLog(row);
   } catch (e) {
     console.error("[post-sale log DB]", e.message);
   }
@@ -75,8 +75,8 @@ function applyPostSalePlaceholders(text, ctx) {
   return s;
 }
 
-function computePostSaleBodiesAndSteps() {
-  const rows = listPostSaleMessages();
+async function computePostSaleBodiesAndSteps() {
+  const rows = await listPostSaleMessages();
   const bodies = rows
     .map((r) => (r.body != null ? String(r.body).trim() : ""))
     .filter(Boolean);
@@ -96,7 +96,7 @@ async function trySendDefaultPostSaleMessage(args) {
   };
 
   if (process.env.ML_AUTO_SEND_POST_SALE !== "1") {
-    logAutoSend({
+    await logAutoSend({
       ...base,
       outcome: "skipped",
       skip_reason: "ML_AUTO_SEND_POST_SALE!=1",
@@ -107,7 +107,7 @@ async function trySendDefaultPostSaleMessage(args) {
   const topicList = parseTopicsEnv();
   const topic = args.topic;
   if (!topic || !topicList.includes(topic)) {
-    logAutoSend({
+    await logAutoSend({
       ...base,
       outcome: "skipped",
       skip_reason: `topic no listado (ML_AUTO_SEND_TOPICS=${process.env.ML_AUTO_SEND_TOPICS || "orders_v2"})`,
@@ -117,7 +117,7 @@ async function trySendDefaultPostSaleMessage(args) {
 
   const payload = args.payload;
   if (!payload || typeof payload !== "object") {
-    logAutoSend({
+    await logAutoSend({
       ...base,
       outcome: "skipped",
       skip_reason: "no_payload",
@@ -133,7 +133,7 @@ async function trySendDefaultPostSaleMessage(args) {
   }
 
   if (!orderId) {
-    logAutoSend({
+    await logAutoSend({
       ...base,
       outcome: "skipped",
       skip_reason: "no_order_id",
@@ -143,7 +143,7 @@ async function trySendDefaultPostSaleMessage(args) {
 
   const buyerId = extractBuyerIdForPostSale(payload, args.mlUserId);
   if (!buyerId) {
-    logAutoSend({
+    await logAutoSend({
       ...base,
       order_id: orderId,
       outcome: "skipped",
@@ -152,9 +152,9 @@ async function trySendDefaultPostSaleMessage(args) {
     return { skipped: true, reason: "no_buyer_id", order_id: orderId };
   }
 
-  const { totalSteps, bodies } = computePostSaleBodiesAndSteps();
+  const { totalSteps, bodies } = await computePostSaleBodiesAndSteps();
   if (totalSteps === 0) {
-    logAutoSend({
+    await logAutoSend({
       ...base,
       order_id: orderId,
       outcome: "skipped",
@@ -163,8 +163,8 @@ async function trySendDefaultPostSaleMessage(args) {
     return { skipped: true, reason: "no_template" };
   }
 
-  if (wasPostSaleSent(orderId, totalSteps)) {
-    logAutoSend({
+  if (await wasPostSaleSent(orderId, totalSteps)) {
+    await logAutoSend({
       ...base,
       order_id: orderId,
       outcome: "skipped",
@@ -178,7 +178,7 @@ async function trySendDefaultPostSaleMessage(args) {
     console.error(
       "[post-sale] ML_POST_SALE_OPTION_ID debe ser OTHER o SEND_INVOICE_LINK para texto de plantilla"
     );
-    logAutoSend({
+    await logAutoSend({
       ...base,
       order_id: orderId,
       outcome: "skipped",
@@ -202,7 +202,7 @@ async function trySendDefaultPostSaleMessage(args) {
   let lastResult = { ok: false, status: 0, order_id: orderId, data: null };
 
   for (let step = 0; step < totalSteps; step++) {
-    if (isPostSaleStepSent(orderId, step)) {
+    if (await isPostSaleStepSent(orderId, step)) {
       continue;
     }
     if (step > 0) {
@@ -228,7 +228,7 @@ async function trySendDefaultPostSaleMessage(args) {
     lastResult = { ok: result.ok, status: result.status, order_id: orderId, data: result.data };
 
     if (result.ok) {
-      markPostSaleStepSent(orderId, step);
+      await markPostSaleStepSent(orderId, step);
       console.log("[post-sale] enviado order_id=%s step=%s option=%s", orderId, step, optionId);
       const resp =
         result.data != null
@@ -236,7 +236,7 @@ async function trySendDefaultPostSaleMessage(args) {
             ? result.data
             : JSON.stringify(result.data)
           : null;
-      logAutoSend({
+      await logAutoSend({
         ...base,
         order_id: orderId,
         outcome: "success",
@@ -264,7 +264,7 @@ async function trySendDefaultPostSaleMessage(args) {
           : mlMsg != null
             ? `HTTP ${result.status} · ${mlMsg}`
             : `HTTP ${result.status}`;
-      logAutoSend({
+      await logAutoSend({
         ...base,
         order_id: orderId,
         outcome: "api_error",
@@ -279,7 +279,7 @@ async function trySendDefaultPostSaleMessage(args) {
     }
   }
 
-  markPostSaleSent(orderId);
+  await markPostSaleSent(orderId);
   return lastResult;
 }
 

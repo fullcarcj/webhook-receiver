@@ -13,7 +13,7 @@ require("./load-env-local");
 
 const { upsertMlAccount } = require("./db");
 
-function main() {
+async function main() {
   const uid = Number(process.env.ML_USER_ID);
   const rt =
     process.env.OAUTH_REFRESH_TOKEN || process.env.ML_REFRESH_TOKEN || "";
@@ -22,8 +22,11 @@ function main() {
     process.exit(1);
   }
   const nick = process.env.ML_NICKNAME || null;
-  upsertMlAccount(uid, rt.trim(), nick);
+  await upsertMlAccount(uid, rt.trim(), nick);
   console.log("Cuenta guardada: ml_user_id=%s", uid);
 }
 
-main();
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

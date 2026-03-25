@@ -43,9 +43,9 @@ async function enrichNicknameForFetches(rows) {
       const n = await fetchPublicNickname(r.ml_user_id);
       if (n && r.ml_user_id != null) {
         try {
-          const acc = getMlAccount(r.ml_user_id);
+          const acc = await getMlAccount(r.ml_user_id);
           if (acc && (!acc.nickname || !String(acc.nickname).trim())) {
-            upsertMlAccount(r.ml_user_id, acc.refresh_token, n);
+            await upsertMlAccount(r.ml_user_id, acc.refresh_token, n);
           }
         } catch {
           /* ignorar */

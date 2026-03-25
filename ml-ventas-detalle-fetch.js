@@ -30,7 +30,7 @@ async function fetchVentasDetalleAndStore(args) {
   const cookiePath = getMlAccountCookiesFilePath(mlUserId);
   if (!cookiePath || !fs.existsSync(cookiePath)) {
     try {
-      insertMlVentasDetalleWeb({
+      await insertMlVentasDetalleWeb({
         ml_user_id: mlUserId,
         order_id: orderId,
         request_url: "(sin archivo cookies)",
@@ -51,7 +51,7 @@ async function fetchVentasDetalleAndStore(args) {
     cookieHeader = buildCookieHeaderFromNetscapeFile(raw);
   } catch (e) {
     try {
-      insertMlVentasDetalleWeb({
+      await insertMlVentasDetalleWeb({
         ml_user_id: mlUserId,
         order_id: orderId,
         request_url: cookiePath,
@@ -68,7 +68,7 @@ async function fetchVentasDetalleAndStore(args) {
 
   if (!cookieHeader || !String(cookieHeader).trim()) {
     try {
-      insertMlVentasDetalleWeb({
+      await insertMlVentasDetalleWeb({
         ml_user_id: mlUserId,
         order_id: orderId,
         request_url: cookiePath,
@@ -117,7 +117,7 @@ async function fetchVentasDetalleAndStore(args) {
   const celular = bodyStore ? extractCelularFromVentasHtml(bodyStore) : null;
 
   try {
-    insertMlVentasDetalleWeb({
+    await insertMlVentasDetalleWeb({
       ml_user_id: mlUserId,
       order_id: orderId,
       request_url: url,

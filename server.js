@@ -884,9 +884,9 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.title)}</td>
   <td>${escapeHtml(r.request_path)}</td>
   <td>${escapeHtml(r.http_status)}</td>
+  <td><strong>${st}</strong></td>
   <td>${errCell}</td>
   <td><pre class="payload">${payloadPreview}</pre></td>
-  <td>${st}</td>
 </tr>`;
       })
       .join("");
@@ -915,12 +915,14 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Respuestas API (ml_topic_fetches)</h1>
-  <p class="lead">${rows.length} registro(s)${topicFilter ? ` · filtro: <code>${escapeHtml(topicFilter)}</code>` : ""}. Orden: <strong>por topic</strong> (A→Z), dentro de cada topic el <strong>id</strong> más reciente primero. SKU/título: <code>orders_v2</code> / <code>items</code>. JSON: <code>?format=json</code>.</p>
+  <p class="lead">${rows.length} registro(s)${topicFilter ? ` · filtro: <code>${escapeHtml(topicFilter)}</code>` : ""}. <strong>estado</strong>: <code>Procesando...</code> mientras se obtiene la orden; luego <code>Completado</code> o <code>Fallo post-venta</code> si aplica envío automático. Orden: por topic (A→Z), id reciente primero. JSON: <code>?format=json</code> (campo <code>process_status</code>).</p>
   <p class="topic-filters">${topicFilterLinks}</p>
+  <div style="overflow-x:auto; max-width:100%">
   <table>
-    <thead><tr><th>id</th><th>fetched_at</th><th>user_id</th><th>nickname</th><th>topic</th><th>sku</th><th>title</th><th>request_path</th><th>http</th><th>error</th><th>payload</th><th>estado</th></tr></thead>
+    <thead><tr><th>id</th><th>fetched_at</th><th>user_id</th><th>nickname</th><th>topic</th><th>sku</th><th>title</th><th>request_path</th><th>http</th><th>estado</th><th>error</th><th>payload</th></tr></thead>
     <tbody>${tableRows || '<tr><td colspan="12">No hay fetches guardados.</td></tr>'}</tbody>
   </table>
+  </div>
 </body>
 </html>`;
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });

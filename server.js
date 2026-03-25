@@ -28,7 +28,11 @@ const {
   listMlAccounts,
   deleteMlAccount,
   insertTopicFetch,
+  updateTopicFetch,
   listTopicFetches,
+  FETCH_PROCESS_STATUS_PENDING,
+  FETCH_PROCESS_STATUS_DONE,
+  FETCH_PROCESS_STATUS_POST_SALE_FAILED,
   listDistinctFetchTopics,
   upsertMlBuyer,
   listMlBuyers,
@@ -249,6 +253,7 @@ function scheduleTopicFetchFromWebhook(body) {
     let requestPath = "";
 
     (async () => {
+      let pendingId = null;
       try {
         const acc = getMlAccount(mlUserId);
         if (!acc) {
@@ -264,6 +269,7 @@ function scheduleTopicFetchFromWebhook(body) {
             error: `No hay cuenta en ml_accounts para user_id=${mlUserId}`,
             sku: null,
             title: null,
+            process_status: FETCH_PROCESS_STATUS_DONE,
           });
           console.error("[ml fetch] sin cuenta ml_user_id=%s", mlUserId);
           return;
@@ -283,9 +289,25 @@ function scheduleTopicFetchFromWebhook(body) {
             error: "resource vacío o inválido",
             sku: null,
             title: null,
+            process_status: FETCH_PROCESS_STATUS_DONE,
           });
           return;
         }
+
+        pendingId = insertTopicFetch({
+          ml_user_id: mlUserId,
+          topic,
+          resource: resourceStr,
+          request_path: requestPath,
+          http_status: 0,
+          fetched_at: new Date().toISOString(),
+          notification_id: notifId,
+          payload: null,
+          error: null,
+          sku: null,
+          title: null,
+          process_status: FETCH_PROCESS_STATUS_PENDING,
+        });
 
         const result = await mercadoLibreFetchForUser(mlUserId, requestPath);
         let payloadStr = null;
@@ -301,16 +323,18 @@ function scheduleTopicFetchFromWebhook(body) {
 
         let sku = null;
         let title = null;
+        let parsed = null;
         if (result.ok && result.data != null) {
-          let parsed = result.data;
-          if (typeof parsed === "string") {
+          let rawParsed = result.data;
+          if (typeof rawParsed === "string") {
             try {
-              parsed = JSON.parse(parsed);
+              rawParsed = JSON.parse(rawParsed);
             } catch {
-              parsed = null;
+              rawParsed = null;
             }
           }
-          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          if (rawParsed && typeof rawParsed === "object" && !Array.isArray(rawParsed)) {
+            parsed = rawParsed;
             const extracted = extractSkuTitleFromMlResponse(topic, parsed);
             sku = extracted.sku;
             title = extracted.title;
@@ -327,16 +351,6 @@ function scheduleTopicFetchFromWebhook(body) {
                   console.error("[ml buyers]", errBuyer.message);
                 }
               }
-            }
-            if (result.ok) {
-              setImmediate(() => {
-                trySendDefaultPostSaleMessage({
-                  mlUserId,
-                  topic,
-                  payload: parsed,
-                  notificationId: notifId,
-                }).catch((e) => console.error("[post-sale]", e.message));
-              });
             }
             if (
               result.ok &&
@@ -356,18 +370,51 @@ function scheduleTopicFetchFromWebhook(body) {
           }
         }
 
-        insertTopicFetch({
-          ml_user_id: mlUserId,
-          topic,
-          resource: resourceStr,
+        const isOrderTopic =
+          topic && (topic === "orders_v2" || String(topic).startsWith("orders"));
+
+        let processStatus = FETCH_PROCESS_STATUS_DONE;
+        if (result.ok && isOrderTopic) {
+          try {
+            const ps = await trySendDefaultPostSaleMessage({
+              mlUserId,
+              topic,
+              payload: parsed,
+              notificationId: notifId,
+            });
+            if (ps && ps.skipped) {
+              processStatus = FETCH_PROCESS_STATUS_DONE;
+            } else if (ps && ps.ok === true) {
+              processStatus = FETCH_PROCESS_STATUS_DONE;
+            } else {
+              processStatus = FETCH_PROCESS_STATUS_POST_SALE_FAILED;
+            }
+          } catch (e) {
+            console.error("[post-sale]", e.message);
+            processStatus = FETCH_PROCESS_STATUS_POST_SALE_FAILED;
+          }
+        }
+
+        if (result.ok && parsed && !isOrderTopic) {
+          setImmediate(() => {
+            trySendDefaultPostSaleMessage({
+              mlUserId,
+              topic,
+              payload: parsed,
+              notificationId: notifId,
+            }).catch((e) => console.error("[post-sale]", e.message));
+          });
+        }
+
+        updateTopicFetch(pendingId, {
           request_path: result.path || requestPath,
           http_status: result.status,
           fetched_at: new Date().toISOString(),
-          notification_id: notifId,
           payload: payloadStr,
           error: errMsg,
           sku,
           title,
+          process_status: processStatus,
         });
         if (!result.ok) {
           console.error(
@@ -382,19 +429,28 @@ function scheduleTopicFetchFromWebhook(body) {
         }
       } catch (e) {
         try {
-          insertTopicFetch({
-            ml_user_id: mlUserId,
-            topic,
-            resource: resourceStr,
-            request_path: requestPath || "",
-            http_status: 0,
-            fetched_at: new Date().toISOString(),
-            notification_id: notifId,
-            payload: null,
-            error: e.message || String(e),
-            sku: null,
-            title: null,
-          });
+          if (pendingId != null) {
+            updateTopicFetch(pendingId, {
+              error: e.message || String(e),
+              http_status: 0,
+              process_status: FETCH_PROCESS_STATUS_DONE,
+            });
+          } else {
+            insertTopicFetch({
+              ml_user_id: mlUserId,
+              topic,
+              resource: resourceStr,
+              request_path: requestPath || "",
+              http_status: 0,
+              fetched_at: new Date().toISOString(),
+              notification_id: notifId,
+              payload: null,
+              error: e.message || String(e),
+              sku: null,
+              title: null,
+              process_status: FETCH_PROCESS_STATUS_DONE,
+            });
+          }
         } catch (dbErr) {
           console.error("[ml fetch] DB:", dbErr.message);
         }
@@ -781,6 +837,7 @@ const server = http.createServer(async (req, res) => {
         sku: r.sku,
         title: r.title,
         error: r.error,
+        process_status: r.process_status,
         data: r.payload ? tryParseJson(r.payload) : null,
       }));
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -813,6 +870,9 @@ const server = http.createServer(async (req, res) => {
           ? escapeHtml(r.payload.length > 800 ? `${r.payload.slice(0, 800)}…` : r.payload)
           : "—";
         const errCell = r.error ? `<span class="err">${escapeHtml(r.error.slice(0, 200))}</span>` : "—";
+        const st = r.process_status != null && String(r.process_status).trim() !== ""
+          ? escapeHtml(r.process_status)
+          : "—";
         return `<tr>
   <td>${escapeHtml(r.id)}</td>
   <td class="muted">${escapeHtml(r.fetched_at)}</td>
@@ -825,6 +885,7 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.http_status)}</td>
   <td>${errCell}</td>
   <td><pre class="payload">${payloadPreview}</pre></td>
+  <td>${st}</td>
 </tr>`;
       })
       .join("");
@@ -856,8 +917,8 @@ const server = http.createServer(async (req, res) => {
   <p class="lead">${rows.length} registro(s)${topicFilter ? ` · filtro: <code>${escapeHtml(topicFilter)}</code>` : ""}. Orden: <strong>por topic</strong> (A→Z), dentro de cada topic el <strong>id</strong> más reciente primero. SKU/título: <code>orders_v2</code> / <code>items</code>. JSON: <code>?format=json</code>.</p>
   <p class="topic-filters">${topicFilterLinks}</p>
   <table>
-    <thead><tr><th>id</th><th>fetched_at</th><th>user_id</th><th>nickname</th><th>topic</th><th>sku</th><th>title</th><th>request_path</th><th>http</th><th>error</th><th>payload</th></tr></thead>
-    <tbody>${tableRows || '<tr><td colspan="11">No hay fetches guardados.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>fetched_at</th><th>user_id</th><th>nickname</th><th>topic</th><th>sku</th><th>title</th><th>request_path</th><th>http</th><th>error</th><th>payload</th><th>estado</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="12">No hay fetches guardados.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

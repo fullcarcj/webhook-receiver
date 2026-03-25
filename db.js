@@ -36,6 +36,7 @@ db.exec(`
     fetched_at TEXT NOT NULL,
     notification_id TEXT,
     payload TEXT,
+    process_status TEXT,
     error TEXT,
     sku TEXT,
     title TEXT
@@ -196,6 +197,27 @@ NO Ofertar Varias veces por favor`;
   }
 })();
 
+/** Tras payload: Procesando... mientras GET ML; Completado al guardar resultado. */
+const FETCH_PROCESS_STATUS_PENDING = "Procesando...";
+const FETCH_PROCESS_STATUS_DONE = "Completado";
+/** Topic orders: envío automático post-venta respondió error (no Completado). */
+const FETCH_PROCESS_STATUS_POST_SALE_FAILED = "Fallo post-venta";
+
+(function migrateMlTopicFetchesProcessStatus() {
+  try {
+    const cols = db.prepare("PRAGMA table_info(ml_topic_fetches)").all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has("process_status")) {
+      db.exec("ALTER TABLE ml_topic_fetches ADD COLUMN process_status TEXT");
+    }
+    db.prepare(`UPDATE ml_topic_fetches SET process_status = ? WHERE process_status IS NULL`).run(
+      FETCH_PROCESS_STATUS_DONE
+    );
+  } catch (e) {
+    console.error("[db] migrate ml_topic_fetches process_status:", e.message);
+  }
+})();
+
 const insertStmt = db.prepare(
   `INSERT INTO webhook_events (received_at, payload, topic, resource)
    VALUES (@received_at, @payload, @topic, @resource)`
@@ -283,14 +305,18 @@ function deleteMlAccount(mlUserId) {
 const insertTopicFetchStmt = db.prepare(
   `INSERT INTO ml_topic_fetches (
      ml_user_id, topic, resource, request_path, http_status, fetched_at,
-     notification_id, payload, error, sku, title
+     notification_id, payload, process_status, error, sku, title
    ) VALUES (
      @ml_user_id, @topic, @resource, @request_path, @http_status, @fetched_at,
-     @notification_id, @payload, @error, @sku, @title
+     @notification_id, @payload, @process_status, @error, @sku, @title
    )`
 );
 
 function insertTopicFetch(row) {
+  const ps =
+    row.process_status != null && String(row.process_status).trim() !== ""
+      ? String(row.process_status).trim()
+      : FETCH_PROCESS_STATUS_DONE;
   const info = insertTopicFetchStmt.run({
     ml_user_id: row.ml_user_id,
     topic: row.topic != null ? String(row.topic) : null,
@@ -300,11 +326,61 @@ function insertTopicFetch(row) {
     fetched_at: row.fetched_at,
     notification_id: row.notification_id != null ? String(row.notification_id) : null,
     payload: row.payload != null ? String(row.payload) : null,
+    process_status: ps,
     error: row.error != null ? String(row.error) : null,
     sku: row.sku != null && row.sku !== "" ? String(row.sku) : null,
     title: row.title != null && row.title !== "" ? String(row.title) : null,
   });
   return Number(info.lastInsertRowid);
+}
+
+/**
+ * @param {number} id
+ * @param {Partial<{ payload: string|null, error: string|null, sku: string|null, title: string|null, http_status: number, request_path: string, fetched_at: string, process_status: string }>} patch
+ */
+function updateTopicFetch(id, patch) {
+  const row = db
+    .prepare(
+      `SELECT id, payload, error, sku, title, http_status, request_path, fetched_at, process_status
+       FROM ml_topic_fetches WHERE id = ?`
+    )
+    .get(id);
+  if (!row) return 0;
+  const payload = patch.payload !== undefined ? patch.payload : row.payload;
+  const error = patch.error !== undefined ? patch.error : row.error;
+  const sku = patch.sku !== undefined ? patch.sku : row.sku;
+  const title = patch.title !== undefined ? patch.title : row.title;
+  const http_status = patch.http_status !== undefined ? patch.http_status : row.http_status;
+  const request_path = patch.request_path !== undefined ? patch.request_path : row.request_path;
+  const fetched_at = patch.fetched_at !== undefined ? patch.fetched_at : row.fetched_at;
+  const process_status =
+    patch.process_status !== undefined ? patch.process_status : row.process_status;
+  db.prepare(
+    `UPDATE ml_topic_fetches SET
+       payload = @payload,
+       error = @error,
+       sku = @sku,
+       title = @title,
+       http_status = @http_status,
+       request_path = @request_path,
+       fetched_at = @fetched_at,
+       process_status = @process_status
+     WHERE id = @id`
+  ).run({
+    id,
+    payload: payload != null ? String(payload) : null,
+    error: error != null ? String(error) : null,
+    sku: sku != null && sku !== "" ? String(sku) : null,
+    title: title != null && title !== "" ? String(title) : null,
+    http_status,
+    request_path,
+    fetched_at,
+    process_status:
+      process_status != null && String(process_status).trim() !== ""
+        ? String(process_status).trim()
+        : FETCH_PROCESS_STATUS_DONE,
+  });
+  return 1;
 }
 
 /**
@@ -320,7 +396,7 @@ function listTopicFetches(limit, maxAllowed, topicFilter) {
       : null;
 
   const selectFrom = `SELECT f.id, f.ml_user_id, f.topic, f.resource, f.request_path, f.http_status, f.fetched_at,
-              f.notification_id, f.payload, f.error, f.sku, f.title,
+              f.notification_id, f.payload, f.process_status, f.error, f.sku, f.title,
               a.nickname AS nickname
        FROM ml_topic_fetches f
        LEFT JOIN ml_accounts a ON a.ml_user_id = f.ml_user_id`;
@@ -595,7 +671,11 @@ module.exports = {
   listMlAccounts,
   deleteMlAccount,
   insertTopicFetch,
+  updateTopicFetch,
   listTopicFetches,
+  FETCH_PROCESS_STATUS_PENDING,
+  FETCH_PROCESS_STATUS_DONE,
+  FETCH_PROCESS_STATUS_POST_SALE_FAILED,
   listDistinctFetchTopics,
   upsertMlBuyer,
   listMlBuyers,

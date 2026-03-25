@@ -45,6 +45,7 @@ const {
   listMlVentasDetalleWeb,
   getMlAccount,
   deletePostSaleSent,
+  dbPath,
 } = require("./db");
 
 const PORT = process.env.PORT || 3000;
@@ -1611,6 +1612,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
+  console.log(`[db] SQLite: ${dbPath}`);
   const forwards = getForwardPostUrls();
   console.log(`Escuchando en http://localhost:${PORT} (todas las interfaces, para tunel loclx/ngrok)`);
   console.log(`Webhook POST: http://localhost:${PORT}${WEBHOOK_PATH}`);

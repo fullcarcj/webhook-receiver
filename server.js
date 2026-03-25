@@ -374,6 +374,8 @@ function scheduleTopicFetchFromWebhook(body) {
 
         const isOrderTopic =
           topic && (topic === "orders_v2" || String(topic).startsWith("orders"));
+        /** Solo orders_v2 se considera “hook procesado” para el estado final; otros topics quedan en pendiente. */
+        const isOrdersV2Topic = topic === "orders_v2";
 
         let processStatus = FETCH_PROCESS_STATUS_DONE;
         if (result.ok && isOrderTopic) {
@@ -395,6 +397,9 @@ function scheduleTopicFetchFromWebhook(body) {
             console.error("[post-sale]", e.message);
             processStatus = FETCH_PROCESS_STATUS_POST_SALE_FAILED;
           }
+        }
+        if (result.ok && !isOrdersV2Topic) {
+          processStatus = FETCH_PROCESS_STATUS_PENDING;
         }
 
         if (result.ok && parsed && !isOrderTopic) {
@@ -925,7 +930,7 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Respuestas API (ml_topic_fetches)</h1>
-  <p class="lead">${rows.length} registro(s)${topicFilter ? ` · filtro: <code>${escapeHtml(topicFilter)}</code>` : ""}. <strong>estado</strong>: <code>Procesando...</code> mientras se obtiene la orden; luego <code>Completado</code> o <code>Fallo post-venta</code> si aplica envío automático. Orden: por topic (A→Z), id reciente primero. JSON: <code>?format=json</code> (campo <code>process_status</code>).</p>
+  <p class="lead">${rows.length} registro(s)${topicFilter ? ` · filtro: <code>${escapeHtml(topicFilter)}</code>` : ""}. <strong>estado</strong>: con topic <code>orders_v2</code>, tras el GET a ML puede quedar <code>Completado</code> o <code>Fallo post-venta</code> (post-venta automático). Si el topic <strong>no</strong> es <code>orders_v2</code>, tras un fetch OK sigue <code>Procesando...</code> (el hook no se marca como flujo de orden completado). Orden: por topic (A→Z), id reciente primero. JSON: <code>?format=json</code> (<code>process_status</code>).</p>
   <p class="topic-filters">${topicFilterLinks}</p>
   <div style="overflow-x:auto; max-width:100%">
   <table>

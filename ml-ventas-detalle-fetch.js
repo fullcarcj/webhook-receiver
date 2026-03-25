@@ -5,6 +5,7 @@
 const fs = require("fs");
 const { getMlAccountCookiesFilePath } = require("./ml-cookies-path");
 const { buildCookieHeaderFromNetscapeFile } = require("./ml-netscape-cookies");
+const { extractCelularFromVentasHtml } = require("./ml-ventas-detalle-celular");
 const { insertMlVentasDetalleWeb } = require("./db");
 
 const DEFAULT_BASE = "https://www.mercadolibre.com.ve/ventas/";
@@ -34,7 +35,8 @@ async function fetchVentasDetalleAndStore(args) {
         order_id: orderId,
         request_url: "(sin archivo cookies)",
         http_status: null,
-        body: null,
+        raw: null,
+        celular: null,
         error: `no_cookie_file:${cookiePath || "null"}`,
       });
     } catch (e) {
@@ -54,7 +56,8 @@ async function fetchVentasDetalleAndStore(args) {
         order_id: orderId,
         request_url: cookiePath,
         http_status: null,
-        body: null,
+        raw: null,
+        celular: null,
         error: `cookie_read:${e.message || String(e)}`,
       });
     } catch (err2) {
@@ -70,7 +73,8 @@ async function fetchVentasDetalleAndStore(args) {
         order_id: orderId,
         request_url: cookiePath,
         http_status: null,
-        body: null,
+        raw: null,
+        celular: null,
         error: "cookie_header_vacio_mercadolibre",
       });
     } catch (e) {
@@ -110,13 +114,16 @@ async function fetchVentasDetalleAndStore(args) {
     errMsg = (errMsg ? `${errMsg}; ` : "") + `body_truncado_a_${maxC}_chars`;
   }
 
+  const celular = bodyStore ? extractCelularFromVentasHtml(bodyStore) : null;
+
   try {
     insertMlVentasDetalleWeb({
       ml_user_id: mlUserId,
       order_id: orderId,
       request_url: url,
       http_status: httpStatus,
-      body: errMsg && !bodyStore ? null : bodyStore,
+      raw: errMsg && !bodyStore ? null : bodyStore,
+      celular,
       error: errMsg,
     });
   } catch (e) {
@@ -125,13 +132,20 @@ async function fetchVentasDetalleAndStore(args) {
   }
 
   console.log(
-    "[ventas-detalle] guardado order_id=%s ml_user_id=%s http=%s bytes≈%s",
+    "[ventas-detalle] guardado order_id=%s ml_user_id=%s http=%s bytes≈%s celular=%s",
     orderId,
     mlUserId,
     httpStatus,
-    bodyStore ? bodyStore.length : 0
+    bodyStore ? bodyStore.length : 0,
+    celular || "—"
   );
-  return { ok: true, http_status: httpStatus, url, bytes: bodyStore.length };
+  return {
+    ok: true,
+    http_status: httpStatus,
+    url,
+    bytes: bodyStore.length,
+    celular: celular || null,
+  };
 }
 
 module.exports = { fetchVentasDetalleAndStore, DEFAULT_BASE };

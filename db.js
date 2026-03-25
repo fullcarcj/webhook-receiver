@@ -91,7 +91,8 @@ db.exec(`
     order_id INTEGER NOT NULL,
     request_url TEXT NOT NULL,
     http_status INTEGER,
-    body TEXT,
+    raw TEXT,
+    celular TEXT,
     error TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_ventas_detalle_user_order ON ml_ventas_detalle_web(ml_user_id, order_id);
@@ -124,6 +125,35 @@ db.exec(`
     );
   } catch (e) {
     console.error("[db] idx_ps_auto_log_order:", e.message);
+  }
+})();
+
+(function migrateMlVentasDetalleRaw() {
+  try {
+    const t = db.prepare("PRAGMA table_info(ml_ventas_detalle_web)").all();
+    const names = new Set(t.map((c) => c.name));
+    if (!names.has("raw")) {
+      if (names.has("body")) {
+        db.exec("ALTER TABLE ml_ventas_detalle_web ADD COLUMN raw TEXT");
+        db.exec("UPDATE ml_ventas_detalle_web SET raw = body WHERE raw IS NULL AND body IS NOT NULL");
+      } else {
+        db.exec("ALTER TABLE ml_ventas_detalle_web ADD COLUMN raw TEXT");
+      }
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_ventas_detalle_web raw:", e.message);
+  }
+})();
+
+(function migrateMlVentasDetalleCelular() {
+  try {
+    const t = db.prepare("PRAGMA table_info(ml_ventas_detalle_web)").all();
+    const names = new Set(t.map((c) => c.name));
+    if (!names.has("celular")) {
+      db.exec("ALTER TABLE ml_ventas_detalle_web ADD COLUMN celular TEXT");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_ventas_detalle_web celular:", e.message);
   }
 })();
 
@@ -346,6 +376,49 @@ function listMlBuyers(limit, maxAllowed) {
     .all(n);
 }
 
+function normalizeBuyerPhoneValue(v) {
+  if (v === null) return null;
+  const s = String(v).trim();
+  return s === "" ? null : s;
+}
+
+function getMlBuyer(buyerId) {
+  return db
+    .prepare(
+      `SELECT buyer_id, nickname, phone_1, phone_2, created_at, updated_at
+       FROM ml_buyers WHERE buyer_id = ?`
+    )
+    .get(buyerId);
+}
+
+/** Actualiza phone_1 y/o phone_2; campos omitidos se conservan. null o "" borran el teléfono. */
+function updateMlBuyerPhones(buyerId, patch) {
+  const row = getMlBuyer(buyerId);
+  if (!row) return null;
+  const phone_1 =
+    patch.phone_1 !== undefined ? normalizeBuyerPhoneValue(patch.phone_1) : row.phone_1;
+  const phone_2 =
+    patch.phone_2 !== undefined ? normalizeBuyerPhoneValue(patch.phone_2) : row.phone_2;
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE ml_buyers SET phone_1 = @phone_1, phone_2 = @phone_2, updated_at = @updated_at
+     WHERE buyer_id = @buyer_id`
+  ).run({
+    buyer_id: buyerId,
+    phone_1,
+    phone_2,
+    updated_at: now,
+  });
+  return {
+    buyer_id: buyerId,
+    nickname: row.nickname,
+    phone_1,
+    phone_2,
+    created_at: row.created_at,
+    updated_at: now,
+  };
+}
+
 const insertPostSaleMessageStmt = db.prepare(
   `INSERT INTO post_sale_messages (name, body, created_at, updated_at)
    VALUES (@name, @body, @created_at, @updated_at)`
@@ -464,37 +537,52 @@ function listPostSaleAutoSendLog(limit, maxAllowed) {
 
 const insertMlVentasDetalleWebStmt = db.prepare(
   `INSERT INTO ml_ventas_detalle_web (
-     created_at, ml_user_id, order_id, request_url, http_status, body, error
+     created_at, ml_user_id, order_id, request_url, http_status, raw, celular, error
    ) VALUES (
-     @created_at, @ml_user_id, @order_id, @request_url, @http_status, @body, @error
+     @created_at, @ml_user_id, @order_id, @request_url, @http_status, @raw, @celular, @error
    )`
 );
 
 function insertMlVentasDetalleWeb(row) {
+  const html =
+    row.raw != null
+      ? String(row.raw)
+      : row.body != null
+        ? String(row.body)
+        : null;
+  const celular =
+    row.celular != null && String(row.celular).trim() !== ""
+      ? String(row.celular).replace(/\s+/g, "").slice(0, 16)
+      : null;
   const info = insertMlVentasDetalleWebStmt.run({
     created_at: row.created_at || new Date().toISOString(),
     ml_user_id: Number(row.ml_user_id),
     order_id: Number(row.order_id),
     request_url: String(row.request_url).slice(0, 4000),
     http_status: row.http_status != null ? Number(row.http_status) : null,
-    body: row.body != null ? String(row.body) : null,
+    raw: html,
+    celular,
     error: row.error != null ? String(row.error).slice(0, 4000) : null,
   });
   return Number(info.lastInsertRowid);
 }
 
-function listMlVentasDetalleWeb(limit, maxAllowed) {
+function listMlVentasDetalleWeb(limit, maxAllowed, includeRaw) {
   const cap = maxAllowed != null ? maxAllowed : 500;
   const n = Math.min(Math.max(Number(limit) || 50, 1), cap);
-  return db
-    .prepare(
-      `SELECT id, created_at, ml_user_id, order_id, request_url, http_status,
-              LENGTH(body) AS body_len,
-              CASE WHEN body IS NULL THEN NULL ELSE SUBSTR(body, 1, 400) END AS body_preview,
-              error
-       FROM ml_ventas_detalle_web ORDER BY id DESC LIMIT ?`
-    )
-    .all(n);
+  const sel = includeRaw
+    ? `SELECT id, created_at, ml_user_id, order_id, request_url, http_status,
+              LENGTH(raw) AS body_len,
+              CASE WHEN raw IS NULL THEN NULL ELSE SUBSTR(raw, 1, 400) END AS resultado_g,
+              celular,
+              raw AS raw,
+              error`
+    : `SELECT id, created_at, ml_user_id, order_id, request_url, http_status,
+              LENGTH(raw) AS body_len,
+              CASE WHEN raw IS NULL THEN NULL ELSE SUBSTR(raw, 1, 400) END AS resultado_g,
+              celular,
+              error`;
+  return db.prepare(`${sel} FROM ml_ventas_detalle_web ORDER BY id DESC LIMIT ?`).all(n);
 }
 
 module.exports = {
@@ -511,6 +599,8 @@ module.exports = {
   listDistinctFetchTopics,
   upsertMlBuyer,
   listMlBuyers,
+  getMlBuyer,
+  updateMlBuyerPhones,
   getPostSaleMessage,
   listPostSaleMessages,
   insertPostSaleMessage,

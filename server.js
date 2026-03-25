@@ -32,6 +32,7 @@ const {
   listDistinctFetchTopics,
   upsertMlBuyer,
   listMlBuyers,
+  updateMlBuyerPhones,
   listPostSaleMessages,
   insertPostSaleMessage,
   updatePostSaleMessage,
@@ -425,7 +426,7 @@ const server = http.createServer(async (req, res) => {
         topic_fetches_ml:
           "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1)",
         buyers_ml:
-          "GET /buyers?k=ADMIN_SECRET (compradores desde orders_v2; ML_WEBHOOK_FETCH_RESOURCE=1)",
+          "GET /buyers?k=ADMIN_SECRET (compradores). PUT /buyers?k=… JSON {buyer_id, phone_1?, phone_2?} (cabecera X-Admin-Secret alternativa)",
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         envio_auto_postventa:
@@ -435,7 +436,7 @@ const server = http.createServer(async (req, res) => {
         cookies_ml_web:
           "ML_COOKIES_DIR: carpeta con cookies por cuenta ({ml_user_id}.txt). Por defecto carpeta data/ (ignorada en git).",
         ventas_detalle_web:
-          "ML_WEBHOOK_FETCH_VENTAS_DETALLE=1 + ML_WEBHOOK_FETCH_RESOURCE=1: GET HTML ventas/.../detalle (.ve) con cookies Netscape; tabla ml_ventas_detalle_web. GET /ventas-detalle-web?k=ADMIN_SECRET",
+          "ml_ventas_detalle_web.raw = HTML; resultado_g = preview. GET /ventas-detalle-web?k= & format=json&include_raw=1 — POST .../ventas-detalle-web/retry prueba",
       })
     );
     return;
@@ -866,9 +867,62 @@ const server = http.createServer(async (req, res) => {
   }
 
   /** Compradores ML (ml_buyers); misma clave ADMIN_SECRET. */
-  if (req.method === "GET" && isBuyersPath(url.pathname)) {
+  if (isBuyersPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
     const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    const authBuyers =
+      adminSecret && (k === adminSecret || req.headers["x-admin-secret"] === adminSecret);
+
+    if (req.method === "PUT") {
+      if (!adminSecret) {
+        res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
+        return;
+      }
+      if (!authBuyers) {
+        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+        return;
+      }
+      let body;
+      try {
+        body = await parseJsonBody(req);
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        return;
+      }
+      const buyerId = Number(body.buyer_id);
+      if (!Number.isFinite(buyerId) || buyerId <= 0) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "buyer_id inválido" }));
+        return;
+      }
+      try {
+        const buyer = updateMlBuyerPhones(buyerId, {
+          phone_1: body.phone_1,
+          phone_2: body.phone_2,
+        });
+        if (!buyer) {
+          res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "buyer_id no encontrado" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, buyer }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    if (req.method !== "GET") {
+      res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "método no permitido" }));
+      return;
+    }
+
     if (!adminSecret) {
       res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
       res.end(
@@ -1100,6 +1154,41 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Prueba manual: GET detalle ventas .ve con cookies y guarda en ml_ventas_detalle_web. */
+  if (req.method === "POST" && url.pathname === "/ventas-detalle-web/retry") {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret || k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+      return;
+    }
+    let body;
+    try {
+      body = await parseJsonBody(req);
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+      return;
+    }
+    const mlUserId = Number(body.ml_user_id);
+    const orderId = Number(body.order_id);
+    if (!Number.isFinite(mlUserId) || mlUserId <= 0 || !Number.isFinite(orderId) || orderId <= 0) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "ml_user_id y order_id numéricos requeridos" }));
+      return;
+    }
+    try {
+      const result = await fetchVentasDetalleAndStore({ mlUserId, orderId });
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, result }));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+    }
+    return;
+  }
+
   /** Historial de intentos de envío automático post-venta (ml_post_sale_auto_send_log). */
   if (req.method === "GET" && isPostSaleEnviosPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
@@ -1204,9 +1293,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const lim = url.searchParams.get("limit");
+    const includeRaw =
+      url.searchParams.get("include_raw") === "1" || url.searchParams.get("include_raw") === "true";
     let rows;
     try {
-      rows = listMlVentasDetalleWeb(lim, 500);
+      rows = listMlVentasDetalleWeb(lim, 500, includeRaw);
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -1220,14 +1311,15 @@ const server = http.createServer(async (req, res) => {
     const tableRows = rows
       .map((r) => {
         const prev =
-          r.body_preview && r.body_preview.length > 200
-            ? `${escapeHtml(r.body_preview.slice(0, 200))}…`
-            : escapeHtml(r.body_preview);
+          r.resultado_g && r.resultado_g.length > 200
+            ? `${escapeHtml(r.resultado_g.slice(0, 200))}…`
+            : escapeHtml(r.resultado_g);
         return `<tr>
   <td>${escapeHtml(r.id)}</td>
   <td class="muted">${escapeHtml(r.created_at)}</td>
   <td>${escapeHtml(r.ml_user_id)}</td>
   <td>${escapeHtml(r.order_id)}</td>
+  <td>${escapeHtml(r.celular)}</td>
   <td class="muted">${escapeHtml(r.request_url)}</td>
   <td>${escapeHtml(r.http_status)}</td>
   <td>${escapeHtml(r.body_len)}</td>
@@ -1256,10 +1348,10 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>GET detalle ventas (.ve) con cookies</h1>
-  <p class="lead">Tabla <code>ml_ventas_detalle_web</code> · HTML guardado al recibir orden (<code>ML_WEBHOOK_FETCH_VENTAS_DETALLE=1</code>). ${rows.length} fila(s). JSON: <code>?format=json</code>.</p>
+  <p class="lead">Tabla <code>ml_ventas_detalle_web</code> · columna <code>raw</code> = HTML completo. ${rows.length} fila(s). JSON: <code>?format=json&amp;include_raw=1</code> para traer <code>raw</code>. Prueba: <code>POST /ventas-detalle-web/retry?k=…</code>.</p>
   <table>
-    <thead><tr><th>id</th><th>created_at</th><th>user_id</th><th>order_id</th><th>url</th><th>http</th><th>body_len</th><th>error</th><th>body preview</th></tr></thead>
-    <tbody>${tableRows || '<tr><td colspan="9">Sin registros.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>created_at</th><th>user_id</th><th>order_id</th><th>celular</th><th>url</th><th>http</th><th>body_len</th><th>error</th><th>resultado_g</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="10">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

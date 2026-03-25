@@ -31,6 +31,7 @@ if (usePostgres) {
     FETCH_PROCESS_STATUS_DONE: sqlite.FETCH_PROCESS_STATUS_DONE,
     FETCH_PROCESS_STATUS_POST_SALE_FAILED: sqlite.FETCH_PROCESS_STATUS_POST_SALE_FAILED,
     listDistinctFetchTopics: wrap(sqlite.listDistinctFetchTopics),
+    deleteAllTopicFetches: wrap(sqlite.deleteAllTopicFetches),
     upsertMlBuyer: wrap(sqlite.upsertMlBuyer),
     listMlBuyers: wrap(sqlite.listMlBuyers),
     getMlBuyer: wrap(sqlite.getMlBuyer),

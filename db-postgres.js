@@ -338,6 +338,12 @@ async function listDistinctFetchTopics() {
   return rows.map((r) => r.topic);
 }
 
+async function deleteAllTopicFetches() {
+  await ensureSchema();
+  const { rowCount } = await pool.query("DELETE FROM ml_topic_fetches");
+  return rowCount;
+}
+
 async function upsertMlBuyer(row) {
   await ensureSchema();
   const now = new Date().toISOString();
@@ -649,6 +655,7 @@ module.exports = {
   FETCH_PROCESS_STATUS_DONE,
   FETCH_PROCESS_STATUS_POST_SALE_FAILED,
   listDistinctFetchTopics,
+  deleteAllTopicFetches,
   upsertMlBuyer,
   listMlBuyers,
   getMlBuyer,

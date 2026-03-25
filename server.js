@@ -34,6 +34,7 @@ const {
   FETCH_PROCESS_STATUS_DONE,
   FETCH_PROCESS_STATUS_POST_SALE_FAILED,
   listDistinctFetchTopics,
+  deleteAllTopicFetches,
   upsertMlBuyer,
   listMlBuyers,
   updateMlBuyerPhones,
@@ -482,6 +483,8 @@ const server = http.createServer(async (req, res) => {
           "GET /hooks?k=ADMIN_SECRET (webhooks guardados en DB; activar WEBHOOK_SAVE_DB o POST /reg)",
         topic_fetches_ml:
           "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1)",
+        borrar_todos_los_fetches:
+          "DELETE /admin/topic-fetches (cabecera X-Admin-Secret) vacía tabla ml_topic_fetches",
         buyers_ml:
           "GET /buyers?k=ADMIN_SECRET (compradores). PUT /buyers?k=… JSON {buyer_id, phone_1?, phone_2?} (cabecera X-Admin-Secret alternativa)",
         mensajes_postventa:
@@ -1475,6 +1478,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Vacía todas las filas de ml_topic_fetches (Respuestas API /fetches). */
+  if (url.pathname === "/admin/topic-fetches") {
+    if (req.method === "DELETE") {
+      if (rejectAdminSecret(req, res)) return;
+      try {
+        const deleted = await deleteAllTopicFetches();
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, deleted }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "usa DELETE" }));
+    return;
+  }
+
   /** Varias cuentas ML: registrar refresh por user_id (misma app, distintos vendedores). */
   if (url.pathname === "/admin/ml-accounts") {
     if (req.method === "GET") {
@@ -1650,6 +1672,7 @@ server.listen(PORT, "0.0.0.0", () => {
     );
   }
   if (process.env.ADMIN_SECRET) {
+    console.log(`Vaciar fetches ML: DELETE http://localhost:${PORT}/admin/topic-fetches (cabecera X-Admin-Secret)`);
     console.log(`Cuentas ML: GET|POST|DELETE http://localhost:${PORT}/admin/ml-accounts (cabecera X-Admin-Secret)`);
     console.log(`Cuentas (navegador): http://localhost:${PORT}/cuentas?k=TU_ADMIN_SECRET`);
     console.log(`Hooks guardados: http://localhost:${PORT}/hooks?k=TU_ADMIN_SECRET`);

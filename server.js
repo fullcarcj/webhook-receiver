@@ -47,7 +47,7 @@ const {
   deletePostSaleSent,
 } = require("./db");
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = process.env.PORT || 3000;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
 const REG_PATH = process.env.REG_PATH || "/reg";
 const WEBHOOK_SAVE_DB = process.env.WEBHOOK_SAVE_DB === "1";
@@ -486,7 +486,7 @@ const server = http.createServer(async (req, res) => {
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         envio_auto_postventa:
-          "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=orders_v2,messages (tras fetch OK; usa id de orden; texto max 350)",
+          "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · placeholders {{order_id}} {{buyer_id}} {{seller_id}}",
         log_envios_postventa:
           "GET /envios-postventa?k=ADMIN_SECRET (historial). POST /envios-postventa/retry?k=… JSON {order_id,ml_user_id,buyer_id?} opcional force, topic",
         cookies_ml_web:

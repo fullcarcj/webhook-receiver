@@ -66,7 +66,7 @@ function renderPostSaleMessagesPage(rows, esc) {
 </head>
 <body>
   <h1>Plantillas post-venta</h1>
-  <p class="lead">${rows.length} plantilla(s). Máximo <strong>${POST_SALE_BODY_MAX} caracteres</strong> en el texto (requisito API ML post-venta). Tabla <code>post_sale_messages</code>. API: <code>GET ?format=json</code>. POST JSON <code>{"name","body"}</code> crea; <code>{"id","name","body"}</code> actualiza. DELETE <code>?id=</code>.</p>
+  <p class="lead">${rows.length} plantilla(s). Orden por <strong>id</strong>: la 1.ª es el mensaje principal; la 2.ª y 3.ª se usan como adicionales si en el servidor defines <code>ML_POST_SALE_TOTAL_MESSAGES=2</code> o <code>3</code> (y <code>ML_AUTO_SEND_POST_SALE=1</code>). Placeholders: <code>{{order_id}}</code> <code>{{buyer_id}}</code> <code>{{seller_id}}</code>. Pausa entre envíos: <code>ML_POST_SALE_EXTRA_DELAY_MS</code> (ms). Máximo <strong>${POST_SALE_BODY_MAX} caracteres</strong> por mensaje (API ML). Tabla <code>post_sale_messages</code>. API: <code>GET ?format=json</code>. POST JSON <code>{"name","body"}</code> crea; <code>{"id","name","body"}</code> actualiza. DELETE <code>?id=</code>.</p>
   ${cardsHtml || "<p class=\"lead\">No hay plantillas.</p>"}
   <div class="new-block">
     <h2 class="card-title">Nueva plantilla</h2>

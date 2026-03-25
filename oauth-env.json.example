@@ -5,5 +5,7 @@
   "ML_TEST_USER_ID": "",
   "ML_COOKIES_DIR": "data",
   "ML_WEBHOOK_FETCH_VENTAS_DETALLE": "1",
-  "ML_VENTAS_DETALLE_BASE": "https://www.mercadolibre.com.ve/ventas/"
+  "ML_VENTAS_DETALLE_BASE": "https://www.mercadolibre.com.ve/ventas/",
+  "ML_POST_SALE_TOTAL_MESSAGES": "1",
+  "ML_POST_SALE_EXTRA_DELAY_MS": "1500"
 }

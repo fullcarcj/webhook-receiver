@@ -3,7 +3,11 @@ const path = require("path");
 
 const Database = require("better-sqlite3");
 
-const dbPath = process.env.DB_PATH || path.join(__dirname, "data", "webhooks.db");
+const dbPath =
+  process.env.DB_PATH ||
+  (process.env.RENDER
+    ? path.join("/var/data", "webhooks.db")
+    : path.join(__dirname, "data", "webhooks.db"));
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
 const db = new Database(dbPath);
@@ -155,6 +159,27 @@ db.exec(`
     }
   } catch (e) {
     console.error("[db] migrate ml_ventas_detalle_web celular:", e.message);
+  }
+})();
+
+/** Pasos de envío post-venta por orden (evita duplicar al reintentar). */
+(function migrateMlPostSaleStepsSent() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ml_post_sale_steps_sent (
+        order_id INTEGER NOT NULL,
+        step_index INTEGER NOT NULL,
+        sent_at TEXT NOT NULL,
+        PRIMARY KEY (order_id, step_index)
+      );
+      CREATE INDEX IF NOT EXISTS idx_ml_post_sale_steps_order ON ml_post_sale_steps_sent(order_id);
+    `);
+    db.exec(`
+      INSERT OR IGNORE INTO ml_post_sale_steps_sent (order_id, step_index, sent_at)
+      SELECT order_id, 0, sent_at FROM ml_post_sale_sent
+    `);
+  } catch (e) {
+    console.error("[db] migrate ml_post_sale_steps_sent:", e.message);
   }
 })();
 
@@ -552,12 +577,42 @@ function getFirstPostSaleMessageBody() {
   return row && row.body != null ? String(row.body) : null;
 }
 
-function wasPostSaleSent(orderId) {
+/**
+ * @param {number|string} orderId
+ * @param {number} [totalSteps=1] — cuántos pasos (plantillas) deben estar enviados para considerar la orden cerrada
+ */
+function wasPostSaleSent(orderId, totalSteps) {
   const id = Number(orderId);
   if (!Number.isFinite(id) || id <= 0) return false;
-  return Boolean(db.prepare(`SELECT 1 FROM ml_post_sale_sent WHERE order_id = ?`).get(id));
+  const n = Math.min(Math.max(Number(totalSteps) || 1, 1), 3);
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM ml_post_sale_steps_sent WHERE order_id = ? AND step_index >= 0 AND step_index < ?`
+    )
+    .get(id, n);
+  return Boolean(row && row.c >= n);
 }
 
+function isPostSaleStepSent(orderId, stepIndex) {
+  const id = Number(orderId);
+  const si = Number(stepIndex);
+  if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(si) || si < 0) return false;
+  return Boolean(
+    db.prepare(`SELECT 1 FROM ml_post_sale_steps_sent WHERE order_id = ? AND step_index = ?`).get(id, si)
+  );
+}
+
+function markPostSaleStepSent(orderId, stepIndex) {
+  const id = Number(orderId);
+  const si = Number(stepIndex);
+  if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(si) || si < 0) return;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT OR REPLACE INTO ml_post_sale_steps_sent (order_id, step_index, sent_at) VALUES (?, ?, ?)`
+  ).run(id, si, now);
+}
+
+/** Marca envío “completo” en tabla legada (compatibilidad). Llamar tras todos los pasos OK. */
 function markPostSaleSent(orderId) {
   const id = Number(orderId);
   const now = new Date().toISOString();
@@ -568,6 +623,7 @@ function markPostSaleSent(orderId) {
 function deletePostSaleSent(orderId) {
   const id = Number(orderId);
   if (!Number.isFinite(id) || id <= 0) return 0;
+  db.prepare(`DELETE FROM ml_post_sale_steps_sent WHERE order_id = ?`).run(id);
   return db.prepare(`DELETE FROM ml_post_sale_sent WHERE order_id = ?`).run(id).changes;
 }
 
@@ -688,6 +744,8 @@ module.exports = {
   deletePostSaleMessage,
   getFirstPostSaleMessageBody,
   wasPostSaleSent,
+  isPostSaleStepSent,
+  markPostSaleStepSent,
   markPostSaleSent,
   deletePostSaleSent,
   insertPostSaleAutoSendLog,

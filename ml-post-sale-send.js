@@ -2,14 +2,20 @@
  * Envío automático del texto de post_sale_messages vía API ML.
  * POST .../messages/packs/{order_id}/sellers/{seller_id}?application_id=...&tag=post_sale
  * Body: from.user_id = vendedor, to.user_id = comprador (buyer_id).
+ *
+ * Varias plantillas: filas en post_sale_messages ordenadas por id (1.º = principal, 2.º y 3.º opcionales).
+ * ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (por defecto 1). ML_POST_SALE_EXTRA_DELAY_MS entre envíos (default 1500).
+ * Placeholders en el texto: {{order_id}}, {{buyer_id}}, {{seller_id}}, {{ml_user_id}}
  */
 const { mercadoLibrePostJsonForUser } = require("./oauth-token");
 const { extractOrderIdFromOrder, extractOrderIdFromMessage } = require("./ml-pack-extract");
 const { extractBuyerIdForPostSale } = require("./ml-buyer-extract");
 const {
-  getFirstPostSaleMessageBody,
+  listPostSaleMessages,
   wasPostSaleSent,
   markPostSaleSent,
+  markPostSaleStepSent,
+  isPostSaleStepSent,
   insertPostSaleAutoSendLog,
 } = require("./db");
 
@@ -41,6 +47,42 @@ function logAutoSend(row) {
   } catch (e) {
     console.error("[post-sale log DB]", e.message);
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * @param {string} text
+ * @param {{ orderId: number, buyerId: number, sellerId: number }} ctx
+ */
+function applyPostSalePlaceholders(text, ctx) {
+  if (text == null) return "";
+  let s = String(text);
+  const orderId = ctx.orderId != null ? String(ctx.orderId) : "";
+  const buyerId = ctx.buyerId != null ? String(ctx.buyerId) : "";
+  const sellerId = ctx.sellerId != null ? String(ctx.sellerId) : "";
+  const map = [
+    ["{{order_id}}", orderId],
+    ["{{buyer_id}}", buyerId],
+    ["{{seller_id}}", sellerId],
+    ["{{ml_user_id}}", sellerId],
+  ];
+  for (const [k, v] of map) {
+    s = s.split(k).join(v);
+  }
+  return s;
+}
+
+function computePostSaleBodiesAndSteps() {
+  const rows = listPostSaleMessages();
+  const bodies = rows
+    .map((r) => (r.body != null ? String(r.body).trim() : ""))
+    .filter(Boolean);
+  const maxFromEnv = Math.min(Math.max(parseInt(process.env.ML_POST_SALE_TOTAL_MESSAGES || "1", 10) || 1, 1), 3);
+  const totalSteps = Math.min(maxFromEnv, bodies.length);
+  return { totalSteps, bodies };
 }
 
 /**
@@ -110,18 +152,8 @@ async function trySendDefaultPostSaleMessage(args) {
     return { skipped: true, reason: "no_buyer_id", order_id: orderId };
   }
 
-  if (wasPostSaleSent(orderId)) {
-    logAutoSend({
-      ...base,
-      order_id: orderId,
-      outcome: "skipped",
-      skip_reason: "already_sent",
-    });
-    return { skipped: true, reason: "already_sent", order_id: orderId };
-  }
-
-  const fullText = getFirstPostSaleMessageBody();
-  if (!fullText || !String(fullText).trim()) {
+  const { totalSteps, bodies } = computePostSaleBodiesAndSteps();
+  if (totalSteps === 0) {
     logAutoSend({
       ...base,
       order_id: orderId,
@@ -131,12 +163,14 @@ async function trySendDefaultPostSaleMessage(args) {
     return { skipped: true, reason: "no_template" };
   }
 
-  let text = String(fullText).trim();
-  if (text.length > MAX_OTHER) {
-    console.warn(
-      `[post-sale] plantilla (${text.length} chars) truncada a ${MAX_OTHER} (límite API ML). Acorta o divide el mensaje.`
-    );
-    text = text.slice(0, MAX_OTHER);
+  if (wasPostSaleSent(orderId, totalSteps)) {
+    logAutoSend({
+      ...base,
+      order_id: orderId,
+      outcome: "skipped",
+      skip_reason: "already_sent",
+    });
+    return { skipped: true, reason: "already_sent", order_id: orderId };
   }
 
   const optionId = (process.env.ML_POST_SALE_OPTION_ID || "OTHER").trim();
@@ -155,72 +189,98 @@ async function trySendDefaultPostSaleMessage(args) {
   }
 
   const appId = String(
-    process.env.ML_APPLICATION_ID ||
-      process.env.OAUTH_CLIENT_ID ||
-      "1837222235616049"
+    process.env.ML_APPLICATION_ID || process.env.OAUTH_CLIENT_ID || "1837222235616049"
   ).trim();
   const q = new URLSearchParams({
     application_id: appId,
     tag: "post_sale",
   });
   const path = `/messages/packs/${orderId}/sellers/${args.mlUserId}?${q.toString()}`;
-  const result = await mercadoLibrePostJsonForUser(args.mlUserId, path, {
-    from: { user_id: args.mlUserId },
-    to: { user_id: buyerId },
-    option_id: optionId,
-    text,
-  });
+  const delayMs = Math.max(0, Number(process.env.ML_POST_SALE_EXTRA_DELAY_MS) || 1500);
+  const ctx = { orderId, buyerId, sellerId: args.mlUserId };
 
-  if (result.ok) {
-    markPostSaleSent(orderId);
-    console.log("[post-sale] enviado order_id=%s option=%s", orderId, optionId);
-    const resp =
-      result.data != null
-        ? typeof result.data === "string"
-          ? result.data
-          : JSON.stringify(result.data)
-        : null;
-    logAutoSend({
-      ...base,
-      order_id: orderId,
-      outcome: "success",
-      http_status: result.status,
+  let lastResult = { ok: false, status: 0, order_id: orderId, data: null };
+
+  for (let step = 0; step < totalSteps; step++) {
+    if (isPostSaleStepSent(orderId, step)) {
+      continue;
+    }
+    if (step > 0) {
+      await sleep(delayMs);
+    }
+
+    let text = applyPostSalePlaceholders(bodies[step], ctx);
+    text = String(text).trim();
+    if (text.length > MAX_OTHER) {
+      console.warn(
+        `[post-sale] paso ${step} (${text.length} chars) truncado a ${MAX_OTHER} (límite API ML).`
+      );
+      text = text.slice(0, MAX_OTHER);
+    }
+
+    const result = await mercadoLibrePostJsonForUser(args.mlUserId, path, {
+      from: { user_id: args.mlUserId },
+      to: { user_id: buyerId },
       option_id: optionId,
-      request_path: result.path,
-      response_body: resp,
+      text,
     });
-  } else {
-    const mlCause = mercadoLibreErrorCause(result.data);
-    const mlMsg = mercadoLibreErrorMessage(result.data);
-    const preview = (result.rawText || "").slice(0, 400);
-    console.error(
-      "[post-sale] fallo HTTP %s order_id=%s%s: %s",
-      result.status,
-      orderId,
-      mlCause ? ` cause=${mlCause}` : "",
-      preview
-    );
-    const errMsg =
-      mlCause != null
-        ? `HTTP ${result.status} · ${mlCause}`
-        : mlMsg != null
-          ? `HTTP ${result.status} · ${mlMsg}`
-          : `HTTP ${result.status}`;
-    logAutoSend({
-      ...base,
-      order_id: orderId,
-      outcome: "api_error",
-      skip_reason:
-        mlCause != null ? `ml:${mlCause}` : mlMsg != null ? `ml:${mlMsg.slice(0, 200)}` : null,
-      http_status: result.status,
-      option_id: optionId,
-      request_path: result.path,
-      response_body: result.rawText ? String(result.rawText).slice(0, 8000) : null,
-      error_message: errMsg,
-    });
+
+    lastResult = { ok: result.ok, status: result.status, order_id: orderId, data: result.data };
+
+    if (result.ok) {
+      markPostSaleStepSent(orderId, step);
+      console.log("[post-sale] enviado order_id=%s step=%s option=%s", orderId, step, optionId);
+      const resp =
+        result.data != null
+          ? typeof result.data === "string"
+            ? result.data
+            : JSON.stringify(result.data)
+          : null;
+      logAutoSend({
+        ...base,
+        order_id: orderId,
+        outcome: "success",
+        http_status: result.status,
+        option_id: optionId,
+        request_path: result.path,
+        response_body: resp,
+        skip_reason: `message_step=${step}`,
+      });
+    } else {
+      const mlCause = mercadoLibreErrorCause(result.data);
+      const mlMsg = mercadoLibreErrorMessage(result.data);
+      const preview = (result.rawText || "").slice(0, 400);
+      console.error(
+        "[post-sale] fallo HTTP %s order_id=%s step=%s%s: %s",
+        result.status,
+        orderId,
+        step,
+        mlCause ? ` cause=${mlCause}` : "",
+        preview
+      );
+      const errMsg =
+        mlCause != null
+          ? `HTTP ${result.status} · ${mlCause}`
+          : mlMsg != null
+            ? `HTTP ${result.status} · ${mlMsg}`
+            : `HTTP ${result.status}`;
+      logAutoSend({
+        ...base,
+        order_id: orderId,
+        outcome: "api_error",
+        skip_reason: `message_step=${step}`,
+        http_status: result.status,
+        option_id: optionId,
+        request_path: result.path,
+        response_body: result.rawText ? String(result.rawText).slice(0, 8000) : null,
+        error_message: errMsg,
+      });
+      return { ok: false, status: result.status, order_id: orderId, data: result.data, step };
+    }
   }
 
-  return { ok: result.ok, status: result.status, order_id: orderId, data: result.data };
+  markPostSaleSent(orderId);
+  return lastResult;
 }
 
-module.exports = { trySendDefaultPostSaleMessage, MAX_OTHER };
+module.exports = { trySendDefaultPostSaleMessage, MAX_OTHER, applyPostSalePlaceholders };

@@ -880,9 +880,6 @@ const server = http.createServer(async (req, res) => {
     })();
     const tableRows = rows
       .map((r) => {
-        const payloadPreview = r.payload
-          ? escapeHtml(r.payload.length > 800 ? `${r.payload.slice(0, 800)}…` : r.payload)
-          : "—";
         const errCell = r.error ? `<span class="err">${escapeHtml(r.error.slice(0, 200))}</span>` : "—";
         const st = r.process_status != null && String(r.process_status).trim() !== ""
           ? escapeHtml(r.process_status)
@@ -899,7 +896,6 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.http_status)}</td>
   <td><strong>${st}</strong></td>
   <td>${errCell}</td>
-  <td><pre class="payload">${payloadPreview}</pre></td>
 </tr>`;
       })
       .join("");
@@ -919,7 +915,6 @@ const server = http.createServer(async (req, res) => {
     tr:nth-child(even) td { background: #192734; }
     .muted { color: #8b98a5; font-size: 0.8rem; }
     .err { color: #f4212e; font-size: 0.8rem; word-break: break-word; }
-    pre.payload { margin: 0; max-height: 220px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
     .topic-filters { margin-top: 0.75rem; font-size: 0.9rem; line-height: 1.6; }
     .topic-filters a { color: #1d9bf0; text-decoration: none; }
     .topic-filters a:hover { text-decoration: underline; }
@@ -928,12 +923,12 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Respuestas API (ml_topic_fetches)</h1>
-  <p class="lead">${rows.length} registro(s)${topicFilter ? ` · filtro: <code>${escapeHtml(topicFilter)}</code>` : ""}. <strong>estado</strong>: con topic <code>orders_v2</code>, tras el GET a ML puede quedar <code>Completado</code> o <code>Fallo post-venta</code> (post-venta automático). Si el topic <strong>no</strong> es <code>orders_v2</code>, tras un fetch OK sigue <code>Procesando...</code> (el hook no se marca como flujo de orden completado). Orden: por topic (A→Z), id reciente primero. JSON: <code>?format=json</code> (<code>process_status</code>).</p>
+  <p class="lead">${rows.length} registro(s)${topicFilter ? ` · filtro: <code>${escapeHtml(topicFilter)}</code>` : ""}. Cuerpo JSON de la respuesta ML (payload): <code>?format=json</code>. <strong>estado</strong>: con topic <code>orders_v2</code>, tras el GET a ML puede quedar <code>Completado</code> o <code>Fallo post-venta</code>. Si el topic <strong>no</strong> es <code>orders_v2</code>, tras un fetch OK sigue <code>Procesando...</code>. Orden: por topic (A→Z), id reciente primero.</p>
   <p class="topic-filters">${topicFilterLinks}</p>
   <div style="overflow-x:auto; max-width:100%">
   <table>
-    <thead><tr><th>id</th><th>fetched_at</th><th>user_id</th><th>nickname</th><th>topic</th><th>sku</th><th>title</th><th>request_path</th><th>http</th><th>estado</th><th>error</th><th>payload</th></tr></thead>
-    <tbody>${tableRows || '<tr><td colspan="12">No hay fetches guardados.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>fetched_at</th><th>user_id</th><th>nickname</th><th>topic</th><th>sku</th><th>title</th><th>request_path</th><th>http</th><th>estado</th><th>error</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="11">No hay fetches guardados.</td></tr>'}</tbody>
   </table>
   </div>
 </body>
@@ -1285,17 +1280,51 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const lim = url.searchParams.get("limit");
+    const outcomeRaw = url.searchParams.get("outcome") || "default";
+    const validOutcomes = new Set(["default", "all", "success", "skipped", "api_error"]);
+    const curOutcome = validOutcomes.has(String(outcomeRaw).toLowerCase())
+      ? String(outcomeRaw).toLowerCase()
+      : "default";
     let rows;
     try {
-      rows = await listPostSaleAutoSendLog(lim, 2000);
+      rows = await listPostSaleAutoSendLog(lim, 2000, { outcome: curOutcome });
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
       return;
     }
+    const kForLinks = k;
+    const limForLinks = lim && String(lim).trim() !== "" ? String(lim) : "";
+    function enviosPostventaQuery(outcomeKey) {
+      const p = new URLSearchParams();
+      p.set("k", kForLinks);
+      if (limForLinks) p.set("limit", limForLinks);
+      if (outcomeKey && outcomeKey !== "default") p.set("outcome", outcomeKey);
+      return `/envios-postventa?${p.toString()}`;
+    }
+    const enviosFilterDefs = [
+      { key: "default", label: "Por defecto (error 1.er mensaje)" },
+      { key: "all", label: "Todos" },
+      { key: "success", label: "success" },
+      { key: "skipped", label: "skipped" },
+      { key: "api_error", label: "api_error" },
+    ];
+    const enviosFilterNav = enviosFilterDefs
+      .map((f) => {
+        const active = curOutcome === f.key ? ' class="active"' : "";
+        return `<a href="${escapeAttr(enviosPostventaQuery(f.key))}"${active}>${escapeHtml(f.label)}</a>`;
+      })
+      .join("\n    ");
     if (url.searchParams.get("format") === "json") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, count: rows.length, items: rows }));
+      res.end(
+        JSON.stringify({
+          ok: true,
+          outcome: curOutcome,
+          count: rows.length,
+          items: rows,
+        })
+      );
       return;
     }
     const tableRows = rows
@@ -1335,11 +1364,18 @@ const server = http.createServer(async (req, res) => {
     tr:nth-child(even) td { background: #192734; }
     .muted { color: #8b98a5; font-size: 0.75rem; }
     pre.payload { margin: 0; max-height: 100px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+    .filter-nav { margin-top: 0.75rem; line-height: 1.8; font-size: 0.85rem; }
+    .filter-nav a { color: #1d9bf0; text-decoration: none; margin-right: 0.35rem; }
+    .filter-nav a:hover { text-decoration: underline; }
+    .filter-nav a.active { font-weight: 600; color: #e7e9ea; text-decoration: underline; }
   </style>
 </head>
 <body>
   <h1>Log envíos automáticos post-venta</h1>
-  <p class="lead">Tabla <code>ml_post_sale_auto_send_log</code> · solo errores de API en el <strong>primer</strong> mensaje (<code>skip_reason=message_step=0</code>); no <code>success</code> ni <code>skipped</code>. <code>order_id</code> = id de orden en la URL de mensajería ML. ${rows.length} fila(s). JSON: <code>?format=json</code>. Reintento: <code>POST /envios-postventa/retry?k=…</code> con JSON <code>order_id</code>, <code>ml_user_id</code>, opcional <code>buyer_id</code>, <code>force</code>.</p>
+  <p class="lead">Tabla <code>ml_post_sale_auto_send_log</code> · <code>order_id</code> = id de orden en la URL de mensajería ML. ${rows.length} fila(s) con el filtro actual. JSON: <code>?format=json&amp;outcome=…</code>. Reintento: <code>POST /envios-postventa/retry?k=…</code> con JSON <code>order_id</code>, <code>ml_user_id</code>, opcional <code>buyer_id</code>, <code>force</code>.</p>
+  <nav class="filter-nav" aria-label="Filtro por outcome">
+    ${enviosFilterNav}
+  </nav>
   <table>
     <thead><tr><th>id</th><th>created_at</th><th>user_id</th><th>topic</th><th>order_id</th><th>outcome</th><th>skip_reason</th><th>http</th><th>option</th><th>error</th><th>response (preview)</th></tr></thead>
     <tbody>${tableRows || '<tr><td colspan="11">Sin registros.</td></tr>'}</tbody>

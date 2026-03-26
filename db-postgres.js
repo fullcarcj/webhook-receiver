@@ -626,17 +626,41 @@ async function insertPostSaleAutoSendLog(row) {
   return Number(rows[0].id);
 }
 
-async function listPostSaleAutoSendLog(limit, maxAllowed) {
+function normalizePostSaleLogOutcomeFilter(raw) {
+  if (raw == null || String(raw).trim() === "") return "default";
+  const v = String(raw).trim().toLowerCase();
+  if (["all", "success", "skipped", "api_error", "default"].includes(v)) return v;
+  return "default";
+}
+
+function postSaleLogOutcomeSqlExtra(mode) {
+  switch (mode) {
+    case "all":
+      return "";
+    case "success":
+      return " AND outcome = 'success'";
+    case "skipped":
+      return " AND outcome = 'skipped'";
+    case "api_error":
+      return " AND outcome = 'api_error'";
+    case "default":
+    default:
+      return " AND outcome NOT IN ('success', 'skipped') AND skip_reason = 'message_step=0'";
+  }
+}
+
+/** @param {{ outcome?: string }} [options] outcome: default | all | success | skipped | api_error */
+async function listPostSaleAutoSendLog(limit, maxAllowed, options = {}) {
   await ensureSchema();
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  const mode = normalizePostSaleLogOutcomeFilter(options.outcome);
+  const extra = postSaleLogOutcomeSqlExtra(mode);
   const { rows } = await pool.query(
     `SELECT id, created_at, ml_user_id, topic, notification_id, order_id, outcome, skip_reason,
             http_status, option_id, request_path, response_body, error_message
      FROM ml_post_sale_auto_send_log
-     WHERE topic = 'orders_v2'
-       AND outcome NOT IN ('success', 'skipped')
-       AND skip_reason = 'message_step=0'
+     WHERE topic = 'orders_v2'${extra}
      ORDER BY id DESC LIMIT $1`,
     [n]
   );

@@ -11,11 +11,16 @@ function normField(v) {
 }
 
 function buyerCoreFieldsDiffer(existing, incoming) {
-  return (
-    normField(existing.nickname) !== normField(incoming.nickname) ||
-    normField(existing.phone_1) !== normField(incoming.phone_1) ||
-    normField(existing.phone_2) !== normField(incoming.phone_2)
-  );
+  if (normField(existing.nickname) !== normField(incoming.nickname)) return true;
+  if (normField(existing.phone_1) !== normField(incoming.phone_1)) return true;
+  if (normField(existing.phone_2) !== normField(incoming.phone_2)) return true;
+  if (
+    incoming.nombre_apellido !== undefined &&
+    normField(existing.nombre_apellido) !== normField(incoming.nombre_apellido)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -33,6 +38,9 @@ function buildCambioDatosFromDiff(existing, incoming) {
     }
   };
   pushIf("nickname", existing.nickname, incoming.nickname);
+  if (incoming.nombre_apellido !== undefined) {
+    pushIf("nombre_apellido", existing.nombre_apellido, incoming.nombre_apellido);
+  }
   pushIf("phone_1", existing.phone_1, incoming.phone_1);
   pushIf("phone_2", existing.phone_2, incoming.phone_2);
   if (parts.length === 0) return null;

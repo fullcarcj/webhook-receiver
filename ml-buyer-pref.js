@@ -15,6 +15,20 @@ function normalizeBuyerPrefEntrega(v) {
   return BUYER_PREF_ENTREGA_VALUES.includes(s) ? s : null;
 }
 
+const NOMBRE_APELLIDO_MAX = 500;
+
+/**
+ * ml_buyers.nombre_apellido (columna lógica "Nombre y Apellido").
+ * @param {unknown} v
+ * @returns {string|null}
+ */
+function normalizeNombreApellido(v) {
+  if (v == null || v === "") return null;
+  const s = String(v).trim();
+  if (s === "") return null;
+  return s.length > NOMBRE_APELLIDO_MAX ? s.slice(0, NOMBRE_APELLIDO_MAX) : s;
+}
+
 const CAMBIO_DATOS_MAX = 4000;
 
 /**
@@ -43,5 +57,6 @@ module.exports = {
   BUYER_PREF_ENTREGA_DEFAULT,
   normalizeBuyerPrefEntrega,
   normalizeCambioDatos,
+  normalizeNombreApellido,
   resolvePrefEntregaForUpsert,
 };

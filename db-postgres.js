@@ -7,6 +7,7 @@ const { Pool } = require("pg");
 const {
   normalizeBuyerPrefEntrega,
   normalizeCambioDatos,
+  normalizeNombreApellido,
   resolvePrefEntregaForUpsert,
 } = require("./ml-buyer-pref");
 
@@ -102,6 +103,7 @@ async function runSchemaAndSeed() {
     `CREATE TABLE IF NOT EXISTS ml_buyers (
       buyer_id BIGINT PRIMARY KEY,
       nickname TEXT,
+      nombre_apellido TEXT,
       phone_1 TEXT,
       phone_2 TEXT,
       pref_entrega TEXT DEFAULT 'Pickup',
@@ -180,6 +182,23 @@ async function runSchemaAndSeed() {
   await migrateMlBuyersPrefEntrega();
   await migrateMlBuyersCambioDatos();
   await migrateMlBuyersActualizacionYDefaults();
+  await migrateMlBuyersNombreApellido();
+}
+
+/** Columna nombre_apellido (Nombre y Apellido) entre nickname y phone_1. */
+async function migrateMlBuyersNombreApellido() {
+  try {
+    const { rows: col } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_buyers' AND column_name = 'nombre_apellido'`
+    );
+    if (col.length === 0) {
+      await pool.query(`ALTER TABLE ml_buyers ADD COLUMN nombre_apellido TEXT`);
+      console.log("[db] ml_buyers: columna nombre_apellido añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_buyers nombre_apellido:", e.message);
+  }
 }
 
 /** Columna pref_entrega (Pref. entrega) en instalaciones previas sin ella. */
@@ -508,11 +527,14 @@ async function upsertMlBuyer(row) {
   const pref = resolvePrefEntregaForUpsert(row);
   const cambio =
     row.cambio_datos !== undefined ? normalizeCambioDatos(row.cambio_datos) : null;
+  const nombreAp =
+    row.nombre_apellido !== undefined ? normalizeNombreApellido(row.nombre_apellido) : null;
   await pool.query(
-    `INSERT INTO ml_buyers (buyer_id, nickname, phone_1, phone_2, pref_entrega, cambio_datos, actualizacion, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO ml_buyers (buyer_id, nickname, nombre_apellido, phone_1, phone_2, pref_entrega, cambio_datos, actualizacion, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      ON CONFLICT (buyer_id) DO UPDATE SET
        nickname = COALESCE(NULLIF(EXCLUDED.nickname, ''), ml_buyers.nickname),
+       nombre_apellido = COALESCE(NULLIF(EXCLUDED.nombre_apellido, ''), ml_buyers.nombre_apellido),
        phone_1 = COALESCE(EXCLUDED.phone_1, ml_buyers.phone_1),
        phone_2 = COALESCE(EXCLUDED.phone_2, ml_buyers.phone_2),
        pref_entrega = COALESCE(EXCLUDED.pref_entrega, ml_buyers.pref_entrega),
@@ -522,6 +544,7 @@ async function upsertMlBuyer(row) {
     [
       row.buyer_id,
       row.nickname != null ? String(row.nickname) : null,
+      nombreAp,
       row.phone_1 != null ? String(row.phone_1) : null,
       row.phone_2 != null ? String(row.phone_2) : null,
       pref,
@@ -538,7 +561,7 @@ async function listMlBuyers(limit, maxAllowed) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   const { rows } = await pool.query(
-    `SELECT buyer_id, nickname, phone_1, phone_2, pref_entrega, cambio_datos, actualizacion, created_at, updated_at
+    `SELECT buyer_id, nickname, nombre_apellido, phone_1, phone_2, pref_entrega, cambio_datos, actualizacion, created_at, updated_at
      FROM ml_buyers ORDER BY updated_at DESC LIMIT $1`,
     [n]
   );
@@ -554,7 +577,7 @@ function normalizeBuyerPhoneValue(v) {
 async function getMlBuyer(buyerId) {
   await ensureSchema();
   const { rows } = await pool.query(
-    `SELECT buyer_id, nickname, phone_1, phone_2, pref_entrega, cambio_datos, actualizacion, created_at, updated_at
+    `SELECT buyer_id, nickname, nombre_apellido, phone_1, phone_2, pref_entrega, cambio_datos, actualizacion, created_at, updated_at
      FROM ml_buyers WHERE buyer_id = $1`,
     [buyerId]
   );
@@ -583,15 +606,23 @@ async function updateMlBuyerPhones(buyerId, patch) {
         ? null
         : normalizeCambioDatos(patch.cambio_datos);
   }
+  let nombre_apellido = row.nombre_apellido;
+  if (patch.nombre_apellido !== undefined) {
+    nombre_apellido =
+      patch.nombre_apellido === null || String(patch.nombre_apellido).trim() === ""
+        ? null
+        : normalizeNombreApellido(patch.nombre_apellido);
+  }
   const now = new Date().toISOString();
   await pool.query(
-    `UPDATE ml_buyers SET phone_1 = $1, phone_2 = $2, pref_entrega = $3, cambio_datos = $4, actualizacion = $5, updated_at = $6
-     WHERE buyer_id = $7`,
-    [phone_1, phone_2, pref_entrega, cambio_datos, now, now, buyerId]
+    `UPDATE ml_buyers SET phone_1 = $1, phone_2 = $2, pref_entrega = $3, cambio_datos = $4, nombre_apellido = $5, actualizacion = $6, updated_at = $7
+     WHERE buyer_id = $8`,
+    [phone_1, phone_2, pref_entrega, cambio_datos, nombre_apellido, now, now, buyerId]
   );
   return {
     buyer_id: buyerId,
     nickname: row.nickname,
+    nombre_apellido,
     phone_1,
     phone_2,
     pref_entrega,

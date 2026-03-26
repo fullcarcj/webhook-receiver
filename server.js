@@ -11,6 +11,7 @@ const {
   normalizeBuyerPrefEntrega,
   BUYER_PREF_ENTREGA_VALUES,
   normalizeCambioDatos,
+  normalizeNombreApellido,
 } = require("./ml-buyer-pref");
 const { fetchVentasDetalleAndStore } = require("./ml-ventas-detalle-fetch");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
@@ -496,7 +497,7 @@ const server = http.createServer(async (req, res) => {
         borrar_todos_los_fetches:
           "DELETE /admin/topic-fetches (cabecera X-Admin-Secret) vacía tabla ml_topic_fetches",
         buyers_ml:
-          "GET /buyers?k=ADMIN_SECRET (ml_buyers: pref_entrega default Pickup; actualizacion ISO al guardar). POST/PUT JSON buyer_id + campos opcionales (cabecera X-Admin-Secret alternativa)",
+          "GET /buyers?k=ADMIN_SECRET (ml_buyers: nombre_apellido, pref_entrega default Pickup, actualizacion ISO). POST/PUT JSON buyer_id + campos opcionales (cabecera X-Admin-Secret alternativa)",
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         envio_auto_postventa:
@@ -976,6 +977,9 @@ const server = http.createServer(async (req, res) => {
         phone_1: p1Raw === "" ? null : p1Raw,
         phone_2: p2Raw === "" ? null : p2Raw,
       };
+      if (Object.prototype.hasOwnProperty.call(body, "nombre_apellido")) {
+        row.nombre_apellido = normalizeNombreApellido(body.nombre_apellido);
+      }
       let needPrefClear = false;
       if (Object.prototype.hasOwnProperty.call(body, "pref_entrega")) {
         if (body.pref_entrega === null || String(body.pref_entrega).trim() === "") {
@@ -1071,6 +1075,12 @@ const server = http.createServer(async (req, res) => {
           patch.cambio_datos = normalizeCambioDatos(body.cambio_datos);
         }
       }
+      if (body.nombre_apellido !== undefined) {
+        patch.nombre_apellido =
+          body.nombre_apellido === null || String(body.nombre_apellido).trim() === ""
+            ? null
+            : normalizeNombreApellido(body.nombre_apellido);
+      }
       try {
         const buyer = await updateMlBuyerPhones(buyerId, patch);
         if (!buyer) {
@@ -1130,6 +1140,7 @@ const server = http.createServer(async (req, res) => {
           return `<tr>
   <td>${escapeHtml(r.buyer_id)}</td>
   <td>${escapeHtml(r.nickname)}</td>
+  <td>${escapeHtml(r.nombre_apellido)}</td>
   <td>${escapeHtml(r.phone_1)}</td>
   <td>${escapeHtml(r.phone_2)}</td>
   <td>${escapeHtml(r.pref_entrega)}</td>
@@ -1162,8 +1173,8 @@ const server = http.createServer(async (req, res) => {
   <h1>Compradores (ml_buyers)</h1>
   <p class="lead">${rows.length} registro(s). <code>pref_entrega</code> por defecto <code>Pickup</code> si no viene en el webhook. <code>actualizacion</code> = última modificación (ISO). JSON: <code>?format=json</code>.</p>
   <table>
-    <thead><tr><th>buyer_id</th><th>nickname</th><th>phone_1</th><th>phone_2</th><th>pref_entrega</th><th>cambio_datos</th><th>actualizacion</th><th>created_at</th><th>updated_at</th></tr></thead>
-    <tbody>${buyerRows || '<tr><td colspan="9">No hay compradores guardados.</td></tr>'}</tbody>
+    <thead><tr><th>buyer_id</th><th>nickname</th><th>nombre y apellido</th><th>phone_1</th><th>phone_2</th><th>pref_entrega</th><th>cambio_datos</th><th>actualizacion</th><th>created_at</th><th>updated_at</th></tr></thead>
+    <tbody>${buyerRows || '<tr><td colspan="10">No hay compradores guardados.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

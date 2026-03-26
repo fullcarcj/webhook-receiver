@@ -166,6 +166,7 @@ async function migrateMlBuyersPrefEntrega() {
     );
     if (col.length === 0) {
       await pool.query(`ALTER TABLE ml_buyers ADD COLUMN pref_entrega TEXT`);
+      console.log("[db] ml_buyers: columna pref_entrega añadida (migración)");
     }
     const { rows: chk } = await pool.query(
       `SELECT 1 FROM pg_constraint WHERE conname = 'ml_buyers_pref_entrega_check' LIMIT 1`
@@ -175,6 +176,7 @@ async function migrateMlBuyersPrefEntrega() {
         ALTER TABLE ml_buyers ADD CONSTRAINT ml_buyers_pref_entrega_check
         CHECK (pref_entrega IS NULL OR pref_entrega IN ('Pickup', 'Envio Courier', 'Delivery'))
       `);
+      console.log("[db] ml_buyers: CHECK pref_entrega aplicado");
     }
   } catch (e) {
     console.error("[db] migrate ml_buyers pref_entrega:", e.message);
@@ -190,6 +192,7 @@ async function migrateMlBuyersCambioDatos() {
     );
     if (col.length === 0) {
       await pool.query(`ALTER TABLE ml_buyers ADD COLUMN cambio_datos TEXT`);
+      console.log("[db] ml_buyers: columna cambio_datos añadida (migración)");
     }
   } catch (e) {
     console.error("[db] migrate ml_buyers cambio_datos:", e.message);

@@ -31,8 +31,26 @@ const FETCH_PROCESS_STATUS_PENDING = "Procesando...";
 const FETCH_PROCESS_STATUS_DONE = "Completado";
 const FETCH_PROCESS_STATUS_POST_SALE_FAILED = "Fallo post-venta";
 
+/**
+ * Postgres en la nube (Render, Neon, etc.) exige TLS. Sin esto suele aparecer "SSL/TLS required" o ECONNRESET.
+ * Localhost sin SSL: PGSSLMODE=disable o URL solo a 127.0.0.1.
+ */
+function poolSslOption() {
+  const raw = process.env.DATABASE_URL && String(process.env.DATABASE_URL).trim();
+  if (!raw || process.env.PGSSLMODE === "disable") return false;
+  if (/sslmode=disable/i.test(raw)) return false;
+  const local =
+    /@localhost[:\/]/i.test(raw) ||
+    /@127\.0\.0\.1[:\/]/i.test(raw) ||
+    /:\/\/localhost[:\/]/i.test(raw) ||
+    /:\/\/127\.0\.0\.1[:\/]/i.test(raw);
+  if (local) return false;
+  return { rejectUnauthorized: false };
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  ssl: poolSslOption(),
   max: Number(process.env.PG_POOL_MAX || 10),
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 15_000,

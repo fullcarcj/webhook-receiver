@@ -209,6 +209,40 @@ db.exec(`
   }
 })();
 
+/** CHECK vía trigger: solo topic orders_v2; limpia filas inválidas al cargar. */
+(function migratePostSaleAutoSendLogTopicTrigger() {
+  try {
+    const has = db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='ml_post_sale_auto_send_log_topic_enforce'"
+      )
+      .get();
+    if (!has) {
+      db.prepare(
+        "DELETE FROM ml_post_sale_auto_send_log WHERE topic IS NULL OR topic <> 'orders_v2'"
+      ).run();
+      db.exec(`
+        CREATE TRIGGER ml_post_sale_auto_send_log_topic_enforce
+        BEFORE INSERT ON ml_post_sale_auto_send_log
+        FOR EACH ROW
+        WHEN NEW.topic IS NOT 'orders_v2' OR NEW.topic IS NULL
+        BEGIN
+          SELECT RAISE(ABORT, 'ml_post_sale_auto_send_log.topic must be orders_v2');
+        END
+      `);
+      console.log("[db] ml_post_sale_auto_send_log: trigger topic=orders_v2");
+    }
+    db.prepare(
+      "DELETE FROM ml_post_sale_auto_send_log WHERE topic IS NULL OR topic <> 'orders_v2'"
+    ).run();
+    db.prepare(
+      "DELETE FROM ml_post_sale_auto_send_log WHERE outcome IN ('success', 'skipped')"
+    ).run();
+  } catch (e) {
+    console.error("[db] migrate ml_post_sale_auto_send_log topic trigger:", e.message);
+  }
+})();
+
 /** Máximo alineado con API ML (option OTHER) y UI /mensajes-postventa. */
 const POST_SALE_MESSAGE_BODY_MAX = 350;
 
@@ -671,6 +705,8 @@ const insertPostSaleAutoSendLogStmt = db.prepare(
 function insertPostSaleAutoSendLog(row) {
   const topicNorm = row.topic != null ? String(row.topic).trim() : "";
   if (topicNorm !== "orders_v2") return null;
+  const out = String(row.outcome || "");
+  if (out === "success" || out === "skipped") return null;
   const info = insertPostSaleAutoSendLogStmt.run({
     created_at: row.created_at || new Date().toISOString(),
     ml_user_id: row.ml_user_id,
@@ -696,7 +732,7 @@ function listPostSaleAutoSendLog(limit, maxAllowed) {
       `SELECT id, created_at, ml_user_id, topic, notification_id, order_id, outcome, skip_reason,
               http_status, option_id, request_path, response_body, error_message
        FROM ml_post_sale_auto_send_log
-       WHERE topic = 'orders_v2'
+       WHERE topic = 'orders_v2' AND outcome NOT IN ('success', 'skipped')
        ORDER BY id DESC LIMIT ?`
     )
     .all(n);

@@ -146,6 +146,7 @@ async function runSchemaAndSeed() {
   }
 
   await migratePostSaleAutoSendLogNonOrdersV2();
+  await migratePostSaleAutoSendLogTopicOrdersV2Only();
 }
 
 /** Una vez: elimina filas históricas de log post-venta cuyo topic no es orders_v2. */
@@ -173,6 +174,28 @@ async function migratePostSaleAutoSendLogNonOrdersV2() {
     }
   } catch (e) {
     console.error("[db] migrate ml_post_sale_auto_send_log orders_v2:", e.message);
+  }
+}
+
+/** Limpia filas con topic ≠ orders_v2; añade CHECK la primera vez (PostgreSQL rechaza otros INSERT). */
+async function migratePostSaleAutoSendLogTopicOrdersV2Only() {
+  try {
+    await pool.query(`DELETE FROM ml_post_sale_auto_send_log WHERE topic IS DISTINCT FROM 'orders_v2'`);
+    await pool.query(
+      `DELETE FROM ml_post_sale_auto_send_log WHERE outcome IN ('success', 'skipped')`
+    );
+    const { rows: hasCheck } = await pool.query(
+      `SELECT 1 FROM pg_constraint WHERE conname = 'ml_post_sale_auto_send_log_topic_orders_v2' LIMIT 1`
+    );
+    if (hasCheck.length > 0) return;
+    await pool.query(`
+      ALTER TABLE ml_post_sale_auto_send_log
+      ADD CONSTRAINT ml_post_sale_auto_send_log_topic_orders_v2
+      CHECK (topic = 'orders_v2')
+    `);
+    console.log("[db] ml_post_sale_auto_send_log: CHECK(topic = orders_v2) aplicado");
+  } catch (e) {
+    console.error("[db] migrate ml_post_sale_auto_send_log topic CHECK:", e.message);
   }
 }
 
@@ -572,6 +595,8 @@ async function deletePostSaleSent(orderId) {
 async function insertPostSaleAutoSendLog(row) {
   const topicNorm = row.topic != null ? String(row.topic).trim() : "";
   if (topicNorm !== "orders_v2") return null;
+  const out = String(row.outcome || "");
+  if (out === "success" || out === "skipped") return null;
   await ensureSchema();
   const { rows } = await pool.query(
     `INSERT INTO ml_post_sale_auto_send_log (
@@ -604,7 +629,7 @@ async function listPostSaleAutoSendLog(limit, maxAllowed) {
     `SELECT id, created_at, ml_user_id, topic, notification_id, order_id, outcome, skip_reason,
             http_status, option_id, request_path, response_body, error_message
      FROM ml_post_sale_auto_send_log
-     WHERE topic = 'orders_v2'
+     WHERE topic = 'orders_v2' AND outcome NOT IN ('success', 'skipped')
      ORDER BY id DESC LIMIT $1`,
     [n]
   );

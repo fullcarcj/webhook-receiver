@@ -46,6 +46,8 @@ async function logAutoSend(row) {
   const t = row.topic != null ? String(row.topic).trim() : "";
   if (t !== "orders_v2") return;
   if (String(row.skip_reason || "") === "already_sent") return;
+  const oc = String(row.outcome || "");
+  if (oc === "success" || oc === "skipped") return;
   try {
     await insertPostSaleAutoSendLog(row);
   } catch (e) {

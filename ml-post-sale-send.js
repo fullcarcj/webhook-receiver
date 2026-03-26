@@ -41,7 +41,9 @@ function parseTopicsEnv() {
     .filter(Boolean);
 }
 
+/** Solo persiste en ml_post_sale_auto_send_log cuando el webhook es orders_v2. */
 async function logAutoSend(row) {
+  if (row.topic !== "orders_v2") return;
   try {
     await insertPostSaleAutoSendLog(row);
   } catch (e) {

@@ -3,6 +3,7 @@
  * Asi puedes ejecutar "node test-conexion.js" sin hacer . .\oauth-credentials.ps1 en cada ventana.
  * Copia oauth-env.json.example -> oauth-env.json y rellena (no subas oauth-env.json a git).
  * ML_COOKIES_DIR: carpeta para cookies web por cuenta ({ml_user_id}.txt); ver ml-cookies-path.js.
+ * DATABASE_URL: si está definida, la app usa PostgreSQL (misma lógica que Render); si no, SQLite local.
  */
 const fs = require("fs");
 const path = require("path");

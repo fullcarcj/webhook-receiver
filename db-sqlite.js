@@ -1,3 +1,7 @@
+/**
+ * SQLite solo cuando no hay DATABASE_URL (desarrollo local sin Postgres).
+ * Cambios de esquema: aplicar primero en db-postgres.js y replicar aquí.
+ */
 const fs = require("fs");
 const path = require("path");
 

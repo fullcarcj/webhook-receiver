@@ -1,5 +1,9 @@
 /**
- * Capa de datos: SQLite local (por defecto) o PostgreSQL si existe DATABASE_URL.
+ * Capa de datos: PostgreSQL si existe DATABASE_URL; si no, SQLite (p. ej. data/webhooks.db).
+ * Render y entornos productivos usan Postgres. Para trabajar contra la misma BD que producción,
+ * define DATABASE_URL en oauth-env.json (no versionado) o en el sistema.
+ * Migraciones de esquema: implementar en db-postgres.js y replicar cambios en db-sqlite.js
+ * para quien desarrolle sin Postgres.
  * Todas las funciones exportadas son async (await en los consumidores).
  */
 const usePostgres = Boolean(process.env.DATABASE_URL && String(process.env.DATABASE_URL).trim());

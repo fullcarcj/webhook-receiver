@@ -1,5 +1,6 @@
 /**
  * Persistencia PostgreSQL (Render: DATABASE_URL interna o externa).
+ * Esquema y migraciones: fuente principal para producción; mantener db-sqlite.js alineado.
  * Misma API que db-sqlite.js pero funciones async.
  */
 const { Pool } = require("pg");

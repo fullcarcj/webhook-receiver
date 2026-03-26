@@ -765,16 +765,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const hookRows = items
-      .map((row) => {
-        const js = escapeHtml(JSON.stringify(row.data, null, 2));
-        return `<tr>
+      .map(
+        (row) => `<tr>
   <td>${escapeHtml(row.id)}</td>
   <td class="muted">${escapeHtml(row.received_at)}</td>
   <td>${escapeHtml(row.topic)}</td>
   <td>${escapeHtml(row.resource)}</td>
-  <td><pre class="payload">${js}</pre></td>
-</tr>`;
-      })
+</tr>`
+      )
       .join("");
     const hooksHtml = `<!DOCTYPE html>
 <html lang="es">
@@ -791,15 +789,14 @@ const server = http.createServer(async (req, res) => {
     th { background: #1e2732; }
     tr:nth-child(even) td { background: #192734; }
     .muted { color: #8b98a5; font-size: 0.8rem; }
-    pre.payload { margin: 0; max-height: 220px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
   </style>
 </head>
 <body>
   <h1>Webhooks guardados</h1>
-  <p class="lead">${items.length} registro(s). Solo aparecen los que se guardaron (POST a <code>/reg</code> o <code>WEBHOOK_SAVE_DB=1</code> en <code>/webhook</code>). Parametro <code>limit</code> (max 2000).</p>
+  <p class="lead">${items.length} registro(s). Solo aparecen los que se guardaron (POST a <code>/reg</code> o <code>WEBHOOK_SAVE_DB=1</code> en <code>/webhook</code>). Parametro <code>limit</code> (max 2000). Cuerpo completo del webhook: <code>?format=json</code> (API).</p>
   <table>
-    <thead><tr><th>id</th><th>Recibido</th><th>topic</th><th>resource</th><th>JSON</th></tr></thead>
-    <tbody>${hookRows || '<tr><td colspan="5">No hay webhooks en la base.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>Recibido</th><th>topic</th><th>resource</th></tr></thead>
+    <tbody>${hookRows || '<tr><td colspan="4">No hay webhooks en la base.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

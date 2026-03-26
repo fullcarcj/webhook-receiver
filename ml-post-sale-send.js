@@ -43,7 +43,8 @@ function parseTopicsEnv() {
 
 /** Solo persiste en ml_post_sale_auto_send_log cuando el webhook es orders_v2; no guarda si ya se envió (already_sent). */
 async function logAutoSend(row) {
-  if (row.topic !== "orders_v2") return;
+  const t = row.topic != null ? String(row.topic).trim() : "";
+  if (t !== "orders_v2") return;
   if (String(row.skip_reason || "") === "already_sent") return;
   try {
     await insertPostSaleAutoSendLog(row);
@@ -119,11 +120,14 @@ async function trySendDefaultPostSaleMessage(args) {
   const topicList = parseTopicsEnv();
   const topic = topicTrim;
   if (!topic || !topicList.includes(topic)) {
-    await logAutoSend({
-      ...base,
-      outcome: "skipped",
-      skip_reason: `topic no listado (ML_AUTO_SEND_TOPICS=${process.env.ML_AUTO_SEND_TOPICS || "orders_v2"})`,
-    });
+    /** No registrar en BD el skip "topic no listado" salvo para orders_v2 (config mal armada). */
+    if (topic === "orders_v2") {
+      await logAutoSend({
+        ...base,
+        outcome: "skipped",
+        skip_reason: `topic no listado (ML_AUTO_SEND_TOPICS=${process.env.ML_AUTO_SEND_TOPICS || "orders_v2"})`,
+      });
+    }
     return { skipped: true, reason: "topic" };
   }
 

@@ -215,16 +215,6 @@ function parseJsonBody(req) {
   });
 }
 
-function isOrdersV2Notification(body) {
-  return (
-    body &&
-    typeof body === "object" &&
-    typeof body.topic === "string" &&
-    typeof body.resource === "string" &&
-    (body.topic === "orders_v2" || body.topic.startsWith("orders"))
-  );
-}
-
 function logWebhook(body, req) {
   const line = JSON.stringify({
     time: new Date().toISOString(),
@@ -1511,13 +1501,6 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    if (!isOrdersV2Notification(body)) {
-      forwardWebhookToTargets(body);
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, received: true, note: "payload sin formato orders_v2 esperado" }));
-      return;
-    }
-
     forwardWebhookToTargets(body);
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: true, received: true }));
@@ -1697,6 +1680,21 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Reenvío: ${forwards.length} POST(s) configurados`);
   } else {
     console.log("Reenvío: ninguno (define POST_URL_1…4 o POST_WEBHOOK_URLS)");
+  }
+
+  if (WEBHOOK_SAVE_DB) {
+    console.log("[config] WEBHOOK_SAVE_DB=1: cada POST /webhook guarda el JSON en la tabla de webhooks");
+  } else {
+    console.warn(
+      "[config] WEBHOOK_SAVE_DB no es 1: POST /webhook no persiste hooks (pon WEBHOOK_SAVE_DB=1 en el entorno u oauth-env.json)"
+    );
+  }
+  if (ML_WEBHOOK_FETCH_RESOURCE) {
+    console.log("[config] ML_WEBHOOK_FETCH_RESOURCE=1: tras cada webhook se hace GET a ML y se guarda en ml_topic_fetches");
+  } else {
+    console.warn(
+      "[config] ML_WEBHOOK_FETCH_RESOURCE no es 1: no se programa fetch ni filas en ml_topic_fetches (pon ML_WEBHOOK_FETCH_RESOURCE=1)"
+    );
   }
 
   const hasOAuth = Boolean(

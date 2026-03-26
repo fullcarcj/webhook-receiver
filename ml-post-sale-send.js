@@ -92,9 +92,18 @@ async function computePostSaleBodiesAndSteps() {
  * @param {{ mlUserId: number, topic: string|null, payload: object, notificationId?: string|null }} args
  */
 async function trySendDefaultPostSaleMessage(args) {
+  const topicTrim = args.topic != null ? String(args.topic).trim() : "";
+  const orderLike =
+    topicTrim && (topicTrim === "orders_v2" || String(topicTrim).startsWith("orders"));
+  const messagesTopic = topicTrim === "messages";
+  /** Evita cualquier log o lógica para topics tipo items, questions, stock-locations, etc. */
+  if (topicTrim && !orderLike && !messagesTopic) {
+    return { skipped: true, reason: "topic_not_for_post_sale" };
+  }
+
   const base = {
     ml_user_id: args.mlUserId,
-    topic: args.topic,
+    topic: topicTrim || null,
     notification_id: args.notificationId != null ? String(args.notificationId) : null,
   };
 
@@ -108,7 +117,7 @@ async function trySendDefaultPostSaleMessage(args) {
   }
 
   const topicList = parseTopicsEnv();
-  const topic = args.topic;
+  const topic = topicTrim;
   if (!topic || !topicList.includes(topic)) {
     await logAutoSend({
       ...base,

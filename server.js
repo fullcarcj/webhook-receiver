@@ -496,7 +496,7 @@ const server = http.createServer(async (req, res) => {
         borrar_todos_los_fetches:
           "DELETE /admin/topic-fetches (cabecera X-Admin-Secret) vacía tabla ml_topic_fetches",
         buyers_ml:
-          "GET /buyers?k=ADMIN_SECRET (compradores). POST JSON {buyer_id, nickname?, phone_1?, phone_2?, pref_entrega?, cambio_datos?} crea/actualiza (pref_entrega: Pickup | Envio Courier | Delivery; cambio_datos texto). PUT idem (cabecera X-Admin-Secret alternativa)",
+          "GET /buyers?k=ADMIN_SECRET (ml_buyers: pref_entrega default Pickup; actualizacion ISO al guardar). POST/PUT JSON buyer_id + campos opcionales (cabecera X-Admin-Secret alternativa)",
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         envio_auto_postventa:
@@ -1134,6 +1134,7 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.phone_2)}</td>
   <td>${escapeHtml(r.pref_entrega)}</td>
   <td class="muted" style="max-width:280px;white-space:pre-wrap;word-break:break-word;">${cdShort || "—"}</td>
+  <td class="muted">${escapeHtml(r.actualizacion)}</td>
   <td class="muted">${escapeHtml(r.created_at)}</td>
   <td class="muted">${escapeHtml(r.updated_at)}</td>
 </tr>`;
@@ -1159,10 +1160,10 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Compradores (ml_buyers)</h1>
-  <p class="lead">${rows.length} registro(s). Se rellenan al guardar fetches de <code>orders_v2</code> o con <code>POST</code> JSON <code>{"buyer_id", "nickname"?, "phone_1"?, "phone_2"?, "pref_entrega"?, "cambio_datos"?}</code> — <code>pref_entrega</code>: <code>Pickup</code>, <code>Envio Courier</code>, <code>Delivery</code>; <code>cambio_datos</code> texto libre (columna lógica Cambio_datos). JSON lista: <code>?format=json</code>.</p>
+  <p class="lead">${rows.length} registro(s). <code>pref_entrega</code> por defecto <code>Pickup</code> si no viene en el webhook. <code>actualizacion</code> = última modificación (ISO). JSON: <code>?format=json</code>.</p>
   <table>
-    <thead><tr><th>buyer_id</th><th>nickname</th><th>phone_1</th><th>phone_2</th><th>pref_entrega</th><th>cambio_datos</th><th>created_at</th><th>updated_at</th></tr></thead>
-    <tbody>${buyerRows || '<tr><td colspan="8">No hay compradores guardados.</td></tr>'}</tbody>
+    <thead><tr><th>buyer_id</th><th>nickname</th><th>phone_1</th><th>phone_2</th><th>pref_entrega</th><th>cambio_datos</th><th>actualizacion</th><th>created_at</th><th>updated_at</th></tr></thead>
+    <tbody>${buyerRows || '<tr><td colspan="9">No hay compradores guardados.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

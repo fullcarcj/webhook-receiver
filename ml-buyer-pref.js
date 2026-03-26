@@ -2,6 +2,8 @@
  * Preferencia de entrega en ml_buyers.pref_entrega (columna lógica Pref_Entrega).
  */
 const BUYER_PREF_ENTREGA_VALUES = Object.freeze(["Pickup", "Envio Courier", "Delivery"]);
+/** Valor por defecto en BD y cuando el webhook no envía preferencia. */
+const BUYER_PREF_ENTREGA_DEFAULT = "Pickup";
 
 /**
  * @param {unknown} v
@@ -27,8 +29,19 @@ function normalizeCambioDatos(v) {
   return s.length > CAMBIO_DATOS_MAX ? s.slice(0, CAMBIO_DATOS_MAX) : s;
 }
 
+/**
+ * @param {{ pref_entrega?: unknown }} row
+ * @returns {string|null} Pickup si no viene clave; null si se borra explícitamente; valor normalizado si viene.
+ */
+function resolvePrefEntregaForUpsert(row) {
+  if (row.pref_entrega === undefined) return BUYER_PREF_ENTREGA_DEFAULT;
+  return normalizeBuyerPrefEntrega(row.pref_entrega);
+}
+
 module.exports = {
   BUYER_PREF_ENTREGA_VALUES,
+  BUYER_PREF_ENTREGA_DEFAULT,
   normalizeBuyerPrefEntrega,
   normalizeCambioDatos,
+  resolvePrefEntregaForUpsert,
 };

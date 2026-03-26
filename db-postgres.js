@@ -184,6 +184,9 @@ async function migratePostSaleAutoSendLogTopicOrdersV2Only() {
     await pool.query(
       `DELETE FROM ml_post_sale_auto_send_log WHERE outcome IN ('success', 'skipped')`
     );
+    await pool.query(
+      `DELETE FROM ml_post_sale_auto_send_log WHERE skip_reason IS DISTINCT FROM 'message_step=0'`
+    );
     const { rows: hasCheck } = await pool.query(
       `SELECT 1 FROM pg_constraint WHERE conname = 'ml_post_sale_auto_send_log_topic_orders_v2' LIMIT 1`
     );
@@ -597,6 +600,8 @@ async function insertPostSaleAutoSendLog(row) {
   if (topicNorm !== "orders_v2") return null;
   const out = String(row.outcome || "");
   if (out === "success" || out === "skipped") return null;
+  const sr = row.skip_reason != null ? String(row.skip_reason).trim() : "";
+  if (sr !== "message_step=0") return null;
   await ensureSchema();
   const { rows } = await pool.query(
     `INSERT INTO ml_post_sale_auto_send_log (
@@ -629,7 +634,9 @@ async function listPostSaleAutoSendLog(limit, maxAllowed) {
     `SELECT id, created_at, ml_user_id, topic, notification_id, order_id, outcome, skip_reason,
             http_status, option_id, request_path, response_body, error_message
      FROM ml_post_sale_auto_send_log
-     WHERE topic = 'orders_v2' AND outcome NOT IN ('success', 'skipped')
+     WHERE topic = 'orders_v2'
+       AND outcome NOT IN ('success', 'skipped')
+       AND skip_reason = 'message_step=0'
      ORDER BY id DESC LIMIT $1`,
     [n]
   );

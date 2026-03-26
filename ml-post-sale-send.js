@@ -21,6 +21,9 @@ const {
 
 const MAX_OTHER = Number(process.env.ML_POST_SALE_MAX_CHARS || 350);
 
+/** Solo se persiste en BD el intento asociado al paso 0 (primer mensaje). */
+const POST_SALE_LOG_SKIP_REASON_STEP0 = "message_step=0";
+
 /** Respuesta JSON de error ML (p. ej. cause: shipment_invalid_to_action_guide). */
 function mercadoLibreErrorCause(data) {
   if (data == null || typeof data !== "object") return null;
@@ -48,6 +51,7 @@ async function logAutoSend(row) {
   if (String(row.skip_reason || "") === "already_sent") return;
   const oc = String(row.outcome || "");
   if (oc === "success" || oc === "skipped") return;
+  if (String(row.skip_reason || "").trim() !== POST_SALE_LOG_SKIP_REASON_STEP0) return;
   try {
     await insertPostSaleAutoSendLog(row);
   } catch (e) {

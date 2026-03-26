@@ -1339,7 +1339,7 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Log envíos automáticos post-venta</h1>
-  <p class="lead">Tabla <code>ml_post_sale_auto_send_log</code> · solo intentos con error de API (no se guardan <code>success</code> ni <code>skipped</code>). <code>order_id</code> = id de orden en la URL de mensajería ML. ${rows.length} fila(s). JSON: <code>?format=json</code>. Reintento: <code>POST /envios-postventa/retry?k=…</code> con JSON <code>order_id</code>, <code>ml_user_id</code>, opcional <code>buyer_id</code>, <code>force</code>.</p>
+  <p class="lead">Tabla <code>ml_post_sale_auto_send_log</code> · solo errores de API en el <strong>primer</strong> mensaje (<code>skip_reason=message_step=0</code>); no <code>success</code> ni <code>skipped</code>. <code>order_id</code> = id de orden en la URL de mensajería ML. ${rows.length} fila(s). JSON: <code>?format=json</code>. Reintento: <code>POST /envios-postventa/retry?k=…</code> con JSON <code>order_id</code>, <code>ml_user_id</code>, opcional <code>buyer_id</code>, <code>force</code>.</p>
   <table>
     <thead><tr><th>id</th><th>created_at</th><th>user_id</th><th>topic</th><th>order_id</th><th>outcome</th><th>skip_reason</th><th>http</th><th>option</th><th>error</th><th>response (preview)</th></tr></thead>
     <tbody>${tableRows || '<tr><td colspan="11">Sin registros.</td></tr>'}</tbody>

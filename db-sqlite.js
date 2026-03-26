@@ -238,6 +238,9 @@ db.exec(`
     db.prepare(
       "DELETE FROM ml_post_sale_auto_send_log WHERE outcome IN ('success', 'skipped')"
     ).run();
+    db.prepare(
+      "DELETE FROM ml_post_sale_auto_send_log WHERE skip_reason IS NULL OR skip_reason <> 'message_step=0'"
+    ).run();
   } catch (e) {
     console.error("[db] migrate ml_post_sale_auto_send_log topic trigger:", e.message);
   }
@@ -707,6 +710,8 @@ function insertPostSaleAutoSendLog(row) {
   if (topicNorm !== "orders_v2") return null;
   const out = String(row.outcome || "");
   if (out === "success" || out === "skipped") return null;
+  const sr = row.skip_reason != null ? String(row.skip_reason).trim() : "";
+  if (sr !== "message_step=0") return null;
   const info = insertPostSaleAutoSendLogStmt.run({
     created_at: row.created_at || new Date().toISOString(),
     ml_user_id: row.ml_user_id,
@@ -732,7 +737,9 @@ function listPostSaleAutoSendLog(limit, maxAllowed) {
       `SELECT id, created_at, ml_user_id, topic, notification_id, order_id, outcome, skip_reason,
               http_status, option_id, request_path, response_body, error_message
        FROM ml_post_sale_auto_send_log
-       WHERE topic = 'orders_v2' AND outcome NOT IN ('success', 'skipped')
+       WHERE topic = 'orders_v2'
+         AND outcome NOT IN ('success', 'skipped')
+         AND skip_reason = 'message_step=0'
        ORDER BY id DESC LIMIT ?`
     )
     .all(n);

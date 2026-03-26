@@ -181,6 +181,34 @@ db.exec(`
   }
 })();
 
+/** Una vez: elimina filas históricas de log post-venta cuyo topic no es orders_v2. */
+(function migratePostSaleAutoSendLogNonOrdersV2() {
+  try {
+    const done = db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_mig_ps_auto_log_orders_v2'"
+      )
+      .get();
+    if (done) return;
+    const r = db
+      .prepare(
+        "DELETE FROM ml_post_sale_auto_send_log WHERE topic IS NULL OR topic <> 'orders_v2'"
+      )
+      .run();
+    db.exec(
+      "CREATE TABLE _mig_ps_auto_log_orders_v2 (id INTEGER PRIMARY KEY CHECK (id = 1), applied_at TEXT NOT NULL DEFAULT (datetime('now')))"
+    );
+    db.prepare("INSERT INTO _mig_ps_auto_log_orders_v2 (id) VALUES (1)").run();
+    if (r.changes > 0) {
+      console.log(
+        `[db] ml_post_sale_auto_send_log: eliminadas ${r.changes} filas (topic distinto de orders_v2)`
+      );
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_post_sale_auto_send_log orders_v2:", e.message);
+  }
+})();
+
 /** Máximo alineado con API ML (option OTHER) y UI /mensajes-postventa. */
 const POST_SALE_MESSAGE_BODY_MAX = 350;
 
@@ -641,10 +669,12 @@ const insertPostSaleAutoSendLogStmt = db.prepare(
 );
 
 function insertPostSaleAutoSendLog(row) {
+  const topicNorm = row.topic != null ? String(row.topic).trim() : "";
+  if (topicNorm !== "orders_v2") return null;
   const info = insertPostSaleAutoSendLogStmt.run({
     created_at: row.created_at || new Date().toISOString(),
     ml_user_id: row.ml_user_id,
-    topic: row.topic != null ? String(row.topic) : null,
+    topic: topicNorm,
     notification_id: row.notification_id != null ? String(row.notification_id) : null,
     order_id: row.order_id != null ? Number(row.order_id) : null,
     outcome: String(row.outcome),
@@ -665,7 +695,9 @@ function listPostSaleAutoSendLog(limit, maxAllowed) {
     .prepare(
       `SELECT id, created_at, ml_user_id, topic, notification_id, order_id, outcome, skip_reason,
               http_status, option_id, request_path, response_body, error_message
-       FROM ml_post_sale_auto_send_log ORDER BY id DESC LIMIT ?`
+       FROM ml_post_sale_auto_send_log
+       WHERE topic = 'orders_v2'
+       ORDER BY id DESC LIMIT ?`
     )
     .all(n);
 }

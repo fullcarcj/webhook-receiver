@@ -41,9 +41,10 @@ function parseTopicsEnv() {
     .filter(Boolean);
 }
 
-/** Solo persiste en ml_post_sale_auto_send_log cuando el webhook es orders_v2. */
+/** Solo persiste en ml_post_sale_auto_send_log cuando el webhook es orders_v2; no guarda si ya se envió (already_sent). */
 async function logAutoSend(row) {
   if (row.topic !== "orders_v2") return;
+  if (String(row.skip_reason || "") === "already_sent") return;
   try {
     await insertPostSaleAutoSendLog(row);
   } catch (e) {
@@ -166,12 +167,6 @@ async function trySendDefaultPostSaleMessage(args) {
   }
 
   if (await wasPostSaleSent(orderId, totalSteps)) {
-    await logAutoSend({
-      ...base,
-      order_id: orderId,
-      outcome: "skipped",
-      skip_reason: "already_sent",
-    });
     return { skipped: true, reason: "already_sent", order_id: orderId };
   }
 

@@ -144,6 +144,36 @@ async function runSchemaAndSeed() {
       ["Predeterminado", clipPostSaleBody(DEFAULT_POST_SALE_BODY), now, now]
     );
   }
+
+  await migratePostSaleAutoSendLogNonOrdersV2();
+}
+
+/** Una vez: elimina filas históricas de log post-venta cuyo topic no es orders_v2. */
+async function migratePostSaleAutoSendLogNonOrdersV2() {
+  try {
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS _mig_ps_auto_log_orders_v2 (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`
+    );
+    const { rows: done } = await pool.query(
+      `SELECT 1 FROM _mig_ps_auto_log_orders_v2 WHERE id = 1 LIMIT 1`
+    );
+    if (done.length > 0) return;
+    const { rowCount } = await pool.query(
+      `DELETE FROM ml_post_sale_auto_send_log WHERE topic IS NULL OR topic <> $1`,
+      ["orders_v2"]
+    );
+    await pool.query(`INSERT INTO _mig_ps_auto_log_orders_v2 (id) VALUES (1)`);
+    if (rowCount > 0) {
+      console.log(
+        `[db] ml_post_sale_auto_send_log: eliminadas ${rowCount} filas (topic distinto de orders_v2)`
+      );
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_post_sale_auto_send_log orders_v2:", e.message);
+  }
 }
 
 async function insertWebhook(payloadObj) {
@@ -540,6 +570,8 @@ async function deletePostSaleSent(orderId) {
 }
 
 async function insertPostSaleAutoSendLog(row) {
+  const topicNorm = row.topic != null ? String(row.topic).trim() : "";
+  if (topicNorm !== "orders_v2") return null;
   await ensureSchema();
   const { rows } = await pool.query(
     `INSERT INTO ml_post_sale_auto_send_log (
@@ -549,7 +581,7 @@ async function insertPostSaleAutoSendLog(row) {
     [
       row.created_at || new Date().toISOString(),
       row.ml_user_id,
-      row.topic != null ? String(row.topic) : null,
+      topicNorm,
       row.notification_id != null ? String(row.notification_id) : null,
       row.order_id != null ? Number(row.order_id) : null,
       String(row.outcome),
@@ -571,7 +603,9 @@ async function listPostSaleAutoSendLog(limit, maxAllowed) {
   const { rows } = await pool.query(
     `SELECT id, created_at, ml_user_id, topic, notification_id, order_id, outcome, skip_reason,
             http_status, option_id, request_path, response_body, error_message
-     FROM ml_post_sale_auto_send_log ORDER BY id DESC LIMIT $1`,
+     FROM ml_post_sale_auto_send_log
+     WHERE topic = 'orders_v2'
+     ORDER BY id DESC LIMIT $1`,
     [n]
   );
   return rows;

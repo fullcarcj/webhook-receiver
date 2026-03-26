@@ -402,7 +402,8 @@ function scheduleTopicFetchFromWebhook(body) {
           processStatus = FETCH_PROCESS_STATUS_PENDING;
         }
 
-        if (result.ok && parsed && !isOrderTopic) {
+        /** Post-venta automático para topics no-orden: solo `messages` (order_id en payload). No stock-locations ni otros. */
+        if (result.ok && parsed && !isOrderTopic && topic === "messages") {
           setImmediate(() => {
             trySendDefaultPostSaleMessage({
               mlUserId,

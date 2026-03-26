@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const Database = require("better-sqlite3");
+const { normalizeBuyerPrefEntrega, normalizeCambioDatos } = require("./ml-buyer-pref");
 
 // Por defecto ./data (incl. Render). Para disco persistente: DB_PATH=/var/data/webhooks.db y disco montado en /var/data.
 const dbPath =
@@ -52,6 +53,8 @@ db.exec(`
     nickname TEXT,
     phone_1 TEXT,
     phone_2 TEXT,
+    pref_entrega TEXT,
+    cambio_datos TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -157,6 +160,30 @@ db.exec(`
     }
   } catch (e) {
     console.error("[db] migrate ml_ventas_detalle_web celular:", e.message);
+  }
+})();
+
+(function migrateMlBuyersPrefEntrega() {
+  try {
+    const t = db.prepare("PRAGMA table_info(ml_buyers)").all();
+    const names = new Set(t.map((c) => c.name));
+    if (!names.has("pref_entrega")) {
+      db.exec("ALTER TABLE ml_buyers ADD COLUMN pref_entrega TEXT");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_buyers pref_entrega:", e.message);
+  }
+})();
+
+(function migrateMlBuyersCambioDatos() {
+  try {
+    const t = db.prepare("PRAGMA table_info(ml_buyers)").all();
+    const names = new Set(t.map((c) => c.name));
+    if (!names.has("cambio_datos")) {
+      db.exec("ALTER TABLE ml_buyers ADD COLUMN cambio_datos TEXT");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_buyers cambio_datos:", e.message);
   }
 })();
 
@@ -513,22 +540,32 @@ function deleteAllTopicFetches() {
 }
 
 const upsertMlBuyerStmt = db.prepare(
-  `INSERT INTO ml_buyers (buyer_id, nickname, phone_1, phone_2, created_at, updated_at)
-   VALUES (@buyer_id, @nickname, @phone_1, @phone_2, @created_at, @updated_at)
+  `INSERT INTO ml_buyers (buyer_id, nickname, phone_1, phone_2, pref_entrega, cambio_datos, created_at, updated_at)
+   VALUES (@buyer_id, @nickname, @phone_1, @phone_2, @pref_entrega, @cambio_datos, @created_at, @updated_at)
    ON CONFLICT(buyer_id) DO UPDATE SET
      nickname = COALESCE(NULLIF(excluded.nickname, ''), ml_buyers.nickname),
      phone_1 = COALESCE(excluded.phone_1, ml_buyers.phone_1),
      phone_2 = COALESCE(excluded.phone_2, ml_buyers.phone_2),
+     pref_entrega = COALESCE(excluded.pref_entrega, ml_buyers.pref_entrega),
+     cambio_datos = COALESCE(excluded.cambio_datos, ml_buyers.cambio_datos),
      updated_at = excluded.updated_at`
 );
 
 function upsertMlBuyer(row) {
   const now = new Date().toISOString();
+  const pref =
+    row.pref_entrega !== undefined
+      ? normalizeBuyerPrefEntrega(row.pref_entrega)
+      : null;
+  const cambio =
+    row.cambio_datos !== undefined ? normalizeCambioDatos(row.cambio_datos) : null;
   upsertMlBuyerStmt.run({
     buyer_id: row.buyer_id,
     nickname: row.nickname != null ? String(row.nickname) : null,
     phone_1: row.phone_1 != null ? String(row.phone_1) : null,
     phone_2: row.phone_2 != null ? String(row.phone_2) : null,
+    pref_entrega: pref,
+    cambio_datos: cambio,
     created_at: now,
     updated_at: now,
   });
@@ -539,7 +576,7 @@ function listMlBuyers(limit, maxAllowed) {
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   return db
     .prepare(
-      `SELECT buyer_id, nickname, phone_1, phone_2, created_at, updated_at
+      `SELECT buyer_id, nickname, phone_1, phone_2, pref_entrega, cambio_datos, created_at, updated_at
        FROM ml_buyers ORDER BY updated_at DESC LIMIT ?`
     )
     .all(n);
@@ -554,13 +591,13 @@ function normalizeBuyerPhoneValue(v) {
 function getMlBuyer(buyerId) {
   return db
     .prepare(
-      `SELECT buyer_id, nickname, phone_1, phone_2, created_at, updated_at
+      `SELECT buyer_id, nickname, phone_1, phone_2, pref_entrega, cambio_datos, created_at, updated_at
        FROM ml_buyers WHERE buyer_id = ?`
     )
     .get(buyerId);
 }
 
-/** Actualiza phone_1 y/o phone_2; campos omitidos se conservan. null o "" borran el teléfono. */
+/** Actualiza phone_1 y/o phone_2 y opcionalmente pref_entrega / cambio_datos; campos omitidos se conservan. null o "" borran el teléfono. */
 function updateMlBuyerPhones(buyerId, patch) {
   const row = getMlBuyer(buyerId);
   if (!row) return null;
@@ -568,14 +605,30 @@ function updateMlBuyerPhones(buyerId, patch) {
     patch.phone_1 !== undefined ? normalizeBuyerPhoneValue(patch.phone_1) : row.phone_1;
   const phone_2 =
     patch.phone_2 !== undefined ? normalizeBuyerPhoneValue(patch.phone_2) : row.phone_2;
+  let pref_entrega = row.pref_entrega;
+  if (patch.pref_entrega !== undefined) {
+    pref_entrega =
+      patch.pref_entrega === null || String(patch.pref_entrega).trim() === ""
+        ? null
+        : normalizeBuyerPrefEntrega(patch.pref_entrega);
+  }
+  let cambio_datos = row.cambio_datos;
+  if (patch.cambio_datos !== undefined) {
+    cambio_datos =
+      patch.cambio_datos === null || String(patch.cambio_datos).trim() === ""
+        ? null
+        : normalizeCambioDatos(patch.cambio_datos);
+  }
   const now = new Date().toISOString();
   db.prepare(
-    `UPDATE ml_buyers SET phone_1 = @phone_1, phone_2 = @phone_2, updated_at = @updated_at
+    `UPDATE ml_buyers SET phone_1 = @phone_1, phone_2 = @phone_2, pref_entrega = @pref_entrega, cambio_datos = @cambio_datos, updated_at = @updated_at
      WHERE buyer_id = @buyer_id`
   ).run({
     buyer_id: buyerId,
     phone_1,
     phone_2,
+    pref_entrega,
+    cambio_datos,
     updated_at: now,
   });
   return {
@@ -583,6 +636,8 @@ function updateMlBuyerPhones(buyerId, patch) {
     nickname: row.nickname,
     phone_1,
     phone_2,
+    pref_entrega,
+    cambio_datos,
     created_at: row.created_at,
     updated_at: now,
   };

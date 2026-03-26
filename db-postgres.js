@@ -3,6 +3,7 @@
  * Misma API que db-sqlite.js pero funciones async.
  */
 const { Pool } = require("pg");
+const { normalizeBuyerPrefEntrega, normalizeCambioDatos } = require("./ml-buyer-pref");
 
 const POST_SALE_MESSAGE_BODY_MAX = 350;
 
@@ -80,8 +81,13 @@ async function runSchemaAndSeed() {
       nickname TEXT,
       phone_1 TEXT,
       phone_2 TEXT,
+      pref_entrega TEXT,
+      cambio_datos TEXT,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      CONSTRAINT ml_buyers_pref_entrega_check CHECK (
+        pref_entrega IS NULL OR pref_entrega IN ('Pickup', 'Envio Courier', 'Delivery')
+      )
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_buyers_updated ON ml_buyers(updated_at)`,
     `CREATE TABLE IF NOT EXISTS ml_post_sale_sent (
@@ -147,6 +153,47 @@ async function runSchemaAndSeed() {
 
   await migratePostSaleAutoSendLogNonOrdersV2();
   await migratePostSaleAutoSendLogTopicOrdersV2Only();
+  await migrateMlBuyersPrefEntrega();
+  await migrateMlBuyersCambioDatos();
+}
+
+/** Columna pref_entrega (Pref. entrega) en instalaciones previas sin ella. */
+async function migrateMlBuyersPrefEntrega() {
+  try {
+    const { rows: col } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_buyers' AND column_name = 'pref_entrega'`
+    );
+    if (col.length === 0) {
+      await pool.query(`ALTER TABLE ml_buyers ADD COLUMN pref_entrega TEXT`);
+    }
+    const { rows: chk } = await pool.query(
+      `SELECT 1 FROM pg_constraint WHERE conname = 'ml_buyers_pref_entrega_check' LIMIT 1`
+    );
+    if (chk.length === 0) {
+      await pool.query(`
+        ALTER TABLE ml_buyers ADD CONSTRAINT ml_buyers_pref_entrega_check
+        CHECK (pref_entrega IS NULL OR pref_entrega IN ('Pickup', 'Envio Courier', 'Delivery'))
+      `);
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_buyers pref_entrega:", e.message);
+  }
+}
+
+/** Columna cambio_datos (Cambio_datos) en instalaciones previas sin ella. */
+async function migrateMlBuyersCambioDatos() {
+  try {
+    const { rows: col } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_buyers' AND column_name = 'cambio_datos'`
+    );
+    if (col.length === 0) {
+      await pool.query(`ALTER TABLE ml_buyers ADD COLUMN cambio_datos TEXT`);
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_buyers cambio_datos:", e.message);
+  }
 }
 
 /** Una vez: elimina filas históricas de log post-venta cuyo topic no es orders_v2. */
@@ -403,19 +450,29 @@ async function deleteAllTopicFetches() {
 async function upsertMlBuyer(row) {
   await ensureSchema();
   const now = new Date().toISOString();
+  const pref =
+    row.pref_entrega !== undefined
+      ? normalizeBuyerPrefEntrega(row.pref_entrega)
+      : null;
+  const cambio =
+    row.cambio_datos !== undefined ? normalizeCambioDatos(row.cambio_datos) : null;
   await pool.query(
-    `INSERT INTO ml_buyers (buyer_id, nickname, phone_1, phone_2, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO ml_buyers (buyer_id, nickname, phone_1, phone_2, pref_entrega, cambio_datos, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (buyer_id) DO UPDATE SET
        nickname = COALESCE(NULLIF(EXCLUDED.nickname, ''), ml_buyers.nickname),
        phone_1 = COALESCE(EXCLUDED.phone_1, ml_buyers.phone_1),
        phone_2 = COALESCE(EXCLUDED.phone_2, ml_buyers.phone_2),
+       pref_entrega = COALESCE(EXCLUDED.pref_entrega, ml_buyers.pref_entrega),
+       cambio_datos = COALESCE(EXCLUDED.cambio_datos, ml_buyers.cambio_datos),
        updated_at = EXCLUDED.updated_at`,
     [
       row.buyer_id,
       row.nickname != null ? String(row.nickname) : null,
       row.phone_1 != null ? String(row.phone_1) : null,
       row.phone_2 != null ? String(row.phone_2) : null,
+      pref,
+      cambio,
       now,
       now,
     ]
@@ -427,7 +484,7 @@ async function listMlBuyers(limit, maxAllowed) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   const { rows } = await pool.query(
-    `SELECT buyer_id, nickname, phone_1, phone_2, created_at, updated_at
+    `SELECT buyer_id, nickname, phone_1, phone_2, pref_entrega, cambio_datos, created_at, updated_at
      FROM ml_buyers ORDER BY updated_at DESC LIMIT $1`,
     [n]
   );
@@ -443,7 +500,7 @@ function normalizeBuyerPhoneValue(v) {
 async function getMlBuyer(buyerId) {
   await ensureSchema();
   const { rows } = await pool.query(
-    `SELECT buyer_id, nickname, phone_1, phone_2, created_at, updated_at
+    `SELECT buyer_id, nickname, phone_1, phone_2, pref_entrega, cambio_datos, created_at, updated_at
      FROM ml_buyers WHERE buyer_id = $1`,
     [buyerId]
   );
@@ -458,17 +515,33 @@ async function updateMlBuyerPhones(buyerId, patch) {
     patch.phone_1 !== undefined ? normalizeBuyerPhoneValue(patch.phone_1) : row.phone_1;
   const phone_2 =
     patch.phone_2 !== undefined ? normalizeBuyerPhoneValue(patch.phone_2) : row.phone_2;
+  let pref_entrega = row.pref_entrega;
+  if (patch.pref_entrega !== undefined) {
+    pref_entrega =
+      patch.pref_entrega === null || String(patch.pref_entrega).trim() === ""
+        ? null
+        : normalizeBuyerPrefEntrega(patch.pref_entrega);
+  }
+  let cambio_datos = row.cambio_datos;
+  if (patch.cambio_datos !== undefined) {
+    cambio_datos =
+      patch.cambio_datos === null || String(patch.cambio_datos).trim() === ""
+        ? null
+        : normalizeCambioDatos(patch.cambio_datos);
+  }
   const now = new Date().toISOString();
   await pool.query(
-    `UPDATE ml_buyers SET phone_1 = $1, phone_2 = $2, updated_at = $3
-     WHERE buyer_id = $4`,
-    [phone_1, phone_2, now, buyerId]
+    `UPDATE ml_buyers SET phone_1 = $1, phone_2 = $2, pref_entrega = $3, cambio_datos = $4, updated_at = $5
+     WHERE buyer_id = $6`,
+    [phone_1, phone_2, pref_entrega, cambio_datos, now, buyerId]
   );
   return {
     buyer_id: buyerId,
     nickname: row.nickname,
     phone_1,
     phone_2,
+    pref_entrega,
+    cambio_datos,
     created_at: row.created_at,
     updated_at: now,
   };

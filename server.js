@@ -6,6 +6,12 @@ const pkg = require("./package.json");
 const { extractSkuTitleFromMlResponse } = require("./ml-payload-extract");
 const { extractOrderIdFromOrder } = require("./ml-pack-extract");
 const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
+const { upsertBuyerFromOrdersV2Webhook } = require("./ml-buyer-order-sync");
+const {
+  normalizeBuyerPrefEntrega,
+  BUYER_PREF_ENTREGA_VALUES,
+  normalizeCambioDatos,
+} = require("./ml-buyer-pref");
 const { fetchVentasDetalleAndStore } = require("./ml-ventas-detalle-fetch");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
@@ -36,6 +42,7 @@ const {
   listDistinctFetchTopics,
   deleteAllTopicFetches,
   upsertMlBuyer,
+  getMlBuyer,
   listMlBuyers,
   updateMlBuyerPhones,
   listPostSaleMessages,
@@ -338,7 +345,7 @@ function scheduleTopicFetchFromWebhook(body) {
               const buyer = extractBuyerFromOrderPayload(parsed);
               if (buyer) {
                 try {
-                  await upsertMlBuyer(buyer);
+                  await upsertBuyerFromOrdersV2Webhook(buyer);
                 } catch (errBuyer) {
                   console.error("[ml buyers]", errBuyer.message);
                 }
@@ -489,7 +496,7 @@ const server = http.createServer(async (req, res) => {
         borrar_todos_los_fetches:
           "DELETE /admin/topic-fetches (cabecera X-Admin-Secret) vacía tabla ml_topic_fetches",
         buyers_ml:
-          "GET /buyers?k=ADMIN_SECRET (compradores). PUT /buyers?k=… JSON {buyer_id, phone_1?, phone_2?} (cabecera X-Admin-Secret alternativa)",
+          "GET /buyers?k=ADMIN_SECRET (compradores). POST JSON {buyer_id, nickname?, phone_1?, phone_2?, pref_entrega?, cambio_datos?} crea/actualiza (pref_entrega: Pickup | Envio Courier | Delivery; cambio_datos texto). PUT idem (cabecera X-Admin-Secret alternativa)",
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         envio_auto_postventa:
@@ -935,6 +942,81 @@ const server = http.createServer(async (req, res) => {
     const authBuyers =
       adminSecret && (k === adminSecret || req.headers["x-admin-secret"] === adminSecret);
 
+    if (req.method === "POST") {
+      if (!adminSecret) {
+        res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
+        return;
+      }
+      if (!authBuyers) {
+        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+        return;
+      }
+      let body;
+      try {
+        body = await parseJsonBody(req);
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        return;
+      }
+      const buyerId = Number(body.buyer_id);
+      if (!Number.isFinite(buyerId) || buyerId <= 0) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "buyer_id inválido" }));
+        return;
+      }
+      const nickRaw = body.nickname != null ? String(body.nickname).trim() : "";
+      const p1Raw = body.phone_1 != null ? String(body.phone_1).trim() : "";
+      const p2Raw = body.phone_2 != null ? String(body.phone_2).trim() : "";
+      const row = {
+        buyer_id: buyerId,
+        nickname: nickRaw === "" ? null : nickRaw,
+        phone_1: p1Raw === "" ? null : p1Raw,
+        phone_2: p2Raw === "" ? null : p2Raw,
+      };
+      let needPrefClear = false;
+      if (Object.prototype.hasOwnProperty.call(body, "pref_entrega")) {
+        if (body.pref_entrega === null || String(body.pref_entrega).trim() === "") {
+          needPrefClear = true;
+        } else {
+          const pe = normalizeBuyerPrefEntrega(body.pref_entrega);
+          if (!pe) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: `pref_entrega debe ser uno de: ${BUYER_PREF_ENTREGA_VALUES.join(", ")}`,
+              })
+            );
+            return;
+          }
+          row.pref_entrega = pe;
+        }
+      }
+      let needCambioClear = false;
+      if (Object.prototype.hasOwnProperty.call(body, "cambio_datos")) {
+        if (body.cambio_datos === null || String(body.cambio_datos).trim() === "") {
+          needCambioClear = true;
+        } else {
+          row.cambio_datos = normalizeCambioDatos(body.cambio_datos);
+        }
+      }
+      try {
+        await upsertMlBuyer(row);
+        if (needPrefClear) await updateMlBuyerPhones(buyerId, { pref_entrega: null });
+        if (needCambioClear) await updateMlBuyerPhones(buyerId, { cambio_datos: null });
+        const buyer = await getMlBuyer(buyerId);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, buyer }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
     if (req.method === "PUT") {
       if (!adminSecret) {
         res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
@@ -960,11 +1042,37 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ ok: false, error: "buyer_id inválido" }));
         return;
       }
+      const patch = {
+        phone_1: body.phone_1,
+        phone_2: body.phone_2,
+      };
+      if (body.pref_entrega !== undefined) {
+        if (body.pref_entrega === null || String(body.pref_entrega).trim() === "") {
+          patch.pref_entrega = null;
+        } else {
+          const pe = normalizeBuyerPrefEntrega(body.pref_entrega);
+          if (!pe) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: `pref_entrega debe ser uno de: ${BUYER_PREF_ENTREGA_VALUES.join(", ")}`,
+              })
+            );
+            return;
+          }
+          patch.pref_entrega = pe;
+        }
+      }
+      if (body.cambio_datos !== undefined) {
+        if (body.cambio_datos === null || String(body.cambio_datos).trim() === "") {
+          patch.cambio_datos = null;
+        } else {
+          patch.cambio_datos = normalizeCambioDatos(body.cambio_datos);
+        }
+      }
       try {
-        const buyer = await updateMlBuyerPhones(buyerId, {
-          phone_1: body.phone_1,
-          phone_2: body.phone_2,
-        });
+        const buyer = await updateMlBuyerPhones(buyerId, patch);
         if (!buyer) {
           res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
           res.end(JSON.stringify({ ok: false, error: "buyer_id no encontrado" }));
@@ -1015,14 +1123,21 @@ const server = http.createServer(async (req, res) => {
     }
     const buyerRows = rows
       .map(
-        (r) => `<tr>
+        (r) => {
+          const cdRaw = r.cambio_datos != null ? String(r.cambio_datos) : "";
+          const cdShort =
+            cdRaw.length > 120 ? `${escapeHtml(cdRaw.slice(0, 120))}…` : escapeHtml(cdRaw);
+          return `<tr>
   <td>${escapeHtml(r.buyer_id)}</td>
   <td>${escapeHtml(r.nickname)}</td>
   <td>${escapeHtml(r.phone_1)}</td>
   <td>${escapeHtml(r.phone_2)}</td>
+  <td>${escapeHtml(r.pref_entrega)}</td>
+  <td class="muted" style="max-width:280px;white-space:pre-wrap;word-break:break-word;">${cdShort || "—"}</td>
   <td class="muted">${escapeHtml(r.created_at)}</td>
   <td class="muted">${escapeHtml(r.updated_at)}</td>
-</tr>`
+</tr>`;
+        }
       )
       .join("");
     const buyersHtml = `<!DOCTYPE html>
@@ -1044,10 +1159,10 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Compradores (ml_buyers)</h1>
-  <p class="lead">${rows.length} registro(s). Se rellenan al guardar fetches de <code>orders_v2</code> (objeto <code>buyer</code> de la API). JSON: <code>?format=json</code>.</p>
+  <p class="lead">${rows.length} registro(s). Se rellenan al guardar fetches de <code>orders_v2</code> o con <code>POST</code> JSON <code>{"buyer_id", "nickname"?, "phone_1"?, "phone_2"?, "pref_entrega"?, "cambio_datos"?}</code> — <code>pref_entrega</code>: <code>Pickup</code>, <code>Envio Courier</code>, <code>Delivery</code>; <code>cambio_datos</code> texto libre (columna lógica Cambio_datos). JSON lista: <code>?format=json</code>.</p>
   <table>
-    <thead><tr><th>buyer_id</th><th>nickname</th><th>phone_1</th><th>phone_2</th><th>created_at</th><th>updated_at</th></tr></thead>
-    <tbody>${buyerRows || '<tr><td colspan="6">No hay compradores guardados.</td></tr>'}</tbody>
+    <thead><tr><th>buyer_id</th><th>nickname</th><th>phone_1</th><th>phone_2</th><th>pref_entrega</th><th>cambio_datos</th><th>created_at</th><th>updated_at</th></tr></thead>
+    <tbody>${buyerRows || '<tr><td colspan="8">No hay compradores guardados.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

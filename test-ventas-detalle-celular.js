@@ -12,6 +12,7 @@ const {
   extractCelularFromVentasHtml,
   extractNombreApellidoFromVentasHtml,
   computeVentasDetalleAnchorPositions,
+  looksLikeGarbageNombreExtract,
 } = require("./ml-ventas-detalle-celular");
 
 const delim = "\\u003e";
@@ -39,6 +40,30 @@ function runSynthetic() {
     extractNombreApellidoFromVentasHtml(htmlBuyerDataBold),
     nombre,
     "patrón ML: buyer,data,label \\u003Cb\\u003E nombre \\u003C/b\\u003E"
+  );
+
+  const htmlNordicCloseU002F = `"uiType":"buyer","data":{"label":"\\u003Cb\\u003EJaime Ponce\\u003C\\u002Fb\\u003E","initials":"JP"`;
+  assert.strictEqual(
+    extractNombreApellidoFromVentasHtml(htmlNordicCloseU002F),
+    "Jaime Ponce",
+    "Nordic: cierre </b> como \\u003C\\u002Fb\\u003E (barra en JSON)"
+  );
+
+  assert.strictEqual(
+    looksLikeGarbageNombreExtract("window._gt={ctx:{}};</script>"),
+    true,
+    "rechazar basura de script global (caso real en BD)"
+  );
+
+  const htmlBoldTrasScriptGlobal = [
+    '"buyer_info_text"',
+    '<script id="__GLOBAL_THEME_CTX__">window._gt={ctx:{}};</script>',
+    '"data":{"label":"\\u003Cb\\u003ECliente Real\\u003C\\u002Fb\\u003E"',
+  ].join("\n");
+  assert.strictEqual(
+    extractNombreApellidoFromVentasHtml(htmlBoldTrasScriptGlobal),
+    "Cliente Real",
+    "priorizar JSON buyer/label+bold; no mezclar con <script> (antes el delimitador > devolvía window._gt…)"
   );
 
   const htmlTresPalabras = `x "buyer","data":{"label":"\\u003Cb\\u003EAna María López\\u003C/b\\u003E"`;

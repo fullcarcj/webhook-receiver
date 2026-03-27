@@ -17,15 +17,37 @@ const DELIM_U003E = "\\u003e";
 
 /** ML .ve: nombre en JSON como `<b>nombre</b>` escapado (\u003C = <, \u003E = >). */
 const MARKER_BUYER_DATA_LABEL_BOLD = '"buyer","data":{"label":"\\u003Cb\\u003E';
-const CLOSE_B_BOLD_ESC_UPPER = "\\u003C/b\\u003E";
-const CLOSE_B_BOLD_ESC_LOWER = "\\u003c/b\\u003e";
+/** Cierre `</b>` en JSON: `/` literal o `\u002F` (ML Nordic suele usar `\u003C\u002Fb\u003E`). */
+const CLOSE_B_BOLD_ESC_VARIANTS = [
+  "\\u003C/b\\u003E",
+  "\\u003c/b\\u003e",
+  "\\u003C\\u002Fb\\u003E",
+  "\\u003c\\u002fb\\u003e",
+];
 
-/** Apertura/cierre `<b>…</b>` en escapes JSON (hex en \u003[cC] / \u003[eE] sin exigir mismo caso en apertura/cierre). */
-const RE_BOLD_ESC_BLOCK = /\\u003[cC]b\\u003[eE]([\s\S]*?)\\u003[cC]\/b\\u003[eE]/g;
+/** Apertura/cierre `<b>…</b>` en escapes JSON; cierre con `/b` o `\u002F`+`b` (Nordic). */
+const RE_BOLD_ESC_BLOCK =
+  /\\u003[cC]b\\u003[eE]([\s\S]*?)\\u003[cC](?:\\u002[fF][bB]|[/][bB])\\u003[eE]/g;
 
-/** `label` seguido de comillas y apertura en escape o HTML real. */
+/** `label` seguido de comillas y apertura en escape o HTML real; cierre con `/` o `\u002F`. */
 const RE_LABEL_THEN_BOLD =
-  /["']label["']\s*:\s*["'](?:\\u003[cC]b\\u003[eE]|<b>)([\s\S]*?)(?:\\u003[cC]\/b\\u003[eE]|<\/b>)["']/i;
+  /["']label["']\s*:\s*["'](?:\\u003[cC]b\\u003[eE]|<b>)([\s\S]*?)(?:\\u003[cC](?:\\u002[fF][bB]|[/][bB])\\u003[eE]|<\/b>)["']/i;
+
+/**
+ * Resultado del modo FileMaker (delimitadores) o regex sueltos que cruza tags `<script>`:
+ * el `>` como delimitador tomaba el 2.º/3.º `>` del HTML y devolvía p. ej. `window._gt={ctx:{}};</script>`.
+ * @param {string} s
+ * @returns {boolean}
+ */
+function looksLikeGarbageNombreExtract(s) {
+  const t = String(s).trim();
+  if (!t) return true;
+  if (t.length > 160) return true;
+  if (/window\.|document\.|newrelic|__NEWRELIC/i.test(t)) return true;
+  if (/<\/?script|function\s*\(|=>|\{ctx:|\}\s*;\s*<\/|=\s*\{\s*ctx\s*:/i.test(t)) return true;
+  if (/[<>{};=]{3,}/.test(t)) return true;
+  return false;
+}
 
 /**
  * Tras el marcador buyer/data/label + `\u003Cb\u003E`, ML suele llevar nombre y apellido como las dos primeras palabras.
@@ -127,11 +149,11 @@ function computeVentasDetalleAnchorPositions(html) {
  * @returns {string|null}
  */
 function sliceBoldEscFromOpen(html, start) {
-  const a = html.indexOf(CLOSE_B_BOLD_ESC_UPPER, start);
-  const b = html.indexOf(CLOSE_B_BOLD_ESC_LOWER, start);
   let end = -1;
-  if (a >= 0) end = a;
-  if (b >= 0 && (end < 0 || b < end)) end = b;
+  for (const close of CLOSE_B_BOLD_ESC_VARIANTS) {
+    const i = html.indexOf(close, start);
+    if (i >= 0 && (end < 0 || i < end)) end = i;
+  }
   if (end < 0 || end <= start) return null;
   return html.slice(start, end);
 }
@@ -213,16 +235,21 @@ function extractNombreFromBuyerDataLabelBold(html) {
 }
 
 /**
+ * Orden: 1) JSON Nordic `data.label` + `<b>…</b>` escapado (incl. `\u002F` en `</b>`).
+ * 2) Guion FM solo con delimitadores `\u003e` / `\u003c` (nunca `>` suelto: cruza `<script>` y devuelve basura).
  * @param {string|null|undefined} html
  * @returns {string|null}
  */
 function extractNombreApellidoFromVentasHtml(html) {
   if (html == null || typeof html !== "string" || !html.trim()) return null;
 
+  const fromBold = extractNombreFromBuyerDataLabelBold(html);
+  if (fromBold && !looksLikeGarbageNombreExtract(fromBold)) return fromBold;
+
   const { pos_buyer_info_text: ubi1, pos_label: offsetLabel } = computeVentasDetalleAnchorPositions(html);
   if (ubi1 != null && offsetLabel != null) {
     const ubi2Abs = ubi1 + offsetLabel;
-    const delims = [DELIM_U003E, "\\u003c", ">"];
+    const delims = [DELIM_U003E, "\\u003c"];
     for (const delim of delims) {
       const raw = middleBetweenSecondAndThirdDelim(html, ubi2Abs, delim);
       if (raw == null || !String(raw).trim()) continue;
@@ -234,11 +261,11 @@ function extractNombreApellidoFromVentasHtml(html) {
       if (s.startsWith('"') && s.endsWith('"') && s.length > 1) {
         s = s.slice(1, -1).trim();
       }
-      if (s) return s;
+      if (s && !looksLikeGarbageNombreExtract(s)) return s;
     }
   }
 
-  return extractNombreFromBuyerDataLabelBold(html);
+  return null;
 }
 
 /**
@@ -277,6 +304,7 @@ module.exports = {
   extractNombreFromBuyerDataLabelBold,
   firstTwoWordsFromSegment,
   computeVentasDetalleAnchorPositions,
+  looksLikeGarbageNombreExtract,
   cleanDigits,
 };
 

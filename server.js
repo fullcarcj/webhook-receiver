@@ -54,6 +54,7 @@ const {
   getTokenStatusForMlUser,
   exchangeAuthorizationCode,
 } = require("./oauth-token");
+const { listingRowFromMlItemApi } = require("./ml-listing-map");
 const {
   insertWebhook,
   listWebhooks,
@@ -91,6 +92,16 @@ const {
   upsertMlQuestionAnswered,
   listMlQuestionsPending,
   listMlQuestionsAnswered,
+  listMlListingsAll,
+  listMlListingsByUser,
+  listMlListingSyncStatesAll,
+  listMlListingCountsByUser,
+  upsertMlListing,
+  insertMlListingWebhookLog,
+  listMlListingWebhookLog,
+  ML_LISTING_CHANGE_ACK_ACTIONS,
+  insertMlListingChangeAck,
+  listMlListingChangeAck,
   dbPath,
 } = require("./db");
 
@@ -138,6 +149,14 @@ function isVentasDetalleWebPath(pathname) {
 
 function isPreguntasMlPath(pathname) {
   return pathname === "/preguntas-ml" || pathname === "/preguntas-ml/";
+}
+
+function isPublicacionesMlPath(pathname) {
+  return pathname === "/publicaciones-ml" || pathname === "/publicaciones-ml/";
+}
+
+function isListingChangeAckPath(pathname) {
+  return pathname === "/listing-change-ack" || pathname === "/listing-change-ack/";
 }
 
 function rejectIngestSecret(req, res) {
@@ -378,6 +397,33 @@ function logWebhook(body, req) {
   console.log("[webhook]", line);
 }
 
+/** Extrae item_id desde resource de webhook (path /items/… o id suelto). */
+function guessMlItemIdFromResource(resourceStr) {
+  const s = String(resourceStr || "");
+  const m = s.match(/\/items\/([^/?#]+)/i);
+  if (m) {
+    try {
+      return decodeURIComponent(m[1]);
+    } catch {
+      return m[1];
+    }
+  }
+  const t = s.trim();
+  if (/^ML[A-Z]{1,2}\d/i.test(t)) {
+    const part = t.split(/[/\s?#]/)[0];
+    return part || "?";
+  }
+  return "?";
+}
+
+/** Topic o resource de ítem ML: evita que isItemsTopic falle por variantes del topic. */
+function isMlItemsTopic(topic, resourceStr) {
+  const t = topic != null ? String(topic).trim().toLowerCase() : "";
+  if (t === "item" || t === "items") return true;
+  if (resourceStr && /\/items\//i.test(String(resourceStr))) return true;
+  return false;
+}
+
 /**
  * Tras el webhook: GET al recurso de ML y guarda en ml_topic_fetches (no bloquea la respuesta HTTP).
  */
@@ -398,6 +444,7 @@ function scheduleTopicFetchFromWebhook(body) {
     if (topic != null) {
       const tl = String(topic).toLowerCase();
       if (tl === "question" || tl === "questions") topic = "questions";
+      if (tl === "item" || tl === "items") topic = "items";
     }
     if (!topic && /\/orders\/\d/i.test(resourceStr)) {
       topic = "orders_v2";
@@ -405,6 +452,11 @@ function scheduleTopicFetchFromWebhook(body) {
       topic = "messages";
     } else if (!topic && /\/questions\//i.test(resourceStr)) {
       topic = "questions";
+    } else if (!topic && /\/items\//i.test(resourceStr)) {
+      topic = "items";
+    }
+    if (isMlItemsTopic(topic, resourceStr)) {
+      topic = "items";
     }
     const notifId = body._id != null ? String(body._id) : null;
     let requestPath = "";
@@ -569,10 +621,85 @@ function scheduleTopicFetchFromWebhook(body) {
           }
         }
 
+        if (topic === "items") {
+          const pathForLog = result.path || requestPath;
+          const fetchedAt = new Date().toISOString();
+          const logItemId = guessMlItemIdFromResource(resourceStr);
+          try {
+            if (result.ok && parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              const row = listingRowFromMlItemApi(mlUserId, parsed, {
+                http_status: result.status,
+                sync_error: null,
+                fetched_at: fetchedAt,
+              });
+              if (row) {
+                const lid = await upsertMlListing(row);
+                await insertMlListingWebhookLog({
+                  ml_user_id: mlUserId,
+                  item_id: row.item_id,
+                  notification_id: notifId,
+                  topic: "items",
+                  request_path: pathForLog,
+                  http_status: result.status,
+                  upsert_ok: true,
+                  listing_id: lid,
+                  error_message: null,
+                  fetched_at: fetchedAt,
+                });
+              } else {
+                await insertMlListingWebhookLog({
+                  ml_user_id: mlUserId,
+                  item_id: logItemId,
+                  notification_id: notifId,
+                  topic: "items",
+                  request_path: pathForLog,
+                  http_status: result.status,
+                  upsert_ok: false,
+                  listing_id: null,
+                  error_message: "JSON de ítem sin id válido",
+                  fetched_at: fetchedAt,
+                });
+              }
+            } else {
+              await insertMlListingWebhookLog({
+                ml_user_id: mlUserId,
+                item_id: logItemId,
+                notification_id: notifId,
+                topic: "items",
+                request_path: pathForLog,
+                http_status: result.status,
+                upsert_ok: false,
+                listing_id: null,
+                error_message: errMsg || "respuesta no JSON o vacía",
+                fetched_at: fetchedAt,
+              });
+            }
+          } catch (eItems) {
+            console.error("[ml items webhook]", eItems.message);
+            try {
+              await insertMlListingWebhookLog({
+                ml_user_id: mlUserId,
+                item_id: logItemId,
+                notification_id: notifId,
+                topic: "items",
+                request_path: pathForLog,
+                http_status: result.status,
+                upsert_ok: false,
+                listing_id: null,
+                error_message: (eItems.message || String(eItems)).slice(0, 4000),
+                fetched_at: fetchedAt,
+              });
+            } catch (eLog) {
+              console.error("[ml items webhook log]", eLog.message);
+            }
+          }
+        }
+
         const isOrderTopic =
           topic && (topic === "orders_v2" || String(topic).startsWith("orders"));
-        /** Solo orders_v2 se considera “hook procesado” para el estado final; otros topics quedan en pendiente. */
+        /** orders_v2: post-venta define el estado. items: siempre cerrado (no dejar job pendiente). Otros topics no-orden suelen quedar pendientes. */
         const isOrdersV2Topic = topic === "orders_v2";
+        const isItemsTopic = topic === "items" || isMlItemsTopic(topic, resourceStr);
 
         let processStatus = FETCH_PROCESS_STATUS_DONE;
         if (isOrderTopic) {
@@ -596,7 +723,7 @@ function scheduleTopicFetchFromWebhook(body) {
             processStatus = FETCH_PROCESS_STATUS_POST_SALE_FAILED;
           }
         }
-        if (result.ok && !isOrdersV2Topic) {
+        if (result.ok && !isOrdersV2Topic && !isItemsTopic) {
           processStatus = FETCH_PROCESS_STATUS_PENDING;
         }
 
@@ -678,10 +805,7 @@ const server = http.createServer(async (req, res) => {
         service: "webhook-receiver",
         version: pkg.version,
         database: {
-          backend:
-            process.env.DATABASE_URL && String(process.env.DATABASE_URL).trim()
-              ? "postgresql"
-              : "sqlite",
+          backend: "postgresql",
           info: dbPath,
         },
         webhook: WEBHOOK_PATH,
@@ -717,6 +841,12 @@ const server = http.createServer(async (req, res) => {
           ml_questions_answered:
             "Respondidas: GET /preguntas-ml?k=ADMIN_SECRET&tabla=answered · Tras GET /questions/{id} con status respondido/cerrado",
         },
+        publicaciones_ml:
+          "GET /publicaciones-ml?k=ADMIN_SECRET — publicaciones en ml_listings por cuenta; ?cuenta=ml_user_id y ?status= (ej. active, paused, closed) filtran; ?format=json; estado sync en ml_listing_sync_state (cuando exista job de descarga)",
+        items_webhook_listing_refresh:
+          "Con ML_WEBHOOK_FETCH_RESOURCE=1, topic items (o resource /items/…) → GET /items/{id}?api_version=4 y upsert en ml_listings; auditoría en ml_listing_webhook_log",
+        listing_change_ack:
+          "GET|POST /listing-change-ack?k=ADMIN_SECRET — tabla ml_listing_change_ack: marcar ítem procesado (action: activate|add_stock|pause|delete|dismiss). POST JSON { ml_user_id, item_id, action, note?, webhook_log_id? }",
       })
     );
     return;
@@ -946,7 +1076,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /** Webhooks guardados en SQLite (misma clave ADMIN_SECRET que /cuentas). */
+  /** Webhooks guardados en PostgreSQL (misma clave ADMIN_SECRET que /cuentas). */
   if (req.method === "GET" && isHooksPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
     const k = url.searchParams.get("k") || url.searchParams.get("secret");
@@ -1763,6 +1893,465 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Publicaciones ML: ml_listings + ml_listing_sync_state (multicuenta). */
+  if (req.method === "GET" && isPublicacionesMlPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Publicaciones ML</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Publicaciones ML</title><p>Acceso denegado. Usa <code>/publicaciones-ml?k=TU_CLAVE</code>.</p>"
+      );
+      return;
+    }
+    const limRaw = url.searchParams.get("limit");
+    const limNum = Math.min(
+      10000,
+      Math.max(1, Number(limRaw) || 500)
+    );
+    const cuentaRaw = url.searchParams.get("cuenta");
+    const cuentaFilter =
+      cuentaRaw != null && String(cuentaRaw).trim() !== ""
+        ? Number(String(cuentaRaw).trim())
+        : null;
+    const useCuenta =
+      cuentaFilter != null && Number.isFinite(cuentaFilter) && cuentaFilter > 0
+        ? cuentaFilter
+        : null;
+    const statusRaw = url.searchParams.get("status");
+    const statusFilter =
+      statusRaw != null && String(statusRaw).trim() !== ""
+        ? String(statusRaw).trim()
+        : null;
+    const listOpts = statusFilter ? { status: statusFilter } : {};
+
+    let accounts;
+    let counts;
+    let syncStates;
+    let listings;
+    try {
+      accounts = await listMlAccounts();
+      counts = await listMlListingCountsByUser();
+      syncStates = await listMlListingSyncStatesAll();
+      listings = useCuenta
+        ? await listMlListingsByUser(useCuenta, limNum, 10000, listOpts)
+        : await listMlListingsAll(limNum, 10000, listOpts);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+
+    const countMap = new Map(
+      counts.map((c) => [Number(c.ml_user_id), Number(c.total)])
+    );
+    const nickByUser = new Map(
+      accounts.map((a) => [Number(a.ml_user_id), a.nickname != null ? String(a.nickname) : ""])
+    );
+
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          cuenta_filter: useCuenta,
+          status_filter: statusFilter,
+          limit: limNum,
+          accounts,
+          counts_by_user: counts,
+          sync_states: syncStates,
+          listings_count: listings.length,
+          listings,
+        })
+      );
+      return;
+    }
+
+    const kForLinks = k;
+    function pubQuery(extra = {}) {
+      const p = new URLSearchParams();
+      p.set("k", kForLinks);
+      p.set("limit", String(limNum));
+      const cuenta =
+        extra.cuenta !== undefined ? extra.cuenta : useCuenta;
+      if (cuenta != null && Number.isFinite(Number(cuenta)) && Number(cuenta) > 0) {
+        p.set("cuenta", String(cuenta));
+      }
+      const st =
+        extra.status !== undefined ? extra.status : statusFilter;
+      if (st != null && String(st).trim() !== "") {
+        p.set("status", String(st).trim());
+      }
+      return `/publicaciones-ml?${p.toString()}`;
+    }
+
+    const summaryRows = accounts
+      .map((a) => {
+        const uid = Number(a.ml_user_id);
+        const n = countMap.get(uid) ?? 0;
+        const nick = nickByUser.get(uid) || "—";
+        const active = useCuenta === uid ? "active" : "";
+        const link = pubQuery({ cuenta: uid });
+        return `<tr>
+  <td>${escapeHtml(uid)}</td>
+  <td class="muted">${escapeHtml(nick)}</td>
+  <td>${escapeHtml(n)}</td>
+  <td><a href="${escapeAttr(link)}" class="${active}">Ver solo esta cuenta</a></td>
+</tr>`;
+      })
+      .join("");
+
+    const syncRows =
+      syncStates.length === 0
+        ? `<tr><td colspan="6">Sin filas en <code>ml_listing_sync_state</code> (el job de descarga aún no ha guardado progreso por cuenta).</td></tr>`
+        : syncStates
+            .map((s) => {
+              return `<tr>
+  <td>${escapeHtml(s.ml_user_id)}</td>
+  <td class="muted">${escapeHtml(s.last_sync_status || "—")}</td>
+  <td>${escapeHtml(s.last_batch_total != null ? s.last_batch_total : "—")}</td>
+  <td class="muted">${escapeHtml(s.last_sync_at || "—")}</td>
+  <td class="muted">${escapeHtml(s.last_scroll_id != null ? String(s.last_scroll_id).slice(0, 40) : "—")}</td>
+  <td class="muted">${escapeHtml(s.last_error || "—")}</td>
+</tr>`;
+            })
+            .join("");
+
+    const listingRows =
+      listings.length === 0
+        ? `<tr><td colspan="9">Sin publicaciones en <code>ml_listings</code>. Las tablas existen; los datos aparecen cuando un proceso llame a <code>upsertMlListing</code> (descarga desde la API ML).</td></tr>`
+        : listings
+            .map((r) => {
+              const title =
+                r.title && String(r.title).length > 80
+                  ? `${escapeHtml(String(r.title).slice(0, 80))}…`
+                  : escapeHtml(r.title);
+              const price =
+                r.price != null && String(r.price).trim() !== ""
+                  ? escapeHtml(String(r.price))
+                  : "—";
+              const nick = nickByUser.get(Number(r.ml_user_id)) || "—";
+              return `<tr>
+  <td>${escapeHtml(r.ml_user_id)}</td>
+  <td class="muted">${nick}</td>
+  <td>${escapeHtml(r.item_id)}</td>
+  <td>${escapeHtml(r.status || "—")}</td>
+  <td class="muted">${title}</td>
+  <td>${price}</td>
+  <td>${escapeHtml(r.currency_id || "—")}</td>
+  <td class="muted">${escapeHtml(r.updated_at || "—")}</td>
+  <td class="muted">${r.raw_json != null ? String(r.raw_json).length : 0}</td>
+</tr>`;
+            })
+            .join("");
+
+    const filterNote = [
+      useCuenta
+        ? `Cuenta: <strong>${escapeHtml(useCuenta)}</strong> · <a href="${escapeAttr(
+            pubQuery({ cuenta: null })
+          )}">Ver todas las cuentas</a>`
+        : "Todas las cuentas (orden: <code>ml_user_id</code>, luego <code>updated_at</code> desc.).",
+      statusFilter
+        ? `Estado: <strong>${escapeHtml(statusFilter)}</strong> · <a href="${escapeAttr(
+            pubQuery({ status: null })
+          )}">Quitar filtro de estado</a>`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const statusLink = (value, label) => {
+      const active =
+        value === null
+          ? !statusFilter
+          : statusFilter &&
+            String(statusFilter).toLowerCase() === String(value).toLowerCase();
+      return `<a href="${escapeAttr(pubQuery({ status: value }))}" class="${
+        active ? "active" : ""
+      }">${escapeHtml(label)}</a>`;
+    };
+
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Publicaciones ML</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #15202b; color: #e7e9ea; margin: 1rem; }
+    .lead { color: #8b98a5; font-size: 0.95rem; }
+    a { color: #1d9bf0; }
+    a.active { font-weight: 600; text-decoration: underline; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; font-size: 0.85rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    .muted { color: #8b98a5; max-width: 22rem; }
+    h2 { font-size: 1.1rem; margin-top: 1.25rem; }
+    .status-filters {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.6rem;
+      margin: 0.75rem 0 1rem; padding: 0.65rem 0.75rem;
+      background: #1e2732; border: 1px solid #38444d; border-radius: 8px; font-size: 0.95rem;
+    }
+    .status-filters strong { color: #e7e9ea; margin-right: 0.25rem; }
+    .status-filters a {
+      display: inline-block; padding: 0.2rem 0.55rem; border-radius: 6px;
+      background: #15202b; border: 1px solid #38444d; text-decoration: none;
+    }
+    .status-filters a:hover { border-color: #1d9bf0; }
+    .status-filters a.active { border-color: #1d9bf0; font-weight: 600; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Publicaciones Mercado Libre</h1>
+  <div class="status-filters" role="group" aria-label="Filtro por estado de publicación">
+    <strong>Estado:</strong>
+    ${statusLink(null, "Todos")}
+    ${statusLink("active", "active")}
+    ${statusLink("paused", "paused")}
+    ${statusLink("closed", "closed")}
+  </div>
+  <p class="lead">Tablas <code>ml_listings</code> y <code>ml_listing_sync_state</code>. JSON: <code>?format=json</code> · <code>?limit=${escapeHtml(
+    limNum
+  )}</code> · <code>?cuenta=ml_user_id</code> · <code>?status=</code> (ej. active, paused, closed)</p>
+  <p class="lead">${filterNote}</p>
+  <p class="lead">La descarga masiva desde la API no está automatizada en este servidor todavía: aquí ves lo ya guardado en BD. <code>ml_listing_sync_state</code> refleja el último lote cuando un job actualice ese estado.</p>
+
+  <h2>Resumen por cuenta (ml_accounts)</h2>
+  <table>
+    <thead><tr><th>ml_user_id</th><th>nickname</th><th>publicaciones en BD</th><th></th></tr></thead>
+    <tbody>${accounts.length === 0 ? `<tr><td colspan="4">No hay cuentas en <code>ml_accounts</code>.</td></tr>` : summaryRows}</tbody>
+  </table>
+
+  <h2>Estado de sincronización (último lote por cuenta)</h2>
+  <table>
+    <thead><tr><th>ml_user_id</th><th>last_sync_status</th><th>last_batch_total</th><th>last_sync_at</th><th>scroll (recorte)</th><th>last_error</th></tr></thead>
+    <tbody>${syncRows}</tbody>
+  </table>
+
+  <h2>Publicaciones (${listings.length} fila(s) mostrada(s))</h2>
+  <table>
+    <thead><tr><th>cuenta</th><th>nickname</th><th>item_id</th><th>status</th><th>título</th><th>precio</th><th>moneda</th><th>updated_at</th><th>chars raw_json</th></tr></thead>
+    <tbody>${listingRows}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
+  /** Cambios de publicación: log webhook + acuses de procesado (ml_listing_change_ack). */
+  if (isListingChangeAckPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Acuses ML</title><p>Define <code>ADMIN_SECRET</code> y reinicia.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Acuses ML</title><p>Acceso denegado. <code>/listing-change-ack?k=…</code></p>"
+      );
+      return;
+    }
+
+    const ackLabelEs = {
+      activate: "Activar",
+      add_stock: "Agregar stock",
+      pause: "Pausar",
+      delete: "Eliminar",
+      dismiss: "Archivar / visto",
+    };
+
+    if (req.method === "POST") {
+      let body;
+      try {
+        body = await parseJsonBody(req);
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        return;
+      }
+      const row = {
+        ml_user_id: body.ml_user_id,
+        item_id: body.item_id,
+        action: body.action,
+        note: body.note,
+        webhook_log_id: body.webhook_log_id,
+      };
+      let id;
+      try {
+        id = await insertMlListingChangeAck(row);
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+        return;
+      }
+      if (id == null) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error:
+              "acción o datos inválidos: ml_user_id, item_id y action requeridos; action ∈ " +
+              ML_LISTING_CHANGE_ACK_ACTIONS.join(", "),
+            actions: ML_LISTING_CHANGE_ACK_ACTIONS,
+          })
+        );
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, id }));
+      return;
+    }
+
+    if (req.method !== "GET") {
+      res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "usa GET o POST" }));
+      return;
+    }
+
+    const limRaw = url.searchParams.get("limit");
+    const limNum = Math.min(2000, Math.max(1, Number(limRaw) || 200));
+    const cuentaFilter =
+      url.searchParams.get("cuenta") != null && String(url.searchParams.get("cuenta")).trim() !== ""
+        ? Number(String(url.searchParams.get("cuenta")).trim())
+        : null;
+    const useCuenta =
+      cuentaFilter != null && Number.isFinite(cuentaFilter) && cuentaFilter > 0
+        ? cuentaFilter
+        : null;
+    const itemFilter =
+      url.searchParams.get("item_id") != null && String(url.searchParams.get("item_id")).trim() !== ""
+        ? String(url.searchParams.get("item_id")).trim()
+        : null;
+    const listOpts = {};
+    if (useCuenta != null) listOpts.ml_user_id = useCuenta;
+    if (itemFilter != null) listOpts.item_id = itemFilter;
+
+    let acks;
+    let webhookLog;
+    try {
+      acks = await listMlListingChangeAck(limNum, 5000, listOpts);
+      webhookLog =
+        url.searchParams.get("include_webhook_log") === "1" ||
+        url.searchParams.get("include_webhook_log") === "true"
+          ? await listMlListingWebhookLog(limNum, 5000)
+          : null;
+      if (webhookLog && useCuenta != null) {
+        webhookLog = webhookLog.filter((w) => Number(w.ml_user_id) === useCuenta);
+      }
+      if (webhookLog && itemFilter != null) {
+        webhookLog = webhookLog.filter((w) => String(w.item_id) === itemFilter);
+      }
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          actions: ML_LISTING_CHANGE_ACK_ACTIONS,
+          action_labels_es: ackLabelEs,
+          limit: limNum,
+          filters: { cuenta: useCuenta, item_id: itemFilter },
+          acks,
+          ...(webhookLog != null ? { webhook_log: webhookLog } : {}),
+        })
+      );
+      return;
+    }
+
+    const ackRows = (acks || [])
+      .map((a) => {
+        const lab = ackLabelEs[a.action] || a.action;
+        return `<tr>
+  <td>${escapeHtml(a.id)}</td>
+  <td>${escapeHtml(a.ml_user_id)}</td>
+  <td>${escapeHtml(a.item_id)}</td>
+  <td>${escapeHtml(lab)} <span class="muted">(${escapeHtml(a.action)})</span></td>
+  <td>${escapeHtml(a.webhook_log_id != null ? a.webhook_log_id : "—")}</td>
+  <td class="muted">${escapeHtml(a.note || "—")}</td>
+  <td class="muted">${escapeHtml(a.created_at || "—")}</td>
+</tr>`;
+      })
+      .join("");
+
+    const whRows =
+      webhookLog && webhookLog.length
+        ? webhookLog
+            .map(
+              (w) => `<tr>
+  <td>${escapeHtml(w.id)}</td>
+  <td>${escapeHtml(w.ml_user_id)}</td>
+  <td>${escapeHtml(w.item_id)}</td>
+  <td>${escapeHtml(w.upsert_ok ? "sí" : "no")}</td>
+  <td class="muted">${escapeHtml(w.fetched_at || "—")}</td>
+</tr>`
+            )
+            .join("")
+        : "";
+
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Acuses publicaciones ML</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #15202b; color: #e7e9ea; margin: 1rem; }
+    .lead { color: #8b98a5; font-size: 0.95rem; }
+    code { background: #1e2732; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; font-size: 0.85rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    .muted { color: #8b98a5; }
+    h2 { font-size: 1.1rem; margin-top: 1.25rem; }
+  </style>
+</head>
+<body>
+  <h1>Acuses de cambios en publicaciones</h1>
+  <p class="lead">Tabla <code>ml_listing_change_ack</code>: qué hiciste tras ver un cambio (no ejecuta la API de ML). JSON: <code>?format=json</code> · <code>?limit=</code> · <code>?cuenta=ml_user_id</code> · <code>?item_id=</code> · log de webhooks: <code>?include_webhook_log=1</code></p>
+  <p class="lead"><strong>POST</strong> (mismo <code>?k=</code>) cuerpo JSON ejemplo:<br/>
+  <code>{"ml_user_id":9309737,"item_id":"MLA123","action":"pause","note":"revisado stock","webhook_log_id":42}</code><br/>
+  Acciones: <code>${escapeHtml(ML_LISTING_CHANGE_ACK_ACTIONS.join(", "))}</code></p>
+
+  <h2>Acuses (${acks.length})</h2>
+  <table>
+    <thead><tr><th>id</th><th>cuenta</th><th>item_id</th><th>acción</th><th>webhook_log_id</th><th>nota</th><th>created_at</th></tr></thead>
+    <tbody>${acks.length === 0 ? `<tr><td colspan="7">Sin filas.</td></tr>` : ackRows}</tbody>
+  </table>
+
+  ${
+    webhookLog != null
+      ? `<h2>Log webhook ítems (ml_listing_webhook_log, ${webhookLog.length})</h2>
+  <table>
+    <thead><tr><th>id</th><th>cuenta</th><th>item_id</th><th>upsert_ok</th><th>fetched_at</th></tr></thead>
+    <tbody>${whRows || `<tr><td colspan="5">Sin filas.</td></tr>`}</tbody>
+  </table>`
+      : `<p class="muted">Añade <code>?include_webhook_log=1</code> para ver también <code>ml_listing_webhook_log</code> en esta página.</p>`
+  }
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
   /** Historial de intentos de envío automático post-venta (ml_post_sale_auto_send_log). */
   if (req.method === "GET" && isPostSaleEnviosPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
@@ -2409,11 +2998,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  const dbKind =
-    String(dbPath).startsWith("postgresql:") || String(dbPath).includes("postgresql://")
-      ? "PostgreSQL"
-      : "SQLite";
-  console.log(`[db] ${dbKind}: ${dbPath}`);
+  console.log(`[db] PostgreSQL: ${dbPath}`);
   const forwards = getForwardPostUrls();
   console.log(`Escuchando en http://localhost:${PORT} (todas las interfaces, para tunel loclx/ngrok)`);
   console.log(`Webhook POST: http://localhost:${PORT}${WEBHOOK_PATH}`);
@@ -2467,10 +3052,12 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
     console.log(`Log envíos post-venta: http://localhost:${PORT}/envios-postventa?k=TU_ADMIN_SECRET`);
     console.log(`Preguntas ML (pending/answered): http://localhost:${PORT}/preguntas-ml?k=TU_ADMIN_SECRET`);
+    console.log(`Publicaciones ML (listings por cuenta): http://localhost:${PORT}/publicaciones-ml?k=TU_ADMIN_SECRET`);
+    console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /preguntas-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /preguntas-ml /publicaciones-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

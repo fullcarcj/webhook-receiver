@@ -1,5 +1,5 @@
 /**
- * SQLite solo cuando no hay DATABASE_URL (desarrollo local sin Postgres).
+ * Referencia / pruebas offline. En runtime la app usa solo PostgreSQL vía `db.js` (DATABASE_URL obligatoria).
  * Cambios de esquema: aplicar primero en db-postgres.js y replicar aquí.
  */
 const fs = require("fs");
@@ -170,6 +170,74 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_ml_items_user ON ml_items(ml_user_id);
   CREATE INDEX IF NOT EXISTS idx_ml_items_updated ON ml_items(updated_at);
+
+  CREATE TABLE IF NOT EXISTS ml_listings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ml_user_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    site_id TEXT,
+    seller_id INTEGER,
+    status TEXT,
+    title TEXT,
+    price REAL,
+    currency_id TEXT,
+    available_quantity INTEGER,
+    sold_quantity INTEGER,
+    category_id TEXT,
+    listing_type TEXT,
+    permalink TEXT,
+    thumbnail TEXT,
+    raw_json TEXT NOT NULL,
+    search_json TEXT,
+    http_status INTEGER,
+    sync_error TEXT,
+    fetched_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(ml_user_id, item_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_listings_user_status ON ml_listings(ml_user_id, status);
+  CREATE INDEX IF NOT EXISTS idx_ml_listings_user_updated ON ml_listings(ml_user_id, updated_at);
+  CREATE INDEX IF NOT EXISTS idx_ml_listings_item_id ON ml_listings(item_id);
+
+  CREATE TABLE IF NOT EXISTS ml_listing_sync_state (
+    ml_user_id INTEGER PRIMARY KEY,
+    last_scroll_id TEXT,
+    last_offset INTEGER,
+    last_batch_total INTEGER,
+    last_sync_at TEXT,
+    last_sync_status TEXT,
+    last_error TEXT,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS ml_listing_webhook_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ml_user_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    notification_id TEXT,
+    topic TEXT,
+    request_path TEXT,
+    http_status INTEGER,
+    upsert_ok INTEGER NOT NULL DEFAULT 0,
+    listing_id INTEGER,
+    error_message TEXT,
+    fetched_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_listing_webhook_log_user ON ml_listing_webhook_log(ml_user_id);
+  CREATE INDEX IF NOT EXISTS idx_ml_listing_webhook_log_fetched ON ml_listing_webhook_log(fetched_at DESC);
+
+  CREATE TABLE IF NOT EXISTS ml_listing_change_ack (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ml_user_id INTEGER NOT NULL,
+    item_id TEXT NOT NULL,
+    webhook_log_id INTEGER,
+    action TEXT NOT NULL,
+    note TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_user ON ml_listing_change_ack(ml_user_id);
+  CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_created ON ml_listing_change_ack(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_item ON ml_listing_change_ack(ml_user_id, item_id);
 `);
 
 (function migratePostSalePackIdToOrderId() {
@@ -1245,6 +1313,253 @@ function listMlQuestionsAnswered(limit, maxAllowed) {
     .all(n);
 }
 
+const upsertMlListingStmt = db.prepare(
+  `INSERT INTO ml_listings (
+     ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+     available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+     raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+   ) VALUES (
+     @ml_user_id, @item_id, @site_id, @seller_id, @status, @title, @price, @currency_id,
+     @available_quantity, @sold_quantity, @category_id, @listing_type, @permalink, @thumbnail,
+     @raw_json, @search_json, @http_status, @sync_error, @fetched_at, @updated_at
+   )
+   ON CONFLICT(ml_user_id, item_id) DO UPDATE SET
+     site_id = excluded.site_id,
+     seller_id = excluded.seller_id,
+     status = excluded.status,
+     title = excluded.title,
+     price = excluded.price,
+     currency_id = excluded.currency_id,
+     available_quantity = excluded.available_quantity,
+     sold_quantity = excluded.sold_quantity,
+     category_id = excluded.category_id,
+     listing_type = excluded.listing_type,
+     permalink = excluded.permalink,
+     thumbnail = excluded.thumbnail,
+     raw_json = excluded.raw_json,
+     search_json = excluded.search_json,
+     http_status = excluded.http_status,
+     sync_error = excluded.sync_error,
+     fetched_at = excluded.fetched_at,
+     updated_at = excluded.updated_at`
+);
+
+function insertMlListingWebhookLog(row) {
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return null;
+  const itemId = row.item_id != null ? String(row.item_id).trim() : "";
+  if (!itemId) return null;
+  const fetchedAt = row.fetched_at != null ? String(row.fetched_at) : new Date().toISOString();
+  const r = db
+    .prepare(
+      `INSERT INTO ml_listing_webhook_log (
+         ml_user_id, item_id, notification_id, topic, request_path, http_status,
+         upsert_ok, listing_id, error_message, fetched_at
+       ) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id`
+    )
+    .get(
+      mlUid,
+      itemId,
+      row.notification_id != null ? String(row.notification_id) : null,
+      row.topic != null ? String(row.topic).slice(0, 80) : null,
+      row.request_path != null ? String(row.request_path).slice(0, 2000) : null,
+      row.http_status != null ? Number(row.http_status) : null,
+      row.upsert_ok ? 1 : 0,
+      row.listing_id != null ? Number(row.listing_id) : null,
+      row.error_message != null ? String(row.error_message).slice(0, 4000) : null,
+      fetchedAt
+    );
+  return r && r.id != null ? Number(r.id) : null;
+}
+
+function listMlListingWebhookLog(limit, maxAllowed) {
+  const cap = maxAllowed != null ? maxAllowed : 5000;
+  const n = Math.min(Math.max(Number(limit) || 200, 1), cap);
+  return db
+    .prepare(
+      `SELECT id, ml_user_id, item_id, notification_id, topic, request_path, http_status,
+              upsert_ok, listing_id, error_message, fetched_at
+       FROM ml_listing_webhook_log ORDER BY id DESC LIMIT ?`
+    )
+    .all(n);
+}
+
+function upsertMlListing(row) {
+  const mlUid = Number(row.ml_user_id);
+  const itemId = row.item_id != null ? String(row.item_id).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !itemId) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const fetchedAt = row.fetched_at != null ? String(row.fetched_at) : now;
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  const rawJson = row.raw_json != null ? String(row.raw_json) : "{}";
+  const priceVal =
+    row.price != null && String(row.price).trim() !== "" ? Number(row.price) : null;
+  upsertMlListingStmt.run({
+    ml_user_id: mlUid,
+    item_id: itemId,
+    site_id: row.site_id != null ? String(row.site_id) : null,
+    seller_id: row.seller_id != null ? Number(row.seller_id) : null,
+    status: row.status != null ? String(row.status) : null,
+    title: row.title != null ? String(row.title) : null,
+    price: priceVal != null && Number.isFinite(priceVal) ? priceVal : null,
+    currency_id: row.currency_id != null ? String(row.currency_id) : null,
+    available_quantity: row.available_quantity != null ? Number(row.available_quantity) : null,
+    sold_quantity: row.sold_quantity != null ? Number(row.sold_quantity) : null,
+    category_id: row.category_id != null ? String(row.category_id) : null,
+    listing_type: row.listing_type != null ? String(row.listing_type) : null,
+    permalink: row.permalink != null ? String(row.permalink) : null,
+    thumbnail: row.thumbnail != null ? String(row.thumbnail) : null,
+    raw_json: rawJson,
+    search_json: row.search_json != null ? String(row.search_json) : null,
+    http_status: row.http_status != null ? Number(row.http_status) : null,
+    sync_error: row.sync_error != null ? String(row.sync_error).slice(0, 4000) : null,
+    fetched_at: fetchedAt,
+    updated_at: updatedAt,
+  });
+  const r = db.prepare("SELECT id FROM ml_listings WHERE ml_user_id = ? AND item_id = ?").get(mlUid, itemId);
+  return r && r.id != null ? Number(r.id) : null;
+}
+
+function listMlListingsByUser(mlUserId, limit, maxAllowed, options = {}) {
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const cap = maxAllowed != null ? maxAllowed : 5000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  const st =
+    options.status != null && String(options.status).trim() !== ""
+      ? String(options.status).trim()
+      : null;
+  if (st) {
+    return db
+      .prepare(
+        `SELECT id, ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+                available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+                raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+         FROM ml_listings WHERE ml_user_id = ?
+           AND LOWER(TRIM(COALESCE(status, ''))) = LOWER(?)
+         ORDER BY updated_at DESC LIMIT ?`
+      )
+      .all(mlUid, st, n);
+  }
+  return db
+    .prepare(
+      `SELECT id, ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+              available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+              raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_listings WHERE ml_user_id = ? ORDER BY updated_at DESC LIMIT ?`
+    )
+    .all(mlUid, n);
+}
+
+function getMlListingByItemId(mlUserId, itemId) {
+  const mlUid = Number(mlUserId);
+  const iid = itemId != null ? String(itemId).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !iid) return null;
+  return (
+    db
+      .prepare(
+        `SELECT id, ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+                available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+                raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+         FROM ml_listings WHERE ml_user_id = ? AND item_id = ?`
+      )
+      .get(mlUid, iid) || null
+  );
+}
+
+const upsertMlListingSyncStateStmt = db.prepare(
+  `INSERT INTO ml_listing_sync_state (
+     ml_user_id, last_scroll_id, last_offset, last_batch_total, last_sync_at, last_sync_status, last_error, updated_at
+   ) VALUES (@ml_user_id, @last_scroll_id, @last_offset, @last_batch_total, @last_sync_at, @last_sync_status, @last_error, @updated_at)
+   ON CONFLICT(ml_user_id) DO UPDATE SET
+     last_scroll_id = excluded.last_scroll_id,
+     last_offset = excluded.last_offset,
+     last_batch_total = excluded.last_batch_total,
+     last_sync_at = excluded.last_sync_at,
+     last_sync_status = excluded.last_sync_status,
+     last_error = excluded.last_error,
+     updated_at = excluded.updated_at`
+);
+
+function upsertMlListingSyncState(row) {
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return null;
+  const now = new Date().toISOString();
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  upsertMlListingSyncStateStmt.run({
+    ml_user_id: mlUid,
+    last_scroll_id: row.last_scroll_id != null ? String(row.last_scroll_id) : null,
+    last_offset: row.last_offset != null ? Number(row.last_offset) : null,
+    last_batch_total: row.last_batch_total != null ? Number(row.last_batch_total) : null,
+    last_sync_at: row.last_sync_at != null ? String(row.last_sync_at) : null,
+    last_sync_status: row.last_sync_status != null ? String(row.last_sync_status) : null,
+    last_error: row.last_error != null ? String(row.last_error).slice(0, 4000) : null,
+    updated_at: updatedAt,
+  });
+  return mlUid;
+}
+
+function getMlListingSyncState(mlUserId) {
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return null;
+  return (
+    db
+      .prepare(
+        `SELECT ml_user_id, last_scroll_id, last_offset, last_batch_total, last_sync_at, last_sync_status, last_error, updated_at
+         FROM ml_listing_sync_state WHERE ml_user_id = ?`
+      )
+      .get(mlUid) || null
+  );
+}
+
+function listMlListingsAll(limit, maxAllowed, options = {}) {
+  const cap = maxAllowed != null ? maxAllowed : 10000;
+  const n = Math.min(Math.max(Number(limit) || 500, 1), cap);
+  const st =
+    options.status != null && String(options.status).trim() !== ""
+      ? String(options.status).trim()
+      : null;
+  if (st) {
+    return db
+      .prepare(
+        `SELECT id, ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+                available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+                raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+         FROM ml_listings
+         WHERE LOWER(TRIM(COALESCE(status, ''))) = LOWER(?)
+         ORDER BY ml_user_id ASC, updated_at DESC LIMIT ?`
+      )
+      .all(st, n);
+  }
+  return db
+    .prepare(
+      `SELECT id, ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+              available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+              raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_listings ORDER BY ml_user_id ASC, updated_at DESC LIMIT ?`
+    )
+    .all(n);
+}
+
+function listMlListingSyncStatesAll() {
+  return db
+    .prepare(
+      `SELECT ml_user_id, last_scroll_id, last_offset, last_batch_total, last_sync_at, last_sync_status, last_error, updated_at
+       FROM ml_listing_sync_state ORDER BY ml_user_id ASC`
+    )
+    .all();
+}
+
+function listMlListingCountsByUser() {
+  return db
+    .prepare(
+      `SELECT ml_user_id, COUNT(*) AS total FROM ml_listings GROUP BY ml_user_id ORDER BY ml_user_id ASC`
+    )
+    .all();
+}
+
 module.exports = {
   insertWebhook,
   listWebhooks,
@@ -1292,4 +1607,17 @@ module.exports = {
   upsertMlQuestionAnswered,
   listMlQuestionsPending,
   listMlQuestionsAnswered,
+  upsertMlListing,
+  listMlListingsByUser,
+  getMlListingByItemId,
+  upsertMlListingSyncState,
+  getMlListingSyncState,
+  listMlListingsAll,
+  listMlListingSyncStatesAll,
+  listMlListingCountsByUser,
+  insertMlListingWebhookLog,
+  listMlListingWebhookLog,
+  ML_LISTING_CHANGE_ACK_ACTIONS,
+  insertMlListingChangeAck,
+  listMlListingChangeAck,
 };

@@ -1,7 +1,6 @@
 /**
  * Persistencia PostgreSQL (Render: DATABASE_URL interna o externa).
- * Esquema y migraciones: fuente principal para producción; mantener db-sqlite.js alineado.
- * Misma API que db-sqlite.js pero funciones async.
+ * Esquema y migraciones (PostgreSQL). `db-sqlite.js` existe solo como referencia opcional; `db.js` solo carga este módulo.
  */
 const { Pool } = require("pg");
 const {
@@ -214,6 +213,74 @@ async function runSchemaAndSeed() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_items_user ON ml_items(ml_user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_items_updated ON ml_items(updated_at)`,
+    `CREATE TABLE IF NOT EXISTS ml_listings (
+      id BIGSERIAL PRIMARY KEY,
+      ml_user_id BIGINT NOT NULL,
+      item_id TEXT NOT NULL,
+      site_id TEXT,
+      seller_id BIGINT,
+      status TEXT,
+      title TEXT,
+      price NUMERIC(20, 4),
+      currency_id TEXT,
+      available_quantity INTEGER,
+      sold_quantity INTEGER,
+      category_id TEXT,
+      listing_type TEXT,
+      permalink TEXT,
+      thumbnail TEXT,
+      raw_json TEXT NOT NULL,
+      search_json TEXT,
+      http_status INTEGER,
+      sync_error TEXT,
+      fetched_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CONSTRAINT uq_ml_listings_account_item UNIQUE (ml_user_id, item_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_listings_user_status ON ml_listings(ml_user_id, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_listings_user_updated ON ml_listings(ml_user_id, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_listings_item_id ON ml_listings(item_id)`,
+    `CREATE TABLE IF NOT EXISTS ml_listing_sync_state (
+      ml_user_id BIGINT PRIMARY KEY,
+      last_scroll_id TEXT,
+      last_offset INTEGER,
+      last_batch_total INTEGER,
+      last_sync_at TEXT,
+      last_sync_status TEXT,
+      last_error TEXT,
+      updated_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS ml_listing_webhook_log (
+      id BIGSERIAL PRIMARY KEY,
+      ml_user_id BIGINT NOT NULL,
+      item_id TEXT NOT NULL,
+      notification_id TEXT,
+      topic TEXT,
+      request_path TEXT,
+      http_status INTEGER,
+      upsert_ok BOOLEAN NOT NULL DEFAULT false,
+      listing_id BIGINT,
+      error_message TEXT,
+      fetched_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_listing_webhook_log_user ON ml_listing_webhook_log(ml_user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_listing_webhook_log_fetched ON ml_listing_webhook_log(fetched_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_listing_webhook_log_item ON ml_listing_webhook_log(item_id)`,
+    `CREATE TABLE IF NOT EXISTS ml_listing_change_ack (
+      id BIGSERIAL PRIMARY KEY,
+      ml_user_id BIGINT NOT NULL,
+      item_id TEXT NOT NULL,
+      webhook_log_id BIGINT,
+      action TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL,
+      CONSTRAINT chk_ml_listing_change_ack_action CHECK (
+        action IN ('activate', 'add_stock', 'pause', 'delete', 'dismiss')
+      )
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_user ON ml_listing_change_ack(ml_user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_created ON ml_listing_change_ack(created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_item ON ml_listing_change_ack(ml_user_id, item_id)`,
   ];
   for (const sql of stmts) {
     await pool.query(sql);
@@ -1147,6 +1214,343 @@ async function listMlQuestionsAnswered(limit, maxAllowed) {
   return rows;
 }
 
+/**
+ * Acciones permitidas al marcar un cambio de publicación como “procesado” (solo registro; no llama a la API ML).
+ */
+const ML_LISTING_CHANGE_ACK_ACTIONS = Object.freeze([
+  "activate",
+  "add_stock",
+  "pause",
+  "delete",
+  "dismiss",
+]);
+
+/**
+ * Auditoría: webhook topic items → GET /items y upsert en ml_listings.
+ * @param {object} row
+ */
+async function insertMlListingWebhookLog(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return null;
+  const itemId = row.item_id != null ? String(row.item_id).trim() : "";
+  if (!itemId) return null;
+  const fetchedAt = row.fetched_at != null ? String(row.fetched_at) : new Date().toISOString();
+  const { rows } = await pool.query(
+    `INSERT INTO ml_listing_webhook_log (
+       ml_user_id, item_id, notification_id, topic, request_path, http_status,
+       upsert_ok, listing_id, error_message, fetched_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+    [
+      mlUid,
+      itemId,
+      row.notification_id != null ? String(row.notification_id) : null,
+      row.topic != null ? String(row.topic).slice(0, 80) : null,
+      row.request_path != null ? String(row.request_path).slice(0, 2000) : null,
+      row.http_status != null ? Number(row.http_status) : null,
+      Boolean(row.upsert_ok),
+      row.listing_id != null ? Number(row.listing_id) : null,
+      row.error_message != null ? String(row.error_message).slice(0, 4000) : null,
+      fetchedAt,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+/** Listado reciente (admin / consultas). */
+async function listMlListingWebhookLog(limit, maxAllowed) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 5000;
+  const n = Math.min(Math.max(Number(limit) || 200, 1), cap);
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id, item_id, notification_id, topic, request_path, http_status,
+            upsert_ok, listing_id, error_message, fetched_at
+     FROM ml_listing_webhook_log ORDER BY id DESC LIMIT $1`,
+    [n]
+  );
+  return rows;
+}
+
+/**
+ * Registra cómo se procesó un ítem tras un cambio (activar, stock, pausar, etc.).
+ * @param {object} row
+ * @param {string} row.action — una de ML_LISTING_CHANGE_ACK_ACTIONS
+ */
+async function insertMlListingChangeAck(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  const itemId = row.item_id != null ? String(row.item_id).trim() : "";
+  const action = row.action != null ? String(row.action).trim().toLowerCase() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !itemId) {
+    return null;
+  }
+  if (!ML_LISTING_CHANGE_ACK_ACTIONS.includes(action)) {
+    return null;
+  }
+  const createdAt = row.created_at != null ? String(row.created_at) : new Date().toISOString();
+  const { rows } = await pool.query(
+    `INSERT INTO ml_listing_change_ack (
+       ml_user_id, item_id, webhook_log_id, action, note, created_at
+     ) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+    [
+      mlUid,
+      itemId,
+      row.webhook_log_id != null ? Number(row.webhook_log_id) : null,
+      action,
+      row.note != null ? String(row.note).slice(0, 4000) : null,
+      createdAt,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+/**
+ * @param {number} limit
+ * @param {number} [maxAllowed]
+ * @param {{ ml_user_id?: number, item_id?: string }} [options]
+ */
+async function listMlListingChangeAck(limit, maxAllowed, options = {}) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 5000;
+  const n = Math.min(Math.max(Number(limit) || 200, 1), cap);
+  const uid =
+    options.ml_user_id != null && Number.isFinite(Number(options.ml_user_id))
+      ? Number(options.ml_user_id)
+      : null;
+  const iid =
+    options.item_id != null && String(options.item_id).trim() !== ""
+      ? String(options.item_id).trim()
+      : null;
+  if (uid != null && iid != null) {
+    const { rows } = await pool.query(
+      `SELECT id, ml_user_id, item_id, webhook_log_id, action, note, created_at
+       FROM ml_listing_change_ack
+       WHERE ml_user_id = $1 AND item_id = $2
+       ORDER BY id DESC LIMIT $3`,
+      [uid, iid, n]
+    );
+    return rows;
+  }
+  if (uid != null) {
+    const { rows } = await pool.query(
+      `SELECT id, ml_user_id, item_id, webhook_log_id, action, note, created_at
+       FROM ml_listing_change_ack
+       WHERE ml_user_id = $1
+       ORDER BY id DESC LIMIT $2`,
+      [uid, n]
+    );
+    return rows;
+  }
+  if (iid != null) {
+    const { rows } = await pool.query(
+      `SELECT id, ml_user_id, item_id, webhook_log_id, action, note, created_at
+       FROM ml_listing_change_ack
+       WHERE item_id = $1
+       ORDER BY id DESC LIMIT $2`,
+      [iid, n]
+    );
+    return rows;
+  }
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id, item_id, webhook_log_id, action, note, created_at
+     FROM ml_listing_change_ack ORDER BY id DESC LIMIT $1`,
+    [n]
+  );
+  return rows;
+}
+
+async function upsertMlListing(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  const itemId = row.item_id != null ? String(row.item_id).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !itemId) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const fetchedAt = row.fetched_at != null ? String(row.fetched_at) : now;
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  const rawJson = row.raw_json != null ? String(row.raw_json) : "{}";
+  const priceVal = row.price != null && String(row.price).trim() !== "" ? row.price : null;
+  const { rows } = await pool.query(
+    `INSERT INTO ml_listings (
+       ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+       available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+       raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+     ON CONFLICT (ml_user_id, item_id) DO UPDATE SET
+       site_id = EXCLUDED.site_id,
+       seller_id = EXCLUDED.seller_id,
+       status = EXCLUDED.status,
+       title = EXCLUDED.title,
+       price = EXCLUDED.price,
+       currency_id = EXCLUDED.currency_id,
+       available_quantity = EXCLUDED.available_quantity,
+       sold_quantity = EXCLUDED.sold_quantity,
+       category_id = EXCLUDED.category_id,
+       listing_type = EXCLUDED.listing_type,
+       permalink = EXCLUDED.permalink,
+       thumbnail = EXCLUDED.thumbnail,
+       raw_json = EXCLUDED.raw_json,
+       search_json = EXCLUDED.search_json,
+       http_status = EXCLUDED.http_status,
+       sync_error = EXCLUDED.sync_error,
+       fetched_at = EXCLUDED.fetched_at,
+       updated_at = EXCLUDED.updated_at
+     RETURNING id`,
+    [
+      mlUid,
+      itemId,
+      row.site_id != null ? String(row.site_id) : null,
+      row.seller_id != null ? Number(row.seller_id) : null,
+      row.status != null ? String(row.status) : null,
+      row.title != null ? String(row.title) : null,
+      priceVal != null ? priceVal : null,
+      row.currency_id != null ? String(row.currency_id) : null,
+      row.available_quantity != null ? Number(row.available_quantity) : null,
+      row.sold_quantity != null ? Number(row.sold_quantity) : null,
+      row.category_id != null ? String(row.category_id) : null,
+      row.listing_type != null ? String(row.listing_type) : null,
+      row.permalink != null ? String(row.permalink) : null,
+      row.thumbnail != null ? String(row.thumbnail) : null,
+      rawJson,
+      row.search_json != null ? String(row.search_json) : null,
+      row.http_status != null ? Number(row.http_status) : null,
+      row.sync_error != null ? String(row.sync_error).slice(0, 4000) : null,
+      fetchedAt,
+      updatedAt,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+async function listMlListingsByUser(mlUserId, limit, maxAllowed, options = {}) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const cap = maxAllowed != null ? maxAllowed : 5000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  const st =
+    options.status != null && String(options.status).trim() !== ""
+      ? String(options.status).trim()
+      : null;
+  const sql = st
+    ? `SELECT id, ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+              available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+              raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_listings WHERE ml_user_id = $1
+         AND LOWER(TRIM(COALESCE(status, ''))) = LOWER($3)
+       ORDER BY updated_at DESC LIMIT $2`
+    : `SELECT id, ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+              available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+              raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_listings WHERE ml_user_id = $1 ORDER BY updated_at DESC LIMIT $2`;
+  const params = st ? [mlUid, n, st] : [mlUid, n];
+  const { rows } = await pool.query(sql, params);
+  return rows;
+}
+
+async function getMlListingByItemId(mlUserId, itemId) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const iid = itemId != null ? String(itemId).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !iid) return null;
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+            available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+            raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+     FROM ml_listings WHERE ml_user_id = $1 AND item_id = $2`,
+    [mlUid, iid]
+  );
+  return rows[0] || null;
+}
+
+async function upsertMlListingSyncState(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return null;
+  const now = new Date().toISOString();
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  await pool.query(
+    `INSERT INTO ml_listing_sync_state (
+       ml_user_id, last_scroll_id, last_offset, last_batch_total, last_sync_at, last_sync_status, last_error, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (ml_user_id) DO UPDATE SET
+       last_scroll_id = EXCLUDED.last_scroll_id,
+       last_offset = EXCLUDED.last_offset,
+       last_batch_total = EXCLUDED.last_batch_total,
+       last_sync_at = EXCLUDED.last_sync_at,
+       last_sync_status = EXCLUDED.last_sync_status,
+       last_error = EXCLUDED.last_error,
+       updated_at = EXCLUDED.updated_at`,
+    [
+      mlUid,
+      row.last_scroll_id != null ? String(row.last_scroll_id) : null,
+      row.last_offset != null ? Number(row.last_offset) : null,
+      row.last_batch_total != null ? Number(row.last_batch_total) : null,
+      row.last_sync_at != null ? String(row.last_sync_at) : null,
+      row.last_sync_status != null ? String(row.last_sync_status) : null,
+      row.last_error != null ? String(row.last_error).slice(0, 4000) : null,
+      updatedAt,
+    ]
+  );
+  return mlUid;
+}
+
+async function getMlListingSyncState(mlUserId) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return null;
+  const { rows } = await pool.query(
+    `SELECT ml_user_id, last_scroll_id, last_offset, last_batch_total, last_sync_at, last_sync_status, last_error, updated_at
+     FROM ml_listing_sync_state WHERE ml_user_id = $1`,
+    [mlUid]
+  );
+  return rows[0] || null;
+}
+
+/** Listado global ordenado por cuenta (ml_user_id) y luego por updated_at. */
+async function listMlListingsAll(limit, maxAllowed, options = {}) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 10000;
+  const n = Math.min(Math.max(Number(limit) || 500, 1), cap);
+  const st =
+    options.status != null && String(options.status).trim() !== ""
+      ? String(options.status).trim()
+      : null;
+  const sql = st
+    ? `SELECT id, ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+              available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+              raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_listings
+       WHERE LOWER(TRIM(COALESCE(status, ''))) = LOWER($2)
+       ORDER BY ml_user_id ASC, updated_at DESC LIMIT $1`
+    : `SELECT id, ml_user_id, item_id, site_id, seller_id, status, title, price, currency_id,
+              available_quantity, sold_quantity, category_id, listing_type, permalink, thumbnail,
+              raw_json, search_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_listings ORDER BY ml_user_id ASC, updated_at DESC LIMIT $1`;
+  const params = st ? [n, st] : [n];
+  const { rows } = await pool.query(sql, params);
+  return rows;
+}
+
+async function listMlListingSyncStatesAll() {
+  await ensureSchema();
+  const { rows } = await pool.query(
+    `SELECT ml_user_id, last_scroll_id, last_offset, last_batch_total, last_sync_at, last_sync_status, last_error, updated_at
+     FROM ml_listing_sync_state ORDER BY ml_user_id ASC`
+  );
+  return rows;
+}
+
+/** Conteos por cuenta para resúmenes en UI. */
+async function listMlListingCountsByUser() {
+  await ensureSchema();
+  const { rows } = await pool.query(
+    `SELECT ml_user_id, COUNT(*)::int AS total FROM ml_listings GROUP BY ml_user_id ORDER BY ml_user_id ASC`
+  );
+  return rows;
+}
+
 function normalizePostSaleLogOutcomeFilter(raw) {
   if (raw == null || String(raw).trim() === "") return "default";
   const v = String(raw).trim().toLowerCase();
@@ -1316,6 +1720,19 @@ module.exports = {
   upsertMlQuestionAnswered,
   listMlQuestionsPending,
   listMlQuestionsAnswered,
+  upsertMlListing,
+  listMlListingsByUser,
+  getMlListingByItemId,
+  upsertMlListingSyncState,
+  getMlListingSyncState,
+  listMlListingsAll,
+  listMlListingSyncStatesAll,
+  listMlListingCountsByUser,
+  insertMlListingWebhookLog,
+  listMlListingWebhookLog,
+  ML_LISTING_CHANGE_ACK_ACTIONS,
+  insertMlListingChangeAck,
+  listMlListingChangeAck,
   /** Cierra el pool (tests). */
   _poolEnd: () => pool.end(),
 };

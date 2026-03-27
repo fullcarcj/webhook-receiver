@@ -308,6 +308,12 @@ function normalizeMlResourcePath(topic, resource) {
     if (/^\d+$/.test(r)) return `/questions/${r}`;
     return `/${r}`;
   }
+  if (tq === "items" || tq === "item") {
+    if (r.startsWith("/")) return r;
+    const id = encodeURIComponent(String(r).trim());
+    if (!id) return null;
+    return `/items/${id}`;
+  }
   return `/${r}`;
 }
 
@@ -332,11 +338,30 @@ function appendMlQuestionsApiVersionIfNeeded(resourcePath) {
   return q ? `${pathname}?${q}` : pathname;
 }
 
+/**
+ * GET /items/{id} con api_version=4 alinea el JSON con el job de sync (ml-listings-sync.js).
+ */
+function appendMlItemsApiVersionIfNeeded(resourcePath) {
+  if (!resourcePath || typeof resourcePath !== "string") return resourcePath;
+  const path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
+  const qm = path.indexOf("?");
+  const pathname = qm >= 0 ? path.slice(0, qm) : path;
+  const search = qm >= 0 ? path.slice(1 + qm) : "";
+  if (!/^\/items\/[^/]+$/i.test(pathname)) return path;
+  const params = new URLSearchParams(search);
+  if (!params.has("api_version")) {
+    params.set("api_version", "4");
+  }
+  const q = params.toString();
+  return q ? `${pathname}?${q}` : pathname;
+}
+
 async function mercadoLibreGetWithToken(getToken, resourcePath) {
   const token = await getToken();
   const base = process.env.ML_API_BASE || "https://api.mercadolibre.com";
   let path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
   path = appendMlQuestionsApiVersionIfNeeded(path);
+  path = appendMlItemsApiVersionIfNeeded(path);
   const url = `${base}${path}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
@@ -360,6 +385,7 @@ async function mercadoLibreFetchForUser(mlUserId, resourcePath) {
   const base = process.env.ML_API_BASE || "https://api.mercadolibre.com";
   let path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
   path = appendMlQuestionsApiVersionIfNeeded(path);
+  path = appendMlItemsApiVersionIfNeeded(path);
   const url = `${base}${path}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },

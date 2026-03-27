@@ -3,7 +3,7 @@
  * Asi puedes ejecutar "node test-conexion.js" sin hacer . .\oauth-credentials.ps1 en cada ventana.
  * Copia oauth-env.json.example -> oauth-env.json y rellena (no subas oauth-env.json a git).
  * ML_COOKIES_DIR: carpeta para cookies web por cuenta ({ml_user_id}.txt); ver ml-cookies-path.js.
- * DATABASE_URL: si está definida, la app usa PostgreSQL (misma lógica que Render); si no, SQLite local.
+ * DATABASE_URL: obligatoria para la app; PostgreSQL (Render, Neon, local, etc.).
  * Postgres remoto suele exigir TLS: la app activa ssl en el cliente salvo localhost o PGSSLMODE=disable.
  */
 const fs = require("fs");

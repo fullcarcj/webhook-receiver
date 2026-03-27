@@ -389,15 +389,6 @@ db.exec(`
       `);
       console.log("[db] ml_post_sale_auto_send_log: trigger topic=orders_v2");
     }
-    db.prepare(
-      "DELETE FROM ml_post_sale_auto_send_log WHERE topic IS NULL OR topic <> 'orders_v2'"
-    ).run();
-    db.prepare(
-      "DELETE FROM ml_post_sale_auto_send_log WHERE outcome IN ('success', 'skipped')"
-    ).run();
-    db.prepare(
-      "DELETE FROM ml_post_sale_auto_send_log WHERE skip_reason IS NULL OR skip_reason <> 'message_step=0'"
-    ).run();
   } catch (e) {
     console.error("[db] migrate ml_post_sale_auto_send_log topic trigger:", e.message);
   }
@@ -669,7 +660,7 @@ function updateTopicFetch(id, patch) {
 
 /**
  * @param {string} [topicFilter] - Si se indica, solo filas con ese topic (exacto).
- * Sin filtro: orden por topic (A→Z) y dentro de cada topic por id descendente.
+ * Sin filtro: orden por id descendente (más recientes primero; mezcla todos los topics).
  */
 function listTopicFetches(limit, maxAllowed, topicFilter) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
@@ -688,9 +679,7 @@ function listTopicFetches(limit, maxAllowed, topicFilter) {
   if (tf) {
     return db.prepare(`${selectFrom} WHERE f.topic = ? ORDER BY f.id DESC LIMIT ?`).all(tf, n);
   }
-  return db
-    .prepare(`${selectFrom} ORDER BY COALESCE(f.topic, '') ASC, f.id DESC LIMIT ?`)
-    .all(n);
+  return db.prepare(`${selectFrom} ORDER BY f.id DESC LIMIT ?`).all(n);
 }
 
 /** Topics distintos que hay en la tabla (para filtros en /fetches). */
@@ -951,10 +940,6 @@ const insertPostSaleAutoSendLogStmt = db.prepare(
 function insertPostSaleAutoSendLog(row) {
   const topicNorm = row.topic != null ? String(row.topic).trim() : "";
   if (topicNorm !== "orders_v2") return null;
-  const out = String(row.outcome || "");
-  if (out === "success" || out === "skipped") return null;
-  const sr = row.skip_reason != null ? String(row.skip_reason).trim() : "";
-  if (sr !== "message_step=0") return null;
   const info = insertPostSaleAutoSendLogStmt.run({
     created_at: row.created_at || new Date().toISOString(),
     ml_user_id: row.ml_user_id,
@@ -991,7 +976,7 @@ function postSaleLogOutcomeSqlExtra(mode) {
       return " AND outcome = 'api_error'";
     case "default":
     default:
-      return " AND outcome NOT IN ('success', 'skipped') AND skip_reason = 'message_step=0'";
+      return "";
   }
 }
 

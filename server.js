@@ -506,12 +506,13 @@ function scheduleTopicFetchFromWebhook(body) {
         const isOrdersV2Topic = topic === "orders_v2";
 
         let processStatus = FETCH_PROCESS_STATUS_DONE;
-        if (result.ok && isOrderTopic) {
+        if (isOrderTopic) {
           try {
             const ps = await trySendDefaultPostSaleMessage({
               mlUserId,
               topic,
               payload: parsed,
+              resource: resourceStr,
               notificationId: notifId,
             });
             if (ps && ps.skipped) {
@@ -530,13 +531,14 @@ function scheduleTopicFetchFromWebhook(body) {
           processStatus = FETCH_PROCESS_STATUS_PENDING;
         }
 
-        /** Post-venta automático para topics no-orden: solo `messages` (order_id en payload). No stock-locations ni otros. */
+        /** Post-venta automático para topics no-orden: solo `messages` (order_id en payload). */
         if (result.ok && parsed && !isOrderTopic && topic === "messages") {
           setImmediate(() => {
             trySendDefaultPostSaleMessage({
               mlUserId,
               topic,
               payload: parsed,
+              resource: resourceStr,
               notificationId: notifId,
             }).catch((e) => console.error("[post-sale]", e.message));
           });
@@ -1060,7 +1062,7 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Respuestas API (ml_topic_fetches)</h1>
-  <p class="lead">${rows.length} registro(s)${topicFilter ? ` · filtro: <code>${escapeHtml(topicFilter)}</code>` : ""}. Cuerpo JSON de la respuesta ML (payload): <code>?format=json</code>. <strong>estado</strong>: con topic <code>orders_v2</code>, tras el GET a ML puede quedar <code>Completado</code> o <code>Fallo post-venta</code>. Si el topic <strong>no</strong> es <code>orders_v2</code>, tras un fetch OK sigue <code>Procesando...</code>. Orden: por topic (A→Z), id reciente primero.</p>
+  <p class="lead">${rows.length} registro(s)${topicFilter ? ` · filtro: <code>${escapeHtml(topicFilter)}</code>` : ""}. Cuerpo JSON de la respuesta ML (payload): <code>?format=json</code>. <strong>estado</strong>: con topic <code>orders_v2</code>, tras el GET a ML puede quedar <code>Completado</code> o <code>Fallo post-venta</code>. Si el topic <strong>no</strong> es <code>orders_v2</code>, tras un fetch OK sigue <code>Procesando...</code>. Orden: <strong>id reciente primero</strong> (todos los topics mezclados; usa el filtro por topic para ver solo uno).</p>
   <p class="topic-filters">${topicFilterLinks}</p>
   <div style="overflow-x:auto; max-width:100%">
   <table>
@@ -1583,7 +1585,7 @@ const server = http.createServer(async (req, res) => {
       return `/envios-postventa?${p.toString()}`;
     }
     const enviosFilterDefs = [
-      { key: "default", label: "Por defecto (error 1.er mensaje)" },
+      { key: "default", label: "Por defecto (todos)" },
       { key: "all", label: "Todos" },
       { key: "success", label: "success" },
       { key: "skipped", label: "skipped" },

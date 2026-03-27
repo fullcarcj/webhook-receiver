@@ -7,8 +7,12 @@
  * ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (por defecto 1). ML_POST_SALE_EXTRA_DELAY_MS entre envíos (default 1500).
  * Placeholders en el texto: {{order_id}}, {{buyer_id}}, {{seller_id}}, {{ml_user_id}}
  */
-const { mercadoLibrePostJsonForUser } = require("./oauth-token");
-const { extractOrderIdFromOrder, extractOrderIdFromMessage } = require("./ml-pack-extract");
+const { mercadoLibrePostJsonForUser, mercadoLibreFetchForUser } = require("./oauth-token");
+const {
+  extractOrderIdFromOrder,
+  extractOrderIdFromMessage,
+  extractOrderIdFromResource,
+} = require("./ml-pack-extract");
 const { extractBuyerIdForPostSale } = require("./ml-buyer-extract");
 const {
   listPostSaleMessages,
@@ -20,9 +24,6 @@ const {
 } = require("./db");
 
 const MAX_OTHER = Number(process.env.ML_POST_SALE_MAX_CHARS || 350);
-
-/** Solo se persiste en BD el intento asociado al paso 0 (primer mensaje). */
-const POST_SALE_LOG_SKIP_REASON_STEP0 = "message_step=0";
 
 /** Respuesta JSON de error ML (p. ej. cause: shipment_invalid_to_action_guide). */
 function mercadoLibreErrorCause(data) {
@@ -44,14 +45,14 @@ function parseTopicsEnv() {
     .filter(Boolean);
 }
 
-/** Solo persiste en ml_post_sale_auto_send_log cuando el webhook es orders_v2; no guarda si ya se envió (already_sent). */
+/**
+ * Persiste en ml_post_sale_auto_send_log para topic orders_v2 (success, skipped, api_error).
+ * Omite solo already_sent para no llenar la tabla en reintentos del mismo pedido.
+ */
 async function logAutoSend(row) {
   const t = row.topic != null ? String(row.topic).trim() : "";
   if (t !== "orders_v2") return;
   if (String(row.skip_reason || "") === "already_sent") return;
-  const oc = String(row.outcome || "");
-  if (oc === "success" || oc === "skipped") return;
-  if (String(row.skip_reason || "").trim() !== POST_SALE_LOG_SKIP_REASON_STEP0) return;
   try {
     await insertPostSaleAutoSendLog(row);
   } catch (e) {
@@ -61,6 +62,30 @@ async function logAutoSend(row) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Si el payload no trae comprador, intenta GET /orders/{id} para completar JSON (p. ej. tras fallo del fetch del webhook).
+ * @param {number} mlUserId
+ * @param {number} orderId
+ * @param {object|null} payload
+ * @returns {Promise<object|null>}
+ */
+async function ensureOrderPayloadForPostSale(mlUserId, orderId, payload) {
+  if (payload && extractBuyerIdForPostSale(payload, mlUserId)) return payload;
+  const path = `/orders/${orderId}`;
+  const r = await mercadoLibreFetchForUser(mlUserId, path);
+  if (!r.ok || r.data == null) return payload;
+  let d = r.data;
+  if (typeof d === "string") {
+    try {
+      d = JSON.parse(d);
+    } catch {
+      return payload;
+    }
+  }
+  if (d && typeof d === "object" && !Array.isArray(d)) return d;
+  return payload;
 }
 
 /**
@@ -96,7 +121,7 @@ async function computePostSaleBodiesAndSteps() {
 }
 
 /**
- * @param {{ mlUserId: number, topic: string|null, payload: object, notificationId?: string|null }} args
+ * @param {{ mlUserId: number, topic: string|null, payload?: object|null, resource?: string|null, notificationId?: string|null }} args
  */
 async function trySendDefaultPostSaleMessage(args) {
   const topicTrim = args.topic != null ? String(args.topic).trim() : "";
@@ -137,7 +162,17 @@ async function trySendDefaultPostSaleMessage(args) {
     return { skipped: true, reason: "topic" };
   }
 
-  const payload = args.payload;
+  let payload =
+    args.payload != null && typeof args.payload === "object" && !Array.isArray(args.payload)
+      ? args.payload
+      : null;
+  const resourceStr = args.resource != null ? String(args.resource).trim() : "";
+
+  if (!payload && resourceStr && (topic === "orders_v2" || String(topic).startsWith("orders"))) {
+    const oid = extractOrderIdFromResource(resourceStr);
+    if (oid) payload = { id: oid };
+  }
+
   if (!payload || typeof payload !== "object") {
     await logAutoSend({
       ...base,
@@ -149,7 +184,7 @@ async function trySendDefaultPostSaleMessage(args) {
 
   let orderId = null;
   if (topic === "orders_v2" || String(topic).startsWith("orders")) {
-    orderId = extractOrderIdFromOrder(payload);
+    orderId = extractOrderIdFromOrder(payload) || extractOrderIdFromResource(resourceStr);
   } else if (topic === "messages") {
     orderId = extractOrderIdFromMessage(payload);
   }
@@ -161,6 +196,11 @@ async function trySendDefaultPostSaleMessage(args) {
       skip_reason: "no_order_id",
     });
     return { skipped: true, reason: "no_order_id" };
+  }
+
+  if (topic === "orders_v2" || String(topic).startsWith("orders")) {
+    const enriched = await ensureOrderPayloadForPostSale(args.mlUserId, orderId, payload);
+    if (enriched) payload = enriched;
   }
 
   const buyerId = extractBuyerIdForPostSale(payload, args.mlUserId);

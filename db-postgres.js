@@ -396,26 +396,42 @@ async function migratePostSaleAutoSendLogNonOrdersV2() {
   }
 }
 
-/** Limpia filas con topic ≠ orders_v2; añade CHECK la primera vez (PostgreSQL rechaza otros INSERT). */
+/**
+ * Una vez: limpia datos legacy y añade CHECK(topic = orders_v2).
+ * No borra filas en cada arranque (antes vaciaba success/skipped en cada ensureSchema).
+ */
 async function migratePostSaleAutoSendLogTopicOrdersV2Only() {
   try {
-    await pool.query(`DELETE FROM ml_post_sale_auto_send_log WHERE topic IS DISTINCT FROM 'orders_v2'`);
-    await pool.query(
-      `DELETE FROM ml_post_sale_auto_send_log WHERE outcome IN ('success', 'skipped')`
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS _mig_ps_auto_log_topic_check (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    const { rows: migDone } = await pool.query(
+      `SELECT 1 FROM _mig_ps_auto_log_topic_check WHERE id = 1 LIMIT 1`
     );
-    await pool.query(
-      `DELETE FROM ml_post_sale_auto_send_log WHERE skip_reason IS DISTINCT FROM 'message_step=0'`
-    );
+    if (migDone.length > 0) return;
+
     const { rows: hasCheck } = await pool.query(
       `SELECT 1 FROM pg_constraint WHERE conname = 'ml_post_sale_auto_send_log_topic_orders_v2' LIMIT 1`
     );
-    if (hasCheck.length > 0) return;
-    await pool.query(`
-      ALTER TABLE ml_post_sale_auto_send_log
-      ADD CONSTRAINT ml_post_sale_auto_send_log_topic_orders_v2
-      CHECK (topic = 'orders_v2')
-    `);
-    console.log("[db] ml_post_sale_auto_send_log: CHECK(topic = orders_v2) aplicado");
+    if (hasCheck.length === 0) {
+      await pool.query(`DELETE FROM ml_post_sale_auto_send_log WHERE topic IS DISTINCT FROM 'orders_v2'`);
+      await pool.query(
+        `DELETE FROM ml_post_sale_auto_send_log WHERE outcome IN ('success', 'skipped')`
+      );
+      await pool.query(
+        `DELETE FROM ml_post_sale_auto_send_log WHERE skip_reason IS DISTINCT FROM 'message_step=0'`
+      );
+      await pool.query(`
+        ALTER TABLE ml_post_sale_auto_send_log
+        ADD CONSTRAINT ml_post_sale_auto_send_log_topic_orders_v2
+        CHECK (topic = 'orders_v2')
+      `);
+      console.log("[db] ml_post_sale_auto_send_log: CHECK(topic = orders_v2) aplicado");
+    }
+    await pool.query(`INSERT INTO _mig_ps_auto_log_topic_check (id) VALUES (1)`);
   } catch (e) {
     console.error("[db] migrate ml_post_sale_auto_send_log topic CHECK:", e.message);
   }
@@ -624,6 +640,7 @@ async function updateTopicFetch(id, patch) {
   return 1;
 }
 
+/** Sin filtro topic: orden por id DESC (recientes primero; todos los topics). Con filtro: ese topic, id DESC. */
 async function listTopicFetches(limit, maxAllowed, topicFilter) {
   await ensureSchema();
   const cap = maxAllowed != null ? maxAllowed : 2000;
@@ -646,10 +663,7 @@ async function listTopicFetches(limit, maxAllowed, topicFilter) {
     );
     return rows;
   }
-  const { rows } = await pool.query(
-    `${selectFrom} ORDER BY COALESCE(f.topic, '') ASC, f.id DESC LIMIT $1`,
-    [n]
-  );
+  const { rows } = await pool.query(`${selectFrom} ORDER BY f.id DESC LIMIT $1`, [n]);
   return rows;
 }
 
@@ -909,10 +923,6 @@ async function deletePostSaleSent(orderId) {
 async function insertPostSaleAutoSendLog(row) {
   const topicNorm = row.topic != null ? String(row.topic).trim() : "";
   if (topicNorm !== "orders_v2") return null;
-  const out = String(row.outcome || "");
-  if (out === "success" || out === "skipped") return null;
-  const sr = row.skip_reason != null ? String(row.skip_reason).trim() : "";
-  if (sr !== "message_step=0") return null;
   await ensureSchema();
   const { rows } = await pool.query(
     `INSERT INTO ml_post_sale_auto_send_log (
@@ -956,7 +966,7 @@ function postSaleLogOutcomeSqlExtra(mode) {
       return " AND outcome = 'api_error'";
     case "default":
     default:
-      return " AND outcome NOT IN ('success', 'skipped') AND skip_reason = 'message_step=0'";
+      return "";
   }
 }
 

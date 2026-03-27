@@ -28,7 +28,20 @@ function extractOrderIdFromMessage(data) {
   );
 }
 
+/**
+ * Id numérico de orden desde el resource del webhook (p. ej. "/orders/2000001234567890").
+ * @param {string} [resourceStr]
+ * @returns {number|null}
+ */
+function extractOrderIdFromResource(resourceStr) {
+  if (resourceStr == null || typeof resourceStr !== "string") return null;
+  const s = resourceStr.trim();
+  const m = s.match(/\/orders\/(\d+)/i) || s.match(/^orders\/(\d+)/i);
+  return m ? toPositiveInt(m[1]) : null;
+}
+
 module.exports = {
   extractOrderIdFromOrder,
   extractOrderIdFromMessage,
+  extractOrderIdFromResource,
 };

@@ -118,6 +118,55 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_ventas_detalle_user_order ON ml_ventas_detalle_web(ml_user_id, order_id);
   CREATE INDEX IF NOT EXISTS idx_ventas_detalle_created ON ml_ventas_detalle_web(created_at);
+
+  CREATE TABLE IF NOT EXISTS ml_questions_pending (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ml_question_id INTEGER NOT NULL UNIQUE,
+    ml_user_id INTEGER NOT NULL,
+    item_id TEXT,
+    buyer_id INTEGER,
+    question_text TEXT,
+    ml_status TEXT,
+    raw_json TEXT,
+    notification_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_questions_pending_user ON ml_questions_pending(ml_user_id);
+  CREATE INDEX IF NOT EXISTS idx_ml_questions_pending_created ON ml_questions_pending(created_at);
+
+  CREATE TABLE IF NOT EXISTS ml_questions_answered (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ml_question_id INTEGER NOT NULL UNIQUE,
+    ml_user_id INTEGER NOT NULL,
+    item_id TEXT,
+    buyer_id INTEGER,
+    question_text TEXT,
+    answer_text TEXT NOT NULL,
+    ml_status TEXT,
+    raw_json TEXT,
+    notification_id TEXT,
+    pending_internal_id INTEGER,
+    answered_at TEXT NOT NULL,
+    moved_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_questions_answered_user ON ml_questions_answered(ml_user_id);
+  CREATE INDEX IF NOT EXISTS idx_ml_questions_answered_at ON ml_questions_answered(answered_at);
+
+  CREATE TABLE IF NOT EXISTS ml_items (
+    item_id TEXT PRIMARY KEY,
+    ml_user_id INTEGER NOT NULL,
+    resource TEXT NOT NULL,
+    raw_json TEXT NOT NULL,
+    http_status INTEGER,
+    notification_id TEXT,
+    fetched_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_items_user ON ml_items(ml_user_id);
+  CREATE INDEX IF NOT EXISTS idx_ml_items_updated ON ml_items(updated_at);
 `);
 
 (function migratePostSalePackIdToOrderId() {

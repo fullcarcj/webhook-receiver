@@ -1,0 +1,34 @@
+
+$uri = "https://webhook-receiver-bs45.onrender.com/admin/ml-accounts"
+$headers = @{ "x-admin-secret" = "asdfrtasdfrtasdfrtasdfrtasdfrtasdfrt"; "Content-Type" = "application/json" }
+$body = '{"ml_user_id":1335920698,"refresh_token":"TG-69c4204d77416f0001b0ac06-1335920698","nickname":"SEBASTIAN"}'
+Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
+
+$uri = "https://webhook-receiver-bs45.onrender.com/admin/ml-accounts"
+$headers = @{ "x-admin-secret" = "asdfrtasdfrtasdfrtasdfrtasdfrtasdfrt"; "Content-Type" = "application/json" }
+$body = '{"ml_user_id":9309737,"refresh_token":"TG-69c4204dfccd400001b8be25-9309737","nickname":"JAVIER CARRILLO2"}'
+Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
+
+
+$uri = "https://webhook-receiver-bs45.onrender.com/admin/ml-accounts"
+$headers = @{ "x-admin-secret" = "asdfrtasdfrtasdfrtasdfrtasdfrtasdfrt"; "Content-Type" = "application/json" }
+$body = '{"ml_user_id":663838076,"refresh_token":"TG-69c4204ef1a2ad000190d2fa-663838076","nickname":"JAVIER CARRILLO3"}'
+Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
+
+$uri = "https://webhook-receiver-bs45.onrender.com/admin/ml-accounts"
+$headers = @{ "x-admin-secret" = "asdfrtasdfrtasdfrtasdfrtasdfrtasdfrt"; "Content-Type" = "application/json" }
+$body = '{"ml_user_id":663838076,"refresh_token":"TG-69c4204ef1a2ad000190d2fa-663838076","nickname":"JAVIER CARRILLO3"}'
+Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
+
+
+$uri = "https://webhook-receiver-bs45.onrender.com/admin/ml-accounts"
+$headers = @{ "x-admin-secret" = "asdfrtasdfrtasdfrtasdfrtasdfrtasdfrt"; "Content-Type" = "application/json" }
+$body = '{"ml_user_id":3002951516,"refresh_token":"TG-69c42050529aa800015dc0d1-3002951516","nickname":"SOLOMOTOR JAVI"}'
+Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
+
+
+$uri = "https://webhook-receiver-bs45.onrender.com/admin/ml-accounts"
+$headers = @{ "x-admin-secret" = "asdfrtasdfrtasdfrtasdfrtasdfrtasdfrt"; "Content-Type" = "application/json" }
+$body = '{"ml_user_id":489374604,"refresh_token":"TG-69c530964c67c80001d28046-489374604","nickname":"SOLOMOTOR JAVI"}'
+Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
+

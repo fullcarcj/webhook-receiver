@@ -1,0 +1,15 @@
+$base   = "https://webhook-receiver-bs45.onrender.com" 
+$secret = "asdfrtasdfrtasdfrtasdfrtasdfrtasdfrt"
+$uid    = 489374604
+$text   = @'
+copiar body
+'@
+
+$body = @{ ml_user_id = $uid; cookies_netscape = $text } | ConvertTo-Json -Compress -Depth 10
+
+Invoke-RestMethod `
+  -Uri "$base/admin/ml-web-cookies" `
+  -Method Post `
+  -Headers @{ "X-Admin-Secret" = $secret } `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body

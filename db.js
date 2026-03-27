@@ -40,6 +40,7 @@ if (usePostgres) {
     listDistinctFetchTopics: wrap(sqlite.listDistinctFetchTopics),
     deleteAllTopicFetches: wrap(sqlite.deleteAllTopicFetches),
     upsertMlBuyer: wrap(sqlite.upsertMlBuyer),
+    countMlBuyers: wrap(sqlite.countMlBuyers),
     listMlBuyers: wrap(sqlite.listMlBuyers),
     getMlBuyer: wrap(sqlite.getMlBuyer),
     updateMlBuyerPhones: wrap(sqlite.updateMlBuyerPhones),

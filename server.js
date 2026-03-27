@@ -65,6 +65,7 @@ const {
   deleteAllTopicFetches,
   upsertMlBuyer,
   getMlBuyer,
+  countMlBuyers,
   listMlBuyers,
   updateMlBuyerPhones,
   listPostSaleMessages,
@@ -1265,8 +1266,9 @@ const server = http.createServer(async (req, res) => {
     }
     const lim = url.searchParams.get("limit");
     let rows;
+    let totalEnTabla;
     try {
-      rows = await listMlBuyers(lim, 2000);
+      [rows, totalEnTabla] = await Promise.all([listMlBuyers(lim, 2000), countMlBuyers()]);
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -1274,7 +1276,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.searchParams.get("format") === "json") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, count: rows.length, items: rows }));
+      res.end(
+        JSON.stringify({
+          ok: true,
+          total: totalEnTabla,
+          count: rows.length,
+          items: rows,
+        })
+      );
       return;
     }
     const buyerRows = rows
@@ -1317,7 +1326,7 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Compradores (ml_buyers)</h1>
-  <p class="lead">${rows.length} registro(s). <code>pref_entrega</code> por defecto <code>Pickup</code> si no viene en el webhook. <code>actualizacion</code> = última modificación (ISO). JSON: <code>?format=json</code>.</p>
+  <p class="lead"><strong>${totalEnTabla}</strong> fila(s) en total en la tabla. Mostrando <strong>${rows.length}</strong> en esta vista (orden por última actualización; <code>?limit=</code> hasta 2000). <code>pref_entrega</code> por defecto <code>Pickup</code> si no viene en el webhook. <code>actualizacion</code> = última modificación (ISO). JSON: <code>?format=json</code> incluye <code>total</code> y <code>count</code> (filas devueltas).</p>
   <table>
     <thead><tr><th>buyer_id</th><th>nickname</th><th>nombre y apellido</th><th>phone_1</th><th>phone_2</th><th>pref_entrega</th><th>cambio_datos</th><th>actualizacion</th><th>created_at</th><th>updated_at</th></tr></thead>
     <tbody>${buyerRows || '<tr><td colspan="10">No hay compradores guardados.</td></tr>'}</tbody>

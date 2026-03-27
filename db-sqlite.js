@@ -694,6 +694,11 @@ function upsertMlBuyer(row) {
   });
 }
 
+function countMlBuyers() {
+  const r = db.prepare("SELECT COUNT(*) AS c FROM ml_buyers").get();
+  return Number(r.c);
+}
+
 function listMlBuyers(limit, maxAllowed) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
@@ -1047,6 +1052,7 @@ module.exports = {
   listDistinctFetchTopics,
   deleteAllTopicFetches,
   upsertMlBuyer,
+  countMlBuyers,
   listMlBuyers,
   getMlBuyer,
   updateMlBuyerPhones,

@@ -656,6 +656,12 @@ async function upsertMlBuyer(row) {
   );
 }
 
+async function countMlBuyers() {
+  await ensureSchema();
+  const { rows } = await pool.query("SELECT COUNT(*)::bigint AS c FROM ml_buyers");
+  return Number(rows[0].c);
+}
+
 async function listMlBuyers(limit, maxAllowed) {
   await ensureSchema();
   const cap = maxAllowed != null ? maxAllowed : 2000;
@@ -1028,6 +1034,7 @@ module.exports = {
   listDistinctFetchTopics,
   deleteAllTopicFetches,
   upsertMlBuyer,
+  countMlBuyers,
   listMlBuyers,
   getMlBuyer,
   updateMlBuyerPhones,

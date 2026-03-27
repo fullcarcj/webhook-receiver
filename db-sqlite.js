@@ -483,7 +483,7 @@ function listWebhooks(limit, maxAllowed) {
   const rows = db
     .prepare(
       `SELECT id, received_at, payload, topic, resource
-       FROM webhook_events ORDER BY id ASC LIMIT ?`
+       FROM webhook_events ORDER BY id DESC LIMIT ?`
     )
     .all(n);
   return rows.map((r) => ({
@@ -1070,6 +1070,123 @@ function deleteAllMlVentasDetalleWeb() {
   return db.prepare("DELETE FROM ml_ventas_detalle_web").run().changes;
 }
 
+const upsertMlQuestionPendingStmt = db.prepare(
+  `INSERT INTO ml_questions_pending (
+     ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, raw_json, notification_id, created_at, updated_at
+   ) VALUES (@ml_question_id, @ml_user_id, @item_id, @buyer_id, @question_text, @ml_status, @raw_json, @notification_id, @created_at, @updated_at)
+   ON CONFLICT(ml_question_id) DO UPDATE SET
+     ml_user_id = excluded.ml_user_id,
+     item_id = excluded.item_id,
+     buyer_id = excluded.buyer_id,
+     question_text = excluded.question_text,
+     ml_status = excluded.ml_status,
+     raw_json = excluded.raw_json,
+     notification_id = excluded.notification_id,
+     updated_at = excluded.updated_at`
+);
+
+function upsertMlQuestionPending(row) {
+  const qid = Number(row.ml_question_id);
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(qid) || qid <= 0 || !Number.isFinite(mlUid) || mlUid <= 0) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  upsertMlQuestionPendingStmt.run({
+    ml_question_id: qid,
+    ml_user_id: mlUid,
+    item_id: row.item_id != null ? String(row.item_id) : null,
+    buyer_id: row.buyer_id != null ? Number(row.buyer_id) : null,
+    question_text: row.question_text != null ? String(row.question_text) : null,
+    ml_status: row.ml_status != null ? String(row.ml_status) : null,
+    raw_json: row.raw_json != null ? String(row.raw_json) : null,
+    notification_id: row.notification_id != null ? String(row.notification_id) : null,
+    created_at: now,
+    updated_at: now,
+  });
+  const r = db.prepare("SELECT id FROM ml_questions_pending WHERE ml_question_id = ?").get(qid);
+  return r && r.id != null ? Number(r.id) : null;
+}
+
+function deleteMlQuestionPending(mlQuestionId) {
+  const qid = Number(mlQuestionId);
+  if (!Number.isFinite(qid) || qid <= 0) return 0;
+  return db.prepare("DELETE FROM ml_questions_pending WHERE ml_question_id = ?").run(qid).changes;
+}
+
+const upsertMlQuestionAnsweredStmt = db.prepare(
+  `INSERT INTO ml_questions_answered (
+     ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at
+   ) VALUES (@ml_question_id, @ml_user_id, @item_id, @buyer_id, @question_text, @answer_text, @ml_status, @raw_json, @notification_id, @pending_internal_id, @answered_at, @moved_at, @created_at, @updated_at)
+   ON CONFLICT(ml_question_id) DO UPDATE SET
+     ml_user_id = excluded.ml_user_id,
+     item_id = excluded.item_id,
+     buyer_id = excluded.buyer_id,
+     question_text = excluded.question_text,
+     answer_text = excluded.answer_text,
+     ml_status = excluded.ml_status,
+     raw_json = excluded.raw_json,
+     notification_id = excluded.notification_id,
+     pending_internal_id = excluded.pending_internal_id,
+     answered_at = excluded.answered_at,
+     moved_at = excluded.moved_at,
+     updated_at = excluded.updated_at`
+);
+
+function upsertMlQuestionAnswered(row) {
+  const qid = Number(row.ml_question_id);
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(qid) || qid <= 0 || !Number.isFinite(mlUid) || mlUid <= 0) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const answerText = row.answer_text != null ? String(row.answer_text) : "(sin texto en API)";
+  const answeredAt = row.answered_at != null ? String(row.answered_at) : now;
+  const movedAt = row.moved_at != null ? String(row.moved_at) : now;
+  const createdAt = row.created_at != null ? String(row.created_at) : now;
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  upsertMlQuestionAnsweredStmt.run({
+    ml_question_id: qid,
+    ml_user_id: mlUid,
+    item_id: row.item_id != null ? String(row.item_id) : null,
+    buyer_id: row.buyer_id != null ? Number(row.buyer_id) : null,
+    question_text: row.question_text != null ? String(row.question_text) : null,
+    answer_text: answerText,
+    ml_status: row.ml_status != null ? String(row.ml_status) : null,
+    raw_json: row.raw_json != null ? String(row.raw_json) : null,
+    notification_id: row.notification_id != null ? String(row.notification_id) : null,
+    pending_internal_id: row.pending_internal_id != null ? Number(row.pending_internal_id) : null,
+    answered_at: answeredAt,
+    moved_at: movedAt,
+    created_at: createdAt,
+    updated_at: updatedAt,
+  });
+  const r = db.prepare("SELECT id FROM ml_questions_answered WHERE ml_question_id = ?").get(qid);
+  return r && r.id != null ? Number(r.id) : null;
+}
+
+function listMlQuestionsPending(limit, maxAllowed) {
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  return db
+    .prepare(
+      `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, raw_json, notification_id, created_at, updated_at
+       FROM ml_questions_pending ORDER BY id DESC LIMIT ?`
+    )
+    .all(n);
+}
+
+function listMlQuestionsAnswered(limit, maxAllowed) {
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  return db
+    .prepare(
+      `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at
+       FROM ml_questions_answered ORDER BY id DESC LIMIT ?`
+    )
+    .all(n);
+}
+
 module.exports = {
   insertWebhook,
   listWebhooks,
@@ -1111,4 +1228,9 @@ module.exports = {
   insertMlVentasDetalleWeb,
   listMlVentasDetalleWeb,
   deleteAllMlVentasDetalleWeb,
+  upsertMlQuestionPending,
+  deleteMlQuestionPending,
+  upsertMlQuestionAnswered,
+  listMlQuestionsPending,
+  listMlQuestionsAnswered,
 };

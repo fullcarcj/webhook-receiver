@@ -33,6 +33,12 @@ const {
   normalizeNombreApellido,
 } = require("./ml-buyer-pref");
 const { fetchVentasDetalleAndStore } = require("./ml-ventas-detalle-fetch");
+const {
+  buildQuestionPendingRow,
+  buildQuestionAnsweredRow,
+  isQuestionUnansweredStatus,
+  isQuestionAnsweredOrClosedStatus,
+} = require("./ml-question-sync");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
@@ -77,13 +83,17 @@ const {
   deleteAllMlVentasDetalleWeb,
   getMlAccount,
   deletePostSaleSent,
+  upsertMlQuestionPending,
+  deleteMlQuestionPending,
+  upsertMlQuestionAnswered,
+  listMlQuestionsPending,
+  listMlQuestionsAnswered,
   dbPath,
 } = require("./db");
 
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
 const REG_PATH = process.env.REG_PATH || "/reg";
-const WEBHOOK_SAVE_DB = process.env.WEBHOOK_SAVE_DB === "1";
 /** GET al resource del webhook y guarda respuesta en tabla ml_topic_fetches (requiere cuenta en ml_accounts). */
 const ML_WEBHOOK_FETCH_RESOURCE = process.env.ML_WEBHOOK_FETCH_RESOURCE === "1";
 /** Tras GET orden OK: GET HTML ventas/.../detalle con cookies (.txt) y guarda en ml_ventas_detalle_web. */
@@ -121,6 +131,10 @@ function isPostSaleEnviosPath(pathname) {
 
 function isVentasDetalleWebPath(pathname) {
   return pathname === "/ventas-detalle-web" || pathname === "/ventas-detalle-web/";
+}
+
+function isPreguntasMlPath(pathname) {
+  return pathname === "/preguntas-ml" || pathname === "/preguntas-ml/";
 }
 
 function rejectIngestSecret(req, res) {
@@ -378,10 +392,16 @@ function scheduleTopicFetchFromWebhook(body) {
       topic = typeof body.topic === "string" ? body.topic.trim() : String(body.topic).trim();
       if (topic === "") topic = null;
     }
+    if (topic != null) {
+      const tl = String(topic).toLowerCase();
+      if (tl === "question" || tl === "questions") topic = "questions";
+    }
     if (!topic && /\/orders\/\d/i.test(resourceStr)) {
       topic = "orders_v2";
     } else if (!topic && /\/messages\//i.test(resourceStr)) {
       topic = "messages";
+    } else if (!topic && /\/questions\//i.test(resourceStr)) {
+      topic = "questions";
     }
     const notifId = body._id != null ? String(body._id) : null;
     let requestPath = "";
@@ -444,6 +464,13 @@ function scheduleTopicFetchFromWebhook(body) {
         });
 
         const result = await mercadoLibreFetchForUser(mlUserId, requestPath);
+        if (topic === "questions" && !result.ok) {
+          console.error(
+            "[ml questions] GET %s → HTTP %s (revisa token y ml_accounts; no se actualiza pending/answered)",
+            requestPath,
+            result.status
+          );
+        }
         let payloadStr = null;
         if (result.data != null) {
           payloadStr =
@@ -484,6 +511,32 @@ function scheduleTopicFetchFromWebhook(body) {
                 } catch (errBuyer) {
                   console.error("[ml buyers]", errBuyer.message);
                 }
+              }
+            }
+            if (
+              result.ok &&
+              parsed &&
+              topic &&
+              topic === "questions"
+            ) {
+              try {
+                const row = buildQuestionPendingRow(parsed, mlUserId, notifId);
+                if (row) {
+                  if (isQuestionAnsweredOrClosedStatus(row.ml_status)) {
+                    await deleteMlQuestionPending(row.ml_question_id);
+                    const answeredRow = buildQuestionAnsweredRow(parsed, mlUserId, notifId);
+                    if (answeredRow) {
+                      await upsertMlQuestionAnswered(answeredRow);
+                    }
+                  } else if (isQuestionUnansweredStatus(row.ml_status)) {
+                    await upsertMlQuestionPending(row);
+                  } else {
+                    /** Otros estados (p. ej. UNDER_REVIEW): no mantener en pending. */
+                    await deleteMlQuestionPending(row.ml_question_id);
+                  }
+                }
+              } catch (eQ) {
+                console.error("[ml questions pending]", eQ.message);
               }
             }
             if (
@@ -632,7 +685,7 @@ const server = http.createServer(async (req, res) => {
         cuentas_ml:
           "GET /cuentas?k=ADMIN_SECRET (lista cuentas; mismo valor que variable ADMIN_SECRET)",
         hooks_recibidos:
-          "GET /hooks?k=ADMIN_SECRET (webhooks guardados en DB; activar WEBHOOK_SAVE_DB o POST /reg)",
+          "GET /hooks?k=ADMIN_SECRET (webhook_events: cada POST /webhook guarda JSON; POST /reg también)",
         topic_fetches_ml:
           "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1)",
         borrar_todos_los_fetches:
@@ -651,6 +704,12 @@ const server = http.createServer(async (req, res) => {
           "Cookies detalle .ve: prioridad (1) ml_accounts.cookies_netscape (POST /admin/ml-web-cookies), (2) archivo, (3) ML_COOKIE_NETSCAPE_*. Formatos: Netscape, JSON o Header String (Cookie-Editor).",
         ventas_detalle_web:
           "ml_ventas_detalle_web.raw = HTML; GET /ventas-detalle-web?k= & format=json&include_raw=1 — POST retry JSON write_log:true o ML_VENTAS_DETALLE_LOG_FILE=1 → log.txt (ML_VENTAS_DETALLE_LOG_PATH opcional) — DELETE /admin/ventas-detalle-web vacía la tabla",
+        preguntas_ml: {
+          ml_questions_pending:
+            "Por responder: GET /preguntas-ml?k=ADMIN_SECRET&tabla=pending · Relleno automático con webhook topic questions + ML_WEBHOOK_FETCH_RESOURCE=1 (GET /questions/{id})",
+          ml_questions_answered:
+            "Respondidas: GET /preguntas-ml?k=ADMIN_SECRET&tabla=answered · Tras GET /questions/{id} con status respondido/cerrado",
+        },
       })
     );
     return;
@@ -941,7 +1000,7 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Webhooks guardados</h1>
-  <p class="lead">${items.length} registro(s). Solo aparecen los que se guardaron (POST a <code>/reg</code> o <code>WEBHOOK_SAVE_DB=1</code> en <code>/webhook</code>). Parametro <code>limit</code> (max 2000). Cuerpo completo del webhook: <code>?format=json</code> (API).</p>
+  <p class="lead">${items.length} registro(s), <strong>orden: más recientes primero</strong> (id descendente). Cada POST a <code>${WEBHOOK_PATH}</code> (y POST a <code>${REG_PATH}</code>) persiste en <code>webhook_events</code>. Parametro <code>limit</code> (max 2000). Cuerpo completo: <code>?format=json</code>.</p>
   <table>
     <thead><tr><th>id</th><th>Recibido</th><th>topic</th><th>resource</th></tr></thead>
     <tbody>${hookRows || '<tr><td colspan="4">No hay webhooks en la base.</td></tr>'}</tbody>
@@ -1552,6 +1611,136 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Preguntas ML: tablas ml_questions_pending y ml_questions_answered. */
+  if (req.method === "GET" && isPreguntasMlPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Preguntas ML</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Preguntas ML</title><p>Acceso denegado. Usa <code>/preguntas-ml?k=TU_CLAVE</code>.</p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    const tablaRaw = (url.searchParams.get("tabla") || "pending").toLowerCase();
+    const tabla = tablaRaw === "answered" ? "answered" : "pending";
+    let rows;
+    try {
+      rows =
+        tabla === "answered"
+          ? await listMlQuestionsAnswered(lim, 2000)
+          : await listMlQuestionsPending(lim, 2000);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    const kForLinks = k;
+    const limForLinks = lim && String(lim).trim() !== "" ? String(lim) : "";
+    function preguntasMlQuery(tablaKey) {
+      const p = new URLSearchParams();
+      p.set("k", kForLinks);
+      if (limForLinks) p.set("limit", limForLinks);
+      if (tablaKey !== "pending") p.set("tabla", tablaKey);
+      return `/preguntas-ml?${p.toString()}`;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, tabla, count: rows.length, items: rows }));
+      return;
+    }
+    const navPending = tabla === "pending" ? "active" : "";
+    const navAnswered = tabla === "answered" ? "active" : "";
+    const tableHead =
+      tabla === "answered"
+        ? "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>respuesta</th><th>status</th><th>answered_at</th></tr></thead>"
+        : "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>status</th><th>updated_at</th></tr></thead>";
+    const tableRows =
+      rows.length === 0
+        ? `<tr><td colspan="${tabla === "answered" ? 9 : 8}">Sin registros.</td></tr>`
+        : tabla === "answered"
+          ? rows
+              .map((r) => {
+                const qt =
+                  r.question_text && String(r.question_text).length > 120
+                    ? `${escapeHtml(String(r.question_text).slice(0, 120))}…`
+                    : escapeHtml(r.question_text);
+                const at =
+                  r.answer_text && String(r.answer_text).length > 80
+                    ? `${escapeHtml(String(r.answer_text).slice(0, 80))}…`
+                    : escapeHtml(r.answer_text);
+                return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td>${escapeHtml(r.ml_question_id)}</td>
+  <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.item_id)}</td>
+  <td>${escapeHtml(r.buyer_id)}</td>
+  <td class="muted">${qt}</td>
+  <td class="muted">${at}</td>
+  <td>${escapeHtml(r.ml_status)}</td>
+  <td class="muted">${escapeHtml(r.answered_at)}</td>
+</tr>`;
+              })
+              .join("")
+          : rows
+              .map((r) => {
+                const qt =
+                  r.question_text && String(r.question_text).length > 120
+                    ? `${escapeHtml(String(r.question_text).slice(0, 120))}…`
+                    : escapeHtml(r.question_text);
+                return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td>${escapeHtml(r.ml_question_id)}</td>
+  <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.item_id)}</td>
+  <td>${escapeHtml(r.buyer_id)}</td>
+  <td class="muted">${qt}</td>
+  <td>${escapeHtml(r.ml_status)}</td>
+  <td class="muted">${escapeHtml(r.updated_at)}</td>
+</tr>`;
+              })
+              .join("");
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Preguntas ML</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #15202b; color: #e7e9ea; margin: 1rem; }
+    .lead { color: #8b98a5; font-size: 0.95rem; }
+    a { color: #1d9bf0; }
+    a.active { font-weight: 600; text-decoration: underline; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; font-size: 0.85rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    .muted { color: #8b98a5; max-width: 28rem; }
+  </style>
+</head>
+<body>
+  <h1>Preguntas Mercado Libre</h1>
+  <p class="lead">Tabla <code>${tabla === "answered" ? "ml_questions_answered" : "ml_questions_pending"}</code> · ${rows.length} fila(s). JSON: <code>?format=json</code> · <code>?tabla=pending</code> o <code>?tabla=answered</code></p>
+  <p><a href="${escapeAttr(preguntasMlQuery("pending"))}" class="${navPending}">Por responder (pending)</a>
+     · <a href="${escapeAttr(preguntasMlQuery("answered"))}" class="${navAnswered}">Respondidas (answered)</a></p>
+  <table>
+    ${tableHead}
+    <tbody>${tableRows}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
   /** Historial de intentos de envío automático post-venta (ml_post_sale_auto_send_log). */
   if (req.method === "GET" && isPostSaleEnviosPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
@@ -1795,13 +1984,11 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    if (WEBHOOK_SAVE_DB) {
-      try {
-        const id = await insertWebhook(body);
-        console.log("[db] guardado id=%s", id);
-      } catch (e) {
-        console.error("[db]", e.message);
-      }
+    try {
+      const id = await insertWebhook(body);
+      console.log("[db] webhook guardado id=%s", id);
+    } catch (e) {
+      console.error("[db] webhook no guardado:", e.message);
     }
 
     forwardWebhookToTargets(body);
@@ -2078,13 +2265,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log("Reenvío: ninguno (define POST_URL_1…4 o POST_WEBHOOK_URLS)");
   }
 
-  if (WEBHOOK_SAVE_DB) {
-    console.log("[config] WEBHOOK_SAVE_DB=1: cada POST /webhook guarda el JSON en la tabla de webhooks");
-  } else {
-    console.warn(
-      "[config] WEBHOOK_SAVE_DB no es 1: POST /webhook no persiste hooks (pon WEBHOOK_SAVE_DB=1 en el entorno u oauth-env.json)"
-    );
-  }
+  console.log("[config] cada POST /webhook guarda el JSON en webhook_events (tabla de /hooks)");
   if (ML_WEBHOOK_FETCH_RESOURCE) {
     console.log("[config] ML_WEBHOOK_FETCH_RESOURCE=1: tras cada webhook se hace GET a ML y se guarda en ml_topic_fetches");
   } else {
@@ -2123,10 +2304,11 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
     console.log(`Log envíos post-venta: http://localhost:${PORT}/envios-postventa?k=TU_ADMIN_SECRET`);
+    console.log(`Preguntas ML (pending/answered): http://localhost:${PORT}/preguntas-ml?k=TU_ADMIN_SECRET`);
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /preguntas-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

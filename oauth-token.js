@@ -267,18 +267,46 @@ async function getAccessTokenForMlUser(mlUserId) {
 }
 
 /**
+ * ML a veces envía `resource` como URL completa (https://api.mercadolibre.com/questions/123).
+ * Devuelve solo el path (/questions/123) para el GET con Bearer.
+ */
+function extractApiPathFromMlResource(resource) {
+  if (!resource || typeof resource !== "string") return resource;
+  const r = resource.trim();
+  if (!r) return r;
+  if (/^https?:\/\//i.test(r)) {
+    try {
+      const u = new URL(r);
+      const p = u.pathname || "";
+      return p && p !== "/" ? p : r;
+    } catch {
+      return r;
+    }
+  }
+  return r;
+}
+
+/**
  * Convierte `resource` del webhook en path de API (p. ej. messages trae id sin "/").
  * Si ML cambia el endpoint, sobreescribe con ML_MESSAGES_PATH_PREFIX o el path completo en ML_*.
  */
 function normalizeMlResourcePath(topic, resource) {
   if (!resource || typeof resource !== "string") return null;
-  const r = resource.trim();
+  let r = extractApiPathFromMlResource(resource);
+  if (typeof r !== "string") return null;
+  r = r.trim();
   if (!r) return null;
   if (r.startsWith("/")) return r;
   if (topic === "messages") {
     const prefix = process.env.ML_MESSAGES_PATH_PREFIX || "/messages";
     const base = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
     return `${base}/${r}`;
+  }
+  const tq = topic != null ? String(topic).trim() : "";
+  if (tq === "questions" || tq === "question") {
+    if (r.startsWith("/")) return r;
+    if (/^\d+$/.test(r)) return `/questions/${r}`;
+    return `/${r}`;
   }
   return `/${r}`;
 }

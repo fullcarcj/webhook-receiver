@@ -459,7 +459,7 @@ async function listWebhooks(limit, maxAllowed) {
   const n = Math.min(Math.max(Number(limit) || 50, 1), cap);
   const { rows } = await pool.query(
     `SELECT id, received_at, payload, topic, resource
-     FROM webhook_events ORDER BY id ASC LIMIT $1`,
+     FROM webhook_events ORDER BY id DESC LIMIT $1`,
     [n]
   );
   return rows.map((r) => ({
@@ -952,6 +952,131 @@ async function insertPostSaleAutoSendLog(row) {
   return Number(rows[0].id);
 }
 
+/**
+ * Inserta o actualiza una pregunta pendiente (respuesta GET /questions/{id}).
+ * @param {object} row
+ */
+async function upsertMlQuestionPending(row) {
+  await ensureSchema();
+  const qid = Number(row.ml_question_id);
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(qid) || qid <= 0 || !Number.isFinite(mlUid) || mlUid <= 0) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const { rows } = await pool.query(
+    `INSERT INTO ml_questions_pending (
+       ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, raw_json, notification_id, created_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     ON CONFLICT (ml_question_id) DO UPDATE SET
+       ml_user_id = EXCLUDED.ml_user_id,
+       item_id = EXCLUDED.item_id,
+       buyer_id = EXCLUDED.buyer_id,
+       question_text = EXCLUDED.question_text,
+       ml_status = EXCLUDED.ml_status,
+       raw_json = EXCLUDED.raw_json,
+       notification_id = EXCLUDED.notification_id,
+       updated_at = EXCLUDED.updated_at
+     RETURNING id`,
+    [
+      qid,
+      mlUid,
+      row.item_id != null ? String(row.item_id) : null,
+      row.buyer_id != null ? Number(row.buyer_id) : null,
+      row.question_text != null ? String(row.question_text) : null,
+      row.ml_status != null ? String(row.ml_status) : null,
+      row.raw_json != null ? String(row.raw_json) : null,
+      row.notification_id != null ? String(row.notification_id) : null,
+      now,
+      now,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+async function deleteMlQuestionPending(mlQuestionId) {
+  await ensureSchema();
+  const qid = Number(mlQuestionId);
+  if (!Number.isFinite(qid) || qid <= 0) return 0;
+  const { rowCount } = await pool.query(`DELETE FROM ml_questions_pending WHERE ml_question_id = $1`, [qid]);
+  return rowCount || 0;
+}
+
+async function upsertMlQuestionAnswered(row) {
+  await ensureSchema();
+  const qid = Number(row.ml_question_id);
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(qid) || qid <= 0 || !Number.isFinite(mlUid) || mlUid <= 0) {
+    return null;
+  }
+  const answerText = row.answer_text != null ? String(row.answer_text) : "(sin texto en API)";
+  const now = new Date().toISOString();
+  const answeredAt = row.answered_at != null ? String(row.answered_at) : now;
+  const movedAt = row.moved_at != null ? String(row.moved_at) : now;
+  const createdAt = row.created_at != null ? String(row.created_at) : now;
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  const { rows } = await pool.query(
+    `INSERT INTO ml_questions_answered (
+       ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+     ON CONFLICT (ml_question_id) DO UPDATE SET
+       ml_user_id = EXCLUDED.ml_user_id,
+       item_id = EXCLUDED.item_id,
+       buyer_id = EXCLUDED.buyer_id,
+       question_text = EXCLUDED.question_text,
+       answer_text = EXCLUDED.answer_text,
+       ml_status = EXCLUDED.ml_status,
+       raw_json = EXCLUDED.raw_json,
+       notification_id = EXCLUDED.notification_id,
+       pending_internal_id = EXCLUDED.pending_internal_id,
+       answered_at = EXCLUDED.answered_at,
+       moved_at = EXCLUDED.moved_at,
+       updated_at = EXCLUDED.updated_at
+     RETURNING id`,
+    [
+      qid,
+      mlUid,
+      row.item_id != null ? String(row.item_id) : null,
+      row.buyer_id != null ? Number(row.buyer_id) : null,
+      row.question_text != null ? String(row.question_text) : null,
+      answerText,
+      row.ml_status != null ? String(row.ml_status) : null,
+      row.raw_json != null ? String(row.raw_json) : null,
+      row.notification_id != null ? String(row.notification_id) : null,
+      row.pending_internal_id != null ? Number(row.pending_internal_id) : null,
+      answeredAt,
+      movedAt,
+      createdAt,
+      updatedAt,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+async function listMlQuestionsPending(limit, maxAllowed) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  const { rows } = await pool.query(
+    `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, raw_json, notification_id, created_at, updated_at
+     FROM ml_questions_pending ORDER BY id DESC LIMIT $1`,
+    [n]
+  );
+  return rows;
+}
+
+async function listMlQuestionsAnswered(limit, maxAllowed) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  const { rows } = await pool.query(
+    `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at
+     FROM ml_questions_answered ORDER BY id DESC LIMIT $1`,
+    [n]
+  );
+  return rows;
+}
+
 function normalizePostSaleLogOutcomeFilter(raw) {
   if (raw == null || String(raw).trim() === "") return "default";
   const v = String(raw).trim().toLowerCase();
@@ -1115,6 +1240,11 @@ module.exports = {
   insertMlVentasDetalleWeb,
   listMlVentasDetalleWeb,
   deleteAllMlVentasDetalleWeb,
+  upsertMlQuestionPending,
+  deleteMlQuestionPending,
+  upsertMlQuestionAnswered,
+  listMlQuestionsPending,
+  listMlQuestionsAnswered,
   /** Cierra el pool (tests). */
   _poolEnd: () => pool.end(),
 };

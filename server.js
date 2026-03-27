@@ -372,8 +372,17 @@ function scheduleTopicFetchFromWebhook(body) {
 
   setImmediate(() => {
     const mlUserId = Number(uid);
-    const topic = typeof body.topic === "string" ? body.topic : null;
     const resourceStr = String(resource);
+    let topic = null;
+    if (body.topic != null) {
+      topic = typeof body.topic === "string" ? body.topic.trim() : String(body.topic).trim();
+      if (topic === "") topic = null;
+    }
+    if (!topic && /\/orders\/\d/i.test(resourceStr)) {
+      topic = "orders_v2";
+    } else if (!topic && /\/messages\//i.test(resourceStr)) {
+      topic = "messages";
+    }
     const notifId = body._id != null ? String(body._id) : null;
     let requestPath = "";
 
@@ -635,7 +644,7 @@ const server = http.createServer(async (req, res) => {
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         envio_auto_postventa:
-          "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · placeholders {{order_id}} {{buyer_id}} {{seller_id}}",
+          "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}}",
         log_envios_postventa:
           "GET /envios-postventa?k=ADMIN_SECRET (historial). POST /envios-postventa/retry?k=… JSON {order_id,ml_user_id,buyer_id?} opcional force, topic",
         cookies_ml_web:
@@ -1654,7 +1663,7 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Log envíos automáticos post-venta</h1>
-  <p class="lead">Tabla <code>ml_post_sale_auto_send_log</code> · <code>order_id</code> = id de orden en la URL de mensajería ML. ${rows.length} fila(s) con el filtro actual. JSON: <code>?format=json&amp;outcome=…</code>. Reintento: <code>POST /envios-postventa/retry?k=…</code> con JSON <code>order_id</code>, <code>ml_user_id</code>, opcional <code>buyer_id</code>, <code>force</code>.</p>
+  <p class="lead">Tabla <code>ml_post_sale_auto_send_log</code> · <code>order_id</code> = id de orden en la URL de mensajería ML. ${rows.length} fila(s) con el filtro actual. JSON: <code>?format=json&amp;outcome=…</code>. Reintento: <code>POST /envios-postventa/retry?k=…</code> con JSON <code>order_id</code>, <code>ml_user_id</code>, opcional <code>buyer_id</code>, <code>force</code> (borra deduplicación). Pruebas repetidas sin tocar BD: variable <code>ML_POST_SALE_DISABLE_DEDUP=1</code>.</p>
   <nav class="filter-nav" aria-label="Filtro por outcome">
     ${enviosFilterNav}
   </nav>

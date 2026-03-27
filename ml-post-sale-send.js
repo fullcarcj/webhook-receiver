@@ -25,6 +25,8 @@ const {
 
 const MAX_OTHER = Number(process.env.ML_POST_SALE_MAX_CHARS || 350);
 
+let warnedDisableDedupOnce = false;
+
 /** Respuesta JSON de error ML (p. ej. cause: shipment_invalid_to_action_guide). */
 function mercadoLibreErrorCause(data) {
   if (data == null || typeof data !== "object") return null;
@@ -124,7 +126,12 @@ async function computePostSaleBodiesAndSteps() {
  * @param {{ mlUserId: number, topic: string|null, payload?: object|null, resource?: string|null, notificationId?: string|null }} args
  */
 async function trySendDefaultPostSaleMessage(args) {
-  const topicTrim = args.topic != null ? String(args.topic).trim() : "";
+  let topicTrim = args.topic != null ? String(args.topic).trim() : "";
+  const resourceEarly = args.resource != null ? String(args.resource).trim() : "";
+  if (!topicTrim && resourceEarly) {
+    if (/\/orders\/\d/i.test(resourceEarly)) topicTrim = "orders_v2";
+    else if (/\/messages\//i.test(resourceEarly)) topicTrim = "messages";
+  }
   const orderLike =
     topicTrim && (topicTrim === "orders_v2" || String(topicTrim).startsWith("orders"));
   const messagesTopic = topicTrim === "messages";
@@ -225,7 +232,16 @@ async function trySendDefaultPostSaleMessage(args) {
     return { skipped: true, reason: "no_template" };
   }
 
-  if (await wasPostSaleSent(orderId, totalSteps)) {
+  /** Solo pruebas: sin deduplicación ni marcas en BD; puede repetir envíos al comprador. */
+  const disableDedup = process.env.ML_POST_SALE_DISABLE_DEDUP === "1";
+  if (disableDedup && !warnedDisableDedupOnce) {
+    warnedDisableDedupOnce = true;
+    console.warn(
+      "[post-sale] ML_POST_SALE_DISABLE_DEDUP=1: deduplicación desactivada (no se usa ml_post_sale_sent/steps_sent)."
+    );
+  }
+
+  if (!disableDedup && (await wasPostSaleSent(orderId, totalSteps))) {
     return { skipped: true, reason: "already_sent", order_id: orderId };
   }
 
@@ -258,7 +274,7 @@ async function trySendDefaultPostSaleMessage(args) {
   let lastResult = { ok: false, status: 0, order_id: orderId, data: null };
 
   for (let step = 0; step < totalSteps; step++) {
-    if (await isPostSaleStepSent(orderId, step)) {
+    if (!disableDedup && (await isPostSaleStepSent(orderId, step))) {
       continue;
     }
     if (step > 0) {
@@ -284,7 +300,9 @@ async function trySendDefaultPostSaleMessage(args) {
     lastResult = { ok: result.ok, status: result.status, order_id: orderId, data: result.data };
 
     if (result.ok) {
-      await markPostSaleStepSent(orderId, step);
+      if (!disableDedup) {
+        await markPostSaleStepSent(orderId, step);
+      }
       console.log("[post-sale] enviado order_id=%s step=%s option=%s", orderId, step, optionId);
       const resp =
         result.data != null
@@ -335,7 +353,9 @@ async function trySendDefaultPostSaleMessage(args) {
     }
   }
 
-  await markPostSaleSent(orderId);
+  if (!disableDedup) {
+    await markPostSaleSent(orderId);
+  }
   return lastResult;
 }
 

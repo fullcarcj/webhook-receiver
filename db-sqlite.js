@@ -940,9 +940,14 @@ const insertPostSaleAutoSendLogStmt = db.prepare(
 function insertPostSaleAutoSendLog(row) {
   const topicNorm = row.topic != null ? String(row.topic).trim() : "";
   if (topicNorm !== "orders_v2") return null;
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) {
+    console.error("[post-sale log DB] ml_user_id inválido:", row.ml_user_id);
+    return null;
+  }
   const info = insertPostSaleAutoSendLogStmt.run({
     created_at: row.created_at || new Date().toISOString(),
-    ml_user_id: row.ml_user_id,
+    ml_user_id: mlUid,
     topic: topicNorm,
     notification_id: row.notification_id != null ? String(row.notification_id) : null,
     order_id: row.order_id != null ? Number(row.order_id) : null,

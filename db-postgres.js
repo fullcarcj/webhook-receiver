@@ -923,6 +923,11 @@ async function deletePostSaleSent(orderId) {
 async function insertPostSaleAutoSendLog(row) {
   const topicNorm = row.topic != null ? String(row.topic).trim() : "";
   if (topicNorm !== "orders_v2") return null;
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) {
+    console.error("[post-sale log DB] ml_user_id inválido:", row.ml_user_id);
+    return null;
+  }
   await ensureSchema();
   const { rows } = await pool.query(
     `INSERT INTO ml_post_sale_auto_send_log (
@@ -931,7 +936,7 @@ async function insertPostSaleAutoSendLog(row) {
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
     [
       row.created_at || new Date().toISOString(),
-      row.ml_user_id,
+      mlUid,
       topicNorm,
       row.notification_id != null ? String(row.notification_id) : null,
       row.order_id != null ? Number(row.order_id) : null,

@@ -264,12 +264,17 @@ function explainInvalidBuyerId(body) {
   const raw = has ? body.buyer_id : undefined;
   const n = Number(raw);
   const safe = n <= Number.MAX_SAFE_INTEGER;
+  const claves =
+    body != null && typeof body === "object" && !Array.isArray(body)
+      ? Object.keys(body).slice(0, 40)
+      : [];
   return {
     code: "BUYER_ID_INVALID",
     hint:
-      "buyer_id debe ser un número > 0 (ID ML). Clave exacta: buyer_id. Vacío, 0, texto no numérico o clave mal escrita fallan.",
+      "buyer_id debe ser un número > 0 (ID ML). Clave exacta: buyer_id. En FileMaker: el 1.er JSONSetElement debe usar $data (p.ej. \"{}\"), no \"\".",
     debug: {
       tipo_raiz_cuerpo: body == null ? "null" : typeof body,
+      claves_recibidas: claves,
       tiene_clave_buyer_id: has,
       tipo_valor: raw === undefined ? "undefined" : typeof raw,
       muestra: raw == null || raw === "" ? raw : String(raw).slice(0, 48),

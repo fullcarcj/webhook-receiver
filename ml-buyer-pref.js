@@ -12,7 +12,22 @@ const BUYER_PREF_ENTREGA_DEFAULT = "Pickup";
 function normalizeBuyerPrefEntrega(v) {
   if (v == null || v === "") return null;
   const s = String(v).trim();
-  return BUYER_PREF_ENTREGA_VALUES.includes(s) ? s : null;
+  if (BUYER_PREF_ENTREGA_VALUES.includes(s)) return s;
+  const key = s
+    .toLowerCase()
+    .replace(/\u00ad/g, "")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "");
+  /** Sinónimos (p. ej. FileMaker en español) → valor en BD */
+  const aliases = {
+    retiro: "Pickup",
+    pickup: "Pickup",
+    "envio courier": "Envio Courier",
+    envio: "Envio Courier",
+    courier: "Envio Courier",
+    delivery: "Delivery",
+  };
+  return aliases[key] || null;
 }
 
 const NOMBRE_APELLIDO_MAX = 500;

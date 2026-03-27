@@ -2,5 +2,6 @@ oauth-credentials.ps1
 oauth-env.json
 ml-token.json
 data/
+log.txt
 node_modules/
 programa_dos/

@@ -152,7 +152,9 @@ async function runSchemaAndSeed() {
       http_status INTEGER,
       raw TEXT,
       celular TEXT,
-      error TEXT
+      error TEXT,
+      pos_buyer_info_text INTEGER,
+      pos_label INTEGER
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ventas_detalle_user_order ON ml_ventas_detalle_web(ml_user_id, order_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ventas_detalle_created ON ml_ventas_detalle_web(created_at)`,
@@ -183,6 +185,31 @@ async function runSchemaAndSeed() {
   await migrateMlBuyersCambioDatos();
   await migrateMlBuyersActualizacionYDefaults();
   await migrateMlBuyersNombreApellido();
+  await migrateMlVentasDetalleAnchorPositions();
+}
+
+/** Columnas de prueba: índice 0-based primera aparición buyer_info_text y label en raw. */
+async function migrateMlVentasDetalleAnchorPositions() {
+  try {
+    const { rows: c1 } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_ventas_detalle_web' AND column_name = 'pos_buyer_info_text'`
+    );
+    if (c1.length === 0) {
+      await pool.query(`ALTER TABLE ml_ventas_detalle_web ADD COLUMN pos_buyer_info_text INTEGER`);
+      console.log("[db] ml_ventas_detalle_web: columna pos_buyer_info_text añadida (migración)");
+    }
+    const { rows: c2 } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_ventas_detalle_web' AND column_name = 'pos_label'`
+    );
+    if (c2.length === 0) {
+      await pool.query(`ALTER TABLE ml_ventas_detalle_web ADD COLUMN pos_label INTEGER`);
+      console.log("[db] ml_ventas_detalle_web: columna pos_label añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_ventas_detalle_web anchor pos:", e.message);
+  }
 }
 
 /** Columna nombre_apellido (Nombre y Apellido) entre nickname y phone_1. */
@@ -838,10 +865,17 @@ async function insertMlVentasDetalleWeb(row) {
     row.celular != null && String(row.celular).trim() !== ""
       ? String(row.celular).replace(/\s+/g, "").slice(0, 16)
       : null;
+  const posBuyer =
+    row.pos_buyer_info_text != null && Number.isFinite(Number(row.pos_buyer_info_text))
+      ? Number(row.pos_buyer_info_text)
+      : null;
+  const posLab =
+    row.pos_label != null && Number.isFinite(Number(row.pos_label)) ? Number(row.pos_label) : null;
   const { rows } = await pool.query(
     `INSERT INTO ml_ventas_detalle_web (
-       created_at, ml_user_id, order_id, request_url, http_status, raw, celular, error
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+       created_at, ml_user_id, order_id, request_url, http_status, raw, celular, error,
+       pos_buyer_info_text, pos_label
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
     [
       row.created_at || new Date().toISOString(),
       Number(row.ml_user_id),
@@ -851,6 +885,8 @@ async function insertMlVentasDetalleWeb(row) {
       html,
       celular,
       row.error != null ? String(row.error).slice(0, 4000) : null,
+      posBuyer,
+      posLab,
     ]
   );
   return Number(rows[0].id);
@@ -865,15 +901,25 @@ async function listMlVentasDetalleWeb(limit, maxAllowed, includeRaw) {
               LENGTH(raw::text) AS body_len,
               CASE WHEN raw IS NULL THEN NULL ELSE SUBSTRING(raw::text FROM 1 FOR 400) END AS resultado_g,
               celular,
+              pos_buyer_info_text,
+              pos_label,
               raw AS raw,
               error`
     : `SELECT id, created_at, ml_user_id, order_id, request_url, http_status,
               LENGTH(raw::text) AS body_len,
               CASE WHEN raw IS NULL THEN NULL ELSE SUBSTRING(raw::text FROM 1 FOR 400) END AS resultado_g,
               celular,
+              pos_buyer_info_text,
+              pos_label,
               error`;
   const { rows } = await pool.query(`${sel} FROM ml_ventas_detalle_web ORDER BY id DESC LIMIT $1`, [n]);
   return rows;
+}
+
+async function deleteAllMlVentasDetalleWeb() {
+  await ensureSchema();
+  const { rowCount } = await pool.query("DELETE FROM ml_ventas_detalle_web");
+  return rowCount;
 }
 
 function dbPathDisplay() {
@@ -924,6 +970,7 @@ module.exports = {
   listPostSaleAutoSendLog,
   insertMlVentasDetalleWeb,
   listMlVentasDetalleWeb,
+  deleteAllMlVentasDetalleWeb,
   /** Cierra el pool (tests). */
   _poolEnd: () => pool.end(),
 };

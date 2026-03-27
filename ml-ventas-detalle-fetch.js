@@ -3,10 +3,16 @@
  * Guarda snapshot en ml_ventas_detalle_web si ML_WEBHOOK_FETCH_VENTAS_DETALLE=1.
  */
 const fs = require("fs");
+const path = require("path");
 const { getMlAccountCookiesFilePath } = require("./ml-cookies-path");
 const { buildCookieHeaderFromNetscapeFile } = require("./ml-netscape-cookies");
-const { extractCelularFromVentasHtml } = require("./ml-ventas-detalle-celular");
+const {
+  extractCelularFromVentasHtml,
+  extractNombreApellidoFromVentasHtml,
+  computeVentasDetalleAnchorPositions,
+} = require("./ml-ventas-detalle-celular");
 const { insertMlVentasDetalleWeb } = require("./db");
+const { mergeNombreApellidoFromVentasDetalle } = require("./ml-buyer-order-sync");
 
 const DEFAULT_BASE = "https://www.mercadolibre.com.ve/ventas/";
 const DEFAULT_UA =
@@ -18,11 +24,68 @@ function maxBodyChars() {
 }
 
 /**
- * @param {{ mlUserId: number, orderId: number }} args
+ * Volcado del HTML del GET (DOCTYPE + HTML; mismo cuerpo que `raw`).
+ * Activa si ML_VENTAS_DETALLE_LOG_FILE=1 o si `force` (POST retry con write_log: true).
+ * Siempre escribe `log.txt` en la carpeta del proyecto; si ML_VENTAS_DETALLE_LOG_PATH apunta a otro
+ * archivo, duplica el contenido ahí (así no buscás el HTML en un .html distinto sin ver log.txt).
+ * @param {{ url: string, orderId: number, mlUserId: number, httpStatus: number|null, bodyStore: string, errMsg: string|null, force?: boolean }} p
+ * @returns {{ written: boolean, path: string|null }}
+ */
+function writeVentasDetalleGetLogFile(p) {
+  const want = process.env.ML_VENTAS_DETALLE_LOG_FILE === "1" || p.force === true;
+  if (!want) return { written: false, path: null };
+  const defaultPath = path.join(__dirname, "log.txt");
+  const customRaw = process.env.ML_VENTAS_DETALLE_LOG_PATH;
+  const customPath =
+    customRaw != null && String(customRaw).trim() !== ""
+      ? path.resolve(String(customRaw).trim())
+      : null;
+  const head = [
+    `# ventas detalle GET — ${new Date().toISOString()}`,
+    `# url: ${p.url}`,
+    `# order_id: ${p.orderId} ml_user_id: ${p.mlUserId}`,
+    `# http_status: ${p.httpStatus ?? "—"} bytes: ${p.bodyStore ? p.bodyStore.length : 0}`,
+    p.errMsg ? `# error: ${p.errMsg}` : "# error: —",
+    "",
+  ].join("\n");
+  const body = p.bodyStore != null && String(p.bodyStore).length > 0 ? String(p.bodyStore) : "";
+  const content = head + body;
+  try {
+    fs.writeFileSync(defaultPath, content, "utf8");
+    const extra =
+      customPath && path.resolve(customPath) !== path.resolve(defaultPath)
+        ? (() => {
+            fs.mkdirSync(path.dirname(customPath), { recursive: true });
+            fs.writeFileSync(customPath, content, "utf8");
+            return customPath;
+          })()
+        : null;
+    console.log(
+      "[ventas-detalle] GET volcado → %s (%s bytes cuerpo)%s",
+      defaultPath,
+      body.length,
+      extra ? ` · copia: ${extra}` : ""
+    );
+    return { written: true, path: defaultPath };
+  } catch (e) {
+    console.error("[ventas-detalle] no se pudo escribir log GET:", e.message);
+    return { written: false, path: null };
+  }
+}
+
+/**
+ * @param {{ mlUserId: number, orderId: number, buyerId?: number, writeLog?: boolean }} args
+ * `buyerId` opcional: si viene, se intenta rellenar `ml_buyers.nombre_apellido` con el mismo criterio que el guion FileMaker sobre el HTML del GET.
+ * `writeLog`: si true, escribe log.txt aunque no esté ML_VENTAS_DETALLE_LOG_FILE=1 (útil en POST /ventas-detalle-web/retry).
  */
 async function fetchVentasDetalleAndStore(args) {
   const mlUserId = Number(args.mlUserId);
   const orderId = Number(args.orderId);
+  const writeLogOnce = args.writeLog === true;
+  const buyerId =
+    args.buyerId != null && Number.isFinite(Number(args.buyerId)) && Number(args.buyerId) > 0
+      ? Number(args.buyerId)
+      : null;
   if (!Number.isFinite(mlUserId) || mlUserId <= 0 || !Number.isFinite(orderId) || orderId <= 0) {
     return { ok: false, skip: "bad_ids" };
   }
@@ -115,6 +178,18 @@ async function fetchVentasDetalleAndStore(args) {
   }
 
   const celular = bodyStore ? extractCelularFromVentasHtml(bodyStore) : null;
+  const nombreApellidoRaw = bodyStore ? extractNombreApellidoFromVentasHtml(bodyStore) : null;
+  const anchorPos = bodyStore ? computeVentasDetalleAnchorPositions(bodyStore) : null;
+
+  const logOut = writeVentasDetalleGetLogFile({
+    url,
+    orderId,
+    mlUserId,
+    httpStatus,
+    bodyStore: bodyStore || "",
+    errMsg,
+    force: writeLogOnce,
+  });
 
   try {
     await insertMlVentasDetalleWeb({
@@ -125,19 +200,30 @@ async function fetchVentasDetalleAndStore(args) {
       raw: errMsg && !bodyStore ? null : bodyStore,
       celular,
       error: errMsg,
+      pos_buyer_info_text: anchorPos ? anchorPos.pos_buyer_info_text : null,
+      pos_label: anchorPos ? anchorPos.pos_label : null,
     });
   } catch (e) {
     console.error("[ventas-detalle] insert DB:", e.message);
     return { ok: false, error: e.message };
   }
 
+  if (buyerId && nombreApellidoRaw) {
+    try {
+      await mergeNombreApellidoFromVentasDetalle(buyerId, nombreApellidoRaw);
+    } catch (e) {
+      console.error("[ventas-detalle] merge nombre_apellido buyer_id=%s: %s", buyerId, e.message);
+    }
+  }
+
   console.log(
-    "[ventas-detalle] guardado order_id=%s ml_user_id=%s http=%s bytes≈%s celular=%s",
+    "[ventas-detalle] guardado order_id=%s ml_user_id=%s http=%s bytes≈%s celular=%s nombre_apellido=%s",
     orderId,
     mlUserId,
     httpStatus,
     bodyStore ? bodyStore.length : 0,
-    celular || "—"
+    celular || "—",
+    nombreApellidoRaw || "—"
   );
   return {
     ok: true,
@@ -145,6 +231,8 @@ async function fetchVentasDetalleAndStore(args) {
     url,
     bytes: bodyStore.length,
     celular: celular || null,
+    nombre_apellido: nombreApellidoRaw || null,
+    log_file: logOut.written ? logOut.path : null,
   };
 }
 

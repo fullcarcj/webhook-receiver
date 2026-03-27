@@ -2,7 +2,7 @@
  * Tras GET de orden (orders_v2): crea buyer o actualiza; si ya existía y ML trae datos distintos, rellena cambio_datos.
  */
 const { getMlBuyer, upsertMlBuyer } = require("./db");
-const { normalizeCambioDatos } = require("./ml-buyer-pref");
+const { normalizeCambioDatos, normalizeNombreApellido } = require("./ml-buyer-pref");
 
 function normField(v) {
   if (v == null || v === "") return null;
@@ -70,8 +70,29 @@ async function upsertBuyerFromOrdersV2Webhook(buyer) {
   });
 }
 
+/**
+ * Tras GET detalle ventas (HTML como RESULTADO_LLAMADA_G): aplica el nombre extraído a ml_buyers.
+ * Requiere fila existente (p. ej. ya guardada por GET orden / webhook).
+ * @param {number} buyerId
+ * @param {string|null|undefined} nombreRaw texto crudo del parser (se normaliza con normalizeNombreApellido)
+ */
+async function mergeNombreApellidoFromVentasDetalle(buyerId, nombreRaw) {
+  const norm = normalizeNombreApellido(nombreRaw);
+  if (!norm || buyerId == null || !Number.isFinite(Number(buyerId)) || Number(buyerId) <= 0) return;
+  const existing = await getMlBuyer(Number(buyerId));
+  if (!existing) return;
+  await upsertBuyerFromOrdersV2Webhook({
+    buyer_id: Number(buyerId),
+    nickname: existing.nickname,
+    phone_1: existing.phone_1,
+    phone_2: existing.phone_2,
+    nombre_apellido: norm,
+  });
+}
+
 module.exports = {
   upsertBuyerFromOrdersV2Webhook,
   buyerCoreFieldsDiffer,
   buildCambioDatosFromDiff,
+  mergeNombreApellidoFromVentasDetalle,
 };

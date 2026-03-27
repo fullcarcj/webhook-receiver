@@ -1,6 +1,18 @@
 require("./load-env-local");
+const path = require("path");
 const { ensureMlCookiesDir } = require("./ml-cookies-path");
 ensureMlCookiesDir();
+if (process.env.ML_VENTAS_DETALLE_LOG_FILE === "1" || process.env.ML_VENTAS_DETALLE_LOG_FILE === "true") {
+  const def = path.join(__dirname, "log.txt");
+  const extra = process.env.ML_VENTAS_DETALLE_LOG_PATH;
+  console.log(
+    "[config] GET detalle ventas (.ve): volcado HTML en %s%s",
+    path.resolve(def),
+    extra && String(extra).trim() !== ""
+      ? ` (copia opcional si distinto: ${path.resolve(String(extra).trim())})`
+      : ""
+  );
+}
 const http = require("http");
 const pkg = require("./package.json");
 const { extractSkuTitleFromMlResponse } = require("./ml-payload-extract");
@@ -52,6 +64,7 @@ const {
   deletePostSaleMessage,
   listPostSaleAutoSendLog,
   listMlVentasDetalleWeb,
+  deleteAllMlVentasDetalleWeb,
   getMlAccount,
   deletePostSaleSent,
   dbPath,
@@ -360,10 +373,14 @@ function scheduleTopicFetchFromWebhook(body) {
             ) {
               const ventasOrderId = extractOrderIdFromOrder(parsed);
               if (ventasOrderId) {
+                const buyerVentas = extractBuyerFromOrderPayload(parsed);
+                const buyerIdVentas = buyerVentas ? buyerVentas.buyer_id : undefined;
                 setImmediate(() => {
-                  fetchVentasDetalleAndStore({ mlUserId, orderId: ventasOrderId }).catch((e) =>
-                    console.error("[ventas-detalle]", e.message)
-                  );
+                  fetchVentasDetalleAndStore({
+                    mlUserId,
+                    orderId: ventasOrderId,
+                    buyerId: buyerIdVentas,
+                  }).catch((e) => console.error("[ventas-detalle]", e.message));
                 });
               }
             }
@@ -496,6 +513,8 @@ const server = http.createServer(async (req, res) => {
           "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1)",
         borrar_todos_los_fetches:
           "DELETE /admin/topic-fetches (cabecera X-Admin-Secret) vacía tabla ml_topic_fetches",
+        borrar_snapshots_ventas_detalle_ve:
+          "DELETE /admin/ventas-detalle-web (cabecera X-Admin-Secret) vacía ml_ventas_detalle_web (GET detalle .ve con cookies)",
         buyers_ml:
           "GET /buyers?k=ADMIN_SECRET (ml_buyers: nombre_apellido, pref_entrega default Pickup, actualizacion ISO). POST/PUT JSON buyer_id + campos opcionales (cabecera X-Admin-Secret alternativa)",
         mensajes_postventa:
@@ -507,7 +526,7 @@ const server = http.createServer(async (req, res) => {
         cookies_ml_web:
           "ML_COOKIES_DIR: carpeta con cookies por cuenta ({ml_user_id}.txt). Por defecto carpeta data/ (ignorada en git).",
         ventas_detalle_web:
-          "ml_ventas_detalle_web.raw = HTML; resultado_g = preview. GET /ventas-detalle-web?k= & format=json&include_raw=1 — POST .../ventas-detalle-web/retry prueba",
+          "ml_ventas_detalle_web.raw = HTML; GET /ventas-detalle-web?k= & format=json&include_raw=1 — POST retry JSON write_log:true o ML_VENTAS_DETALLE_LOG_FILE=1 → log.txt (ML_VENTAS_DETALLE_LOG_PATH opcional) — DELETE /admin/ventas-detalle-web vacía la tabla",
       })
     );
     return;
@@ -1362,13 +1381,21 @@ const server = http.createServer(async (req, res) => {
     }
     const mlUserId = Number(body.ml_user_id);
     const orderId = Number(body.order_id);
+    const buyerId =
+      body.buyer_id != null && Number.isFinite(Number(body.buyer_id)) && Number(body.buyer_id) > 0
+        ? Number(body.buyer_id)
+        : undefined;
     if (!Number.isFinite(mlUserId) || mlUserId <= 0 || !Number.isFinite(orderId) || orderId <= 0) {
       res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: false, error: "ml_user_id y order_id numéricos requeridos" }));
       return;
     }
     try {
-      const result = await fetchVentasDetalleAndStore({ mlUserId, orderId });
+      const writeLog =
+        body.write_log === true ||
+        body.write_log === 1 ||
+        String(body.write_log || "").toLowerCase() === "true";
+      const result = await fetchVentasDetalleAndStore({ mlUserId, orderId, buyerId, writeLog });
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, result }));
     } catch (e) {
@@ -1550,6 +1577,8 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.ml_user_id)}</td>
   <td>${escapeHtml(r.order_id)}</td>
   <td>${escapeHtml(r.celular)}</td>
+  <td>${escapeHtml(r.pos_buyer_info_text)}</td>
+  <td>${escapeHtml(r.pos_label)}</td>
   <td class="muted">${escapeHtml(r.request_url)}</td>
   <td>${escapeHtml(r.http_status)}</td>
   <td>${escapeHtml(r.body_len)}</td>
@@ -1578,10 +1607,10 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>GET detalle ventas (.ve) con cookies</h1>
-  <p class="lead">Tabla <code>ml_ventas_detalle_web</code> · columna <code>raw</code> = HTML completo. ${rows.length} fila(s). JSON: <code>?format=json&amp;include_raw=1</code> para traer <code>raw</code>. Prueba: <code>POST /ventas-detalle-web/retry?k=…</code>.</p>
+  <p class="lead">Tabla <code>ml_ventas_detalle_web</code> · <code>raw</code> = HTML completo; <code>pos_buyer_info_text</code> = índice 0-based de <code>buyer_info_text</code>; <code>pos_label</code> = desplazamiento desde ahí hasta la primera <code>label</code> (no índice absoluto). ${rows.length} fila(s). JSON: <code>?format=json&amp;include_raw=1</code>. Prueba: <code>POST /ventas-detalle-web/retry?k=…</code> con JSON <code>write_log: true</code> para generar <code>log.txt</code> en la carpeta del proyecto. Borrar todos: <code>DELETE /admin/ventas-detalle-web</code> con cabecera <code>X-Admin-Secret</code>.</p>
   <table>
-    <thead><tr><th>id</th><th>created_at</th><th>user_id</th><th>order_id</th><th>celular</th><th>url</th><th>http</th><th>body_len</th><th>error</th><th>resultado_g</th></tr></thead>
-    <tbody>${tableRows || '<tr><td colspan="10">Sin registros.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>created_at</th><th>user_id</th><th>order_id</th><th>celular</th><th>pos_buyer_info_text</th><th>pos_label</th><th>url</th><th>http</th><th>body_len</th><th>error</th><th>resultado_g</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="12">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;
@@ -1640,6 +1669,25 @@ const server = http.createServer(async (req, res) => {
       if (rejectAdminSecret(req, res)) return;
       try {
         const deleted = await deleteAllTopicFetches();
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, deleted }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "usa DELETE" }));
+    return;
+  }
+
+  /** Vacía snapshots GET detalle ventas .ve (tabla ml_ventas_detalle_web). */
+  if (url.pathname === "/admin/ventas-detalle-web") {
+    if (req.method === "DELETE") {
+      if (rejectAdminSecret(req, res)) return;
+      try {
+        const deleted = await deleteAllMlVentasDetalleWeb();
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, deleted }));
       } catch (e) {
@@ -1844,6 +1892,9 @@ server.listen(PORT, "0.0.0.0", () => {
   }
   if (process.env.ADMIN_SECRET) {
     console.log(`Vaciar fetches ML: DELETE http://localhost:${PORT}/admin/topic-fetches (cabecera X-Admin-Secret)`);
+    console.log(
+      `Vaciar detalle ventas .ve: DELETE http://localhost:${PORT}/admin/ventas-detalle-web (cabecera X-Admin-Secret)`
+    );
     console.log(`Cuentas ML: GET|POST|DELETE http://localhost:${PORT}/admin/ml-accounts (cabecera X-Admin-Secret)`);
     console.log(`Cuentas (navegador): http://localhost:${PORT}/cuentas?k=TU_ADMIN_SECRET`);
     console.log(`Hooks guardados: http://localhost:${PORT}/hooks?k=TU_ADMIN_SECRET`);

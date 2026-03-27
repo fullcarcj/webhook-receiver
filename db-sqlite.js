@@ -112,7 +112,9 @@ db.exec(`
     http_status INTEGER,
     raw TEXT,
     celular TEXT,
-    error TEXT
+    error TEXT,
+    pos_buyer_info_text INTEGER,
+    pos_label INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_ventas_detalle_user_order ON ml_ventas_detalle_web(ml_user_id, order_id);
   CREATE INDEX IF NOT EXISTS idx_ventas_detalle_created ON ml_ventas_detalle_web(created_at);
@@ -173,6 +175,21 @@ db.exec(`
     }
   } catch (e) {
     console.error("[db] migrate ml_ventas_detalle_web celular:", e.message);
+  }
+})();
+
+(function migrateMlVentasDetalleAnchorPositions() {
+  try {
+    const t = db.prepare("PRAGMA table_info(ml_ventas_detalle_web)").all();
+    const names = new Set(t.map((c) => c.name));
+    if (!names.has("pos_buyer_info_text")) {
+      db.exec("ALTER TABLE ml_ventas_detalle_web ADD COLUMN pos_buyer_info_text INTEGER");
+    }
+    if (!names.has("pos_label")) {
+      db.exec("ALTER TABLE ml_ventas_detalle_web ADD COLUMN pos_label INTEGER");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_ventas_detalle_web anchor pos:", e.message);
   }
 })();
 
@@ -887,9 +904,11 @@ function listPostSaleAutoSendLog(limit, maxAllowed, options = {}) {
 
 const insertMlVentasDetalleWebStmt = db.prepare(
   `INSERT INTO ml_ventas_detalle_web (
-     created_at, ml_user_id, order_id, request_url, http_status, raw, celular, error
+     created_at, ml_user_id, order_id, request_url, http_status, raw, celular, error,
+     pos_buyer_info_text, pos_label
    ) VALUES (
-     @created_at, @ml_user_id, @order_id, @request_url, @http_status, @raw, @celular, @error
+     @created_at, @ml_user_id, @order_id, @request_url, @http_status, @raw, @celular, @error,
+     @pos_buyer_info_text, @pos_label
    )`
 );
 
@@ -904,6 +923,12 @@ function insertMlVentasDetalleWeb(row) {
     row.celular != null && String(row.celular).trim() !== ""
       ? String(row.celular).replace(/\s+/g, "").slice(0, 16)
       : null;
+  const posBuyer =
+    row.pos_buyer_info_text != null && Number.isFinite(Number(row.pos_buyer_info_text))
+      ? Number(row.pos_buyer_info_text)
+      : null;
+  const posLab =
+    row.pos_label != null && Number.isFinite(Number(row.pos_label)) ? Number(row.pos_label) : null;
   const info = insertMlVentasDetalleWebStmt.run({
     created_at: row.created_at || new Date().toISOString(),
     ml_user_id: Number(row.ml_user_id),
@@ -913,6 +938,8 @@ function insertMlVentasDetalleWeb(row) {
     raw: html,
     celular,
     error: row.error != null ? String(row.error).slice(0, 4000) : null,
+    pos_buyer_info_text: posBuyer,
+    pos_label: posLab,
   });
   return Number(info.lastInsertRowid);
 }
@@ -925,14 +952,22 @@ function listMlVentasDetalleWeb(limit, maxAllowed, includeRaw) {
               LENGTH(raw) AS body_len,
               CASE WHEN raw IS NULL THEN NULL ELSE SUBSTR(raw, 1, 400) END AS resultado_g,
               celular,
+              pos_buyer_info_text,
+              pos_label,
               raw AS raw,
               error`
     : `SELECT id, created_at, ml_user_id, order_id, request_url, http_status,
               LENGTH(raw) AS body_len,
               CASE WHEN raw IS NULL THEN NULL ELSE SUBSTR(raw, 1, 400) END AS resultado_g,
               celular,
+              pos_buyer_info_text,
+              pos_label,
               error`;
   return db.prepare(`${sel} FROM ml_ventas_detalle_web ORDER BY id DESC LIMIT ?`).all(n);
+}
+
+function deleteAllMlVentasDetalleWeb() {
+  return db.prepare("DELETE FROM ml_ventas_detalle_web").run().changes;
 }
 
 module.exports = {
@@ -971,4 +1006,5 @@ module.exports = {
   listPostSaleAutoSendLog,
   insertMlVentasDetalleWeb,
   listMlVentasDetalleWeb,
+  deleteAllMlVentasDetalleWeb,
 };

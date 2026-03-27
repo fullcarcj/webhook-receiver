@@ -55,5 +55,6 @@ if (usePostgres) {
     listPostSaleAutoSendLog: wrap(sqlite.listPostSaleAutoSendLog),
     insertMlVentasDetalleWeb: wrap(sqlite.insertMlVentasDetalleWeb),
     listMlVentasDetalleWeb: wrap(sqlite.listMlVentasDetalleWeb),
+    deleteAllMlVentasDetalleWeb: wrap(sqlite.deleteAllMlVentasDetalleWeb),
   };
 }

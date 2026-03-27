@@ -8,6 +8,7 @@
     "dev": "node --watch server.js",
     "exchange-code": "node exchange-auth-code.js",
     "test-conexion": "node test-conexion.js",
+    "test-ventas-detalle": "node test-ventas-detalle-celular.js",
     "registrar-cuenta": "node registrar-cuenta-ml.js",
     "ver-token": "node ver-token.js"
   },

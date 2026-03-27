@@ -1,6 +1,9 @@
 /**
  * GET HTML detalle de venta ML (.ve) con cookies Netscape por cuenta (equivalente curl -b archivo).
  * Guarda snapshot en ml_ventas_detalle_web si ML_WEBHOOK_FETCH_VENTAS_DETALLE=1.
+ *
+ * El `mlUserId` debe ser el **mismo** `user_id` del webhook (vendedor): las cookies en BD/archivo/env
+ * deben corresponder a esa cuenta (`POST /admin/ml-web-cookies` con ese `ml_user_id`).
  */
 const fs = require("fs");
 const path = require("path");
@@ -169,11 +172,15 @@ async function fetchVentasDetalleAndStore(args) {
         http_status: null,
         raw: null,
         celular: null,
-        error: "cookie_header_vacio_mercadolibre",
+        error: `cookie_header_vacio_mercadolibre; ml_user_id=${mlUserId} (cookies expiradas o sin dominio mercadolibre; reexportar sesión .ve para ese vendedor)`,
       });
     } catch (e) {
       console.error("[ventas-detalle] log vacío:", e.message);
     }
+    console.error(
+      "[ventas-detalle] cabecera Cookie vacía tras filtrar ML; ml_user_id=%s",
+      mlUserId
+    );
     return { ok: false, skip: "empty_cookie_header" };
   }
 

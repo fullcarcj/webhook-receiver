@@ -385,6 +385,7 @@ function scheduleTopicFetchFromWebhook(body) {
                 const buyerVentas = extractBuyerFromOrderPayload(parsed);
                 const buyerIdVentas = buyerVentas ? buyerVentas.buyer_id : undefined;
                 setImmediate(() => {
+                  /* mlUserId = body.user_id del webhook (vendedor); cookies deben estar guardadas para ese id */
                   fetchVentasDetalleAndStore({
                     mlUserId,
                     orderId: ventasOrderId,
@@ -1799,18 +1800,20 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const mlUid = Number(body.ml_user_id);
-      const netscape =
-        typeof body.cookies_netscape === "string"
-          ? body.cookies_netscape
-          : typeof body.netscape === "string"
-            ? body.netscape
-            : null;
-      if (!Number.isFinite(mlUid) || mlUid <= 0 || netscape == null) {
+      let netscape = null;
+      if (typeof body.cookies_netscape === "string") netscape = body.cookies_netscape;
+      else if (typeof body.netscape === "string") netscape = body.netscape;
+      else if (typeof body.cookies === "string") netscape = body.cookies;
+      else if (Array.isArray(body.cookies)) netscape = JSON.stringify(body.cookies);
+      else if (body.cookies != null && typeof body.cookies === "object")
+        netscape = JSON.stringify(body.cookies);
+      if (!Number.isFinite(mlUid) || mlUid <= 0 || netscape == null || String(netscape).trim() === "") {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
         res.end(
           JSON.stringify({
             ok: false,
-            error: "requiere ml_user_id (numero) y cookies_netscape (string, texto Netscape)",
+            error:
+              "requiere ml_user_id (numero) y cookies: cookies_netscape o netscape (texto), o cookies (string|array JSON tipo Cookie-Editor)",
           })
         );
         return;

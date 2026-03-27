@@ -51,6 +51,7 @@ const {
   warmAllMlAccountsRefresh,
   getTokenStatus,
   getTokenStatusForMlUser,
+  exchangeAuthorizationCode,
 } = require("./oauth-token");
 const {
   insertWebhook,
@@ -679,7 +680,7 @@ const server = http.createServer(async (req, res) => {
         },
         webhook: WEBHOOK_PATH,
         multi_cuentas_ml:
-          "POST /admin/ml-accounts (cabecera X-Admin-Secret) registra refresh por ml_user_id · POST /admin/ml-web-cookies JSON {ml_user_id, cookies_netscape} — cookies en BD; DELETE ?ml_user_id= — borra",
+          "POST /admin/ml-accounts (cabecera X-Admin-Secret) registra refresh por ml_user_id · POST /admin/oauth-exchange JSON {code, redirect_uri?} intercambia code de ML y guarda cuenta · POST /admin/ml-web-cookies JSON {ml_user_id, cookies_netscape} — cookies en BD; DELETE ?ml_user_id= — borra",
         oauth_token_status:
           "GET /oauth/token-status  o  ?ml_user_id=  (token enmascarado, sin secreto completo)",
         cuentas_ml:
@@ -2035,6 +2036,145 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /**
+   * Intercambia el `code` de la URL de autorización ML por tokens y guarda en ml_accounts.
+   * - GET: redirect de ML (?code= / ?error=) — mismo path que Redirect URI registrada; sin X-Admin-Secret.
+   * - POST JSON: { "code": "..." } cabecera X-Admin-Secret; opcional "redirect_uri".
+   */
+  if (url.pathname === "/admin/oauth-exchange" || url.pathname === "/admin/oauth-exchange/") {
+    function oauthRedirectUriForExchange() {
+      const env = process.env.OAUTH_REDIRECT_URI || process.env.ML_REDIRECT_URI;
+      if (env && String(env).trim() !== "") return String(env).trim();
+      const host = req.headers.host || "";
+      const proto = (req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
+      let pathOnly = url.pathname;
+      if (pathOnly.length > 1 && pathOnly.endsWith("/")) pathOnly = pathOnly.slice(0, -1);
+      return `${proto}://${host}${pathOnly}`;
+    }
+
+    if (req.method === "GET") {
+      const errParam = url.searchParams.get("error");
+      const codeGet = url.searchParams.get("code");
+      if (errParam) {
+        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(
+          `<!DOCTYPE html><meta charset="utf-8"/><title>OAuth ML</title><p>Mercado Libre: <code>${escapeHtml(
+            errParam
+          )}</code></p>`
+        );
+        return;
+      }
+      if (!codeGet || !String(codeGet).trim()) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(
+          `<!DOCTYPE html><meta charset="utf-8"/><title>OAuth ML</title><p>Abre la URL de autorización de la app ML. Tras aceptar, volverás aquí con <code>?code=...</code>.</p>`
+        );
+        return;
+      }
+      const redirect_uri = oauthRedirectUriForExchange();
+      try {
+        const data = await exchangeAuthorizationCode({
+          code: String(codeGet).trim(),
+          redirect_uri,
+        });
+        const uid = Number(data.user_id);
+        const rt = data.refresh_token;
+        if (!Number.isFinite(uid) || uid <= 0 || typeof rt !== "string" || !rt.trim()) {
+          res.writeHead(502, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(
+            `<!DOCTYPE html><meta charset="utf-8"/><p>Respuesta ML incompleta. Revisa OAUTH_CLIENT_ID/SECRET y que Redirect URI coincida con <code>${escapeHtml(
+              redirect_uri
+            )}</code>.</p>`
+          );
+          return;
+        }
+        const nick =
+          typeof data.nickname === "string" && data.nickname.trim() !== ""
+            ? data.nickname.trim()
+            : null;
+        await upsertMlAccount(uid, rt.trim(), nick);
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(
+          `<!DOCTYPE html><meta charset="utf-8"/><title>Cuenta conectada</title><p>OK · <strong>user_id</strong> ${escapeHtml(
+            String(uid)
+          )}${nick ? ` · ${escapeHtml(nick)}` : ""}</p>`
+        );
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(
+          `<!DOCTYPE html><meta charset="utf-8"/><p>Error al intercambiar code: ${escapeHtml(
+            e.message || String(e)
+          )}</p><p>Comprueba que <code>OAUTH_REDIRECT_URI</code> en el servidor sea idéntica a la Redirect URI en la app ML.</p>`
+        );
+      }
+      return;
+    }
+
+    if (req.method !== "POST") {
+      res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "usa GET (callback ML) o POST (JSON + X-Admin-Secret)" }));
+      return;
+    }
+    if (rejectAdminSecret(req, res)) return;
+    let body;
+    try {
+      body = await parseJsonBody(req);
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+      return;
+    }
+    const code = body.code != null ? String(body.code).trim() : "";
+    if (!code) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: "requiere code (authorization code de la URL tras autorizar en ML)",
+        })
+      );
+      return;
+    }
+    const redirect_uri =
+      body.redirect_uri != null && String(body.redirect_uri).trim() !== ""
+        ? String(body.redirect_uri).trim()
+        : undefined;
+    try {
+      const data = await exchangeAuthorizationCode({ code, redirect_uri });
+      const uid = Number(data.user_id);
+      const rt = data.refresh_token;
+      if (!Number.isFinite(uid) || uid <= 0 || typeof rt !== "string" || !rt.trim()) {
+        res.writeHead(502, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error: "respuesta ML sin user_id o refresh_token válidos",
+            debug: { keys: data && typeof data === "object" ? Object.keys(data) : [] },
+          })
+        );
+        return;
+      }
+      const nick =
+        typeof data.nickname === "string" && data.nickname.trim() !== ""
+          ? data.nickname.trim()
+          : null;
+      await upsertMlAccount(uid, rt.trim(), nick);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          ml_user_id: uid,
+          nickname: nick,
+          expires_in: data.expires_in != null ? Number(data.expires_in) : null,
+        })
+      );
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+    }
+    return;
+  }
+
   /** Varias cuentas ML: registrar refresh por user_id (misma app, distintos vendedores). */
   if (url.pathname === "/admin/ml-accounts") {
     if (req.method === "GET") {
@@ -2298,6 +2438,7 @@ server.listen(PORT, "0.0.0.0", () => {
       `Vaciar detalle ventas .ve: DELETE http://localhost:${PORT}/admin/ventas-detalle-web (cabecera X-Admin-Secret)`
     );
     console.log(`Cuentas ML: GET|POST|DELETE http://localhost:${PORT}/admin/ml-accounts (cabecera X-Admin-Secret)`);
+    console.log(`OAuth code→cuenta: POST http://localhost:${PORT}/admin/oauth-exchange (JSON code + X-Admin-Secret)`);
     console.log(`Cuentas (navegador): http://localhost:${PORT}/cuentas?k=TU_ADMIN_SECRET`);
     console.log(`Hooks guardados: http://localhost:${PORT}/hooks?k=TU_ADMIN_SECRET`);
     console.log(`Fetches ML: http://localhost:${PORT}/fetches?k=TU_ADMIN_SECRET (ML_WEBHOOK_FETCH_RESOURCE=1)`);

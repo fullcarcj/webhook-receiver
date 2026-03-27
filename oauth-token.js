@@ -419,6 +419,51 @@ if (keepaliveMs > 0) {
   }, keepaliveMs);
 }
 
+/**
+ * Intercambia el authorization `code` de la redirect URI por tokens (uso único; el code caduca rápido).
+ * @param {{ code: string, redirect_uri?: string }} p - Si omites redirect_uri, usa OAUTH_REDIRECT_URI / ML_REDIRECT_URI del entorno.
+ * @returns {Promise<object>} Respuesta JSON de ML (access_token, refresh_token, user_id, …)
+ */
+async function exchangeAuthorizationCode(p) {
+  const code = p && p.code != null ? String(p.code).trim() : "";
+  const client_id = process.env.OAUTH_CLIENT_ID || process.env.ML_CLIENT_ID;
+  const client_secret = process.env.OAUTH_CLIENT_SECRET || process.env.ML_CLIENT_SECRET;
+  const redirect =
+    (p && p.redirect_uri != null && String(p.redirect_uri).trim() !== ""
+      ? String(p.redirect_uri).trim()
+      : null) ||
+    process.env.OAUTH_REDIRECT_URI ||
+    process.env.ML_REDIRECT_URI;
+  if (!client_id || !client_secret) {
+    throw new Error("Configura OAUTH_CLIENT_ID y OAUTH_CLIENT_SECRET (app Mercado Libre)");
+  }
+  if (!code) {
+    throw new Error("Falta authorization code");
+  }
+  if (!redirect) {
+    throw new Error(
+      "Falta redirect_uri en el body o OAUTH_REDIRECT_URI / ML_REDIRECT_URI en el servidor (debe coincidir con la Redirect URI de la app en ML)"
+    );
+  }
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id,
+    client_secret,
+    code,
+    redirect_uri: redirect,
+  });
+  const res = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`oauth/token ${res.status}: ${text.slice(0, 800)}`);
+  }
+  return JSON.parse(text);
+}
+
 function getTokenStatus() {
   const at = cache.access_token;
   return {
@@ -457,6 +502,7 @@ module.exports = {
   mercadoLibreFetchForUser,
   mercadoLibrePostJsonForUser,
   normalizeMlResourcePath,
+  exchangeAuthorizationCode,
   getTokenStatus,
   getTokenStatusForMlUser,
   warmAllMlAccountsRefresh,

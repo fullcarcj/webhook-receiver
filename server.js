@@ -1,7 +1,14 @@
 require("./load-env-local");
 const path = require("path");
 const { ensureMlCookiesDir } = require("./ml-cookies-path");
+const { writeCookiesFromEnv } = require("./ml-cookies-from-env");
 ensureMlCookiesDir();
+(() => {
+  const { written } = writeCookiesFromEnv();
+  if (written.length) {
+    console.log("[cookies] escritas desde ML_COOKIE_NETSCAPE_* (env): %s", written.join(", "));
+  }
+})();
 if (process.env.ML_VENTAS_DETALLE_LOG_FILE === "1" || process.env.ML_VENTAS_DETALLE_LOG_FILE === "true") {
   const def = path.join(__dirname, "log.txt");
   const extra = process.env.ML_VENTAS_DETALLE_LOG_PATH;
@@ -45,6 +52,8 @@ const {
   deleteWebhooks,
   upsertMlAccount,
   listMlAccounts,
+  setMlAccountCookiesNetscape,
+  clearMlAccountCookiesNetscape,
   deleteMlAccount,
   insertTopicFetch,
   updateTopicFetch,
@@ -502,7 +511,7 @@ const server = http.createServer(async (req, res) => {
         },
         webhook: WEBHOOK_PATH,
         multi_cuentas_ml:
-          "POST /admin/ml-accounts (cabecera X-Admin-Secret) registra refresh por ml_user_id",
+          "POST /admin/ml-accounts (cabecera X-Admin-Secret) registra refresh por ml_user_id · POST /admin/ml-web-cookies JSON {ml_user_id, cookies_netscape} — cookies en BD; DELETE ?ml_user_id= — borra",
         oauth_token_status:
           "GET /oauth/token-status  o  ?ml_user_id=  (token enmascarado, sin secreto completo)",
         cuentas_ml:
@@ -524,7 +533,7 @@ const server = http.createServer(async (req, res) => {
         log_envios_postventa:
           "GET /envios-postventa?k=ADMIN_SECRET (historial). POST /envios-postventa/retry?k=… JSON {order_id,ml_user_id,buyer_id?} opcional force, topic",
         cookies_ml_web:
-          "ML_COOKIES_DIR: carpeta con cookies por cuenta ({ml_user_id}.txt). Por defecto carpeta data/ (ignorada en git).",
+          "Cookies detalle .ve: prioridad (1) ml_accounts.cookies_netscape (POST /admin/ml-web-cookies), (2) archivo, (3) ML_COOKIE_NETSCAPE_*. Formatos: Netscape, JSON o Header String (Cookie-Editor).",
         ventas_detalle_web:
           "ml_ventas_detalle_web.raw = HTML; GET /ventas-detalle-web?k= & format=json&include_raw=1 — POST retry JSON write_log:true o ML_VENTAS_DETALLE_LOG_FILE=1 → log.txt (ML_VENTAS_DETALLE_LOG_PATH opcional) — DELETE /admin/ventas-detalle-web vacía la tabla",
       })
@@ -660,6 +669,7 @@ const server = http.createServer(async (req, res) => {
             ml_user_id: uid,
             nickname: a.nickname,
             updated_at: a.updated_at,
+            cookies_web_stored: Boolean(a.cookies_web_stored),
             status: "ok",
             access_token_preview: st.access_token_preview || st.mask,
             expiresAtIso: st.expiresAtIso,
@@ -671,6 +681,7 @@ const server = http.createServer(async (req, res) => {
             ml_user_id: uid,
             nickname: a.nickname,
             updated_at: a.updated_at,
+            cookies_web_stored: Boolean(a.cookies_web_stored),
             status: "error",
             access_token_preview: null,
             expiresAtIso: null,
@@ -698,6 +709,10 @@ const server = http.createServer(async (req, res) => {
           : `<span class="err-msg">${escapeHtml(row.error)}</span>`;
         const caduca = ok ? escapeHtml(row.expiresAtIso) : "—";
         const seg = ok && row.secondsRemaining != null ? escapeHtml(row.secondsRemaining) : "—";
+        const ck =
+          row.cookies_web_stored === true
+            ? '<span class="badge ok">Sí</span>'
+            : '<span class="muted">No</span>';
         return `<tr>
   <td>${escapeHtml(row.ml_user_id)}</td>
   <td>${escapeHtml(row.nickname)}</td>
@@ -705,6 +720,7 @@ const server = http.createServer(async (req, res) => {
   <td>${tokenCell}</td>
   <td>${caduca}</td>
   <td>${seg}</td>
+  <td>${ck}</td>
   <td class="muted">${escapeHtml(row.updated_at)}</td>
 </tr>`;
       })
@@ -738,9 +754,9 @@ const server = http.createServer(async (req, res) => {
   <table>
     <thead><tr>
       <th>user_id</th><th>Nickname</th><th>Estado</th><th>Token (enmascarado)</th>
-      <th>Caduca (UTC)</th><th>Seg. restantes</th><th>Actualizado (DB)</th>
+      <th>Caduca (UTC)</th><th>Seg. restantes</th><th>Cookies web (BD)</th><th>Actualizado (DB)</th>
     </tr></thead>
-    <tbody>${rows || '<tr><td colspan="7">No hay cuentas registradas.</td></tr>'}</tbody>
+    <tbody>${rows || '<tr><td colspan="8">No hay cuentas registradas.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;
@@ -1767,6 +1783,78 @@ const server = http.createServer(async (req, res) => {
     }
     res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: false, error: "metodo no permitido" }));
+    return;
+  }
+
+  /** Cookies Netscape para GET detalle ventas (.ve); se guardan en ml_accounts.cookies_netscape. */
+  if (url.pathname === "/admin/ml-web-cookies" || url.pathname === "/admin/ml-web-cookies/") {
+    if (req.method === "POST") {
+      if (rejectAdminSecret(req, res)) return;
+      let body;
+      try {
+        body = await parseJsonBody(req);
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        return;
+      }
+      const mlUid = Number(body.ml_user_id);
+      const netscape =
+        typeof body.cookies_netscape === "string"
+          ? body.cookies_netscape
+          : typeof body.netscape === "string"
+            ? body.netscape
+            : null;
+      if (!Number.isFinite(mlUid) || mlUid <= 0 || netscape == null) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error: "requiere ml_user_id (numero) y cookies_netscape (string, texto Netscape)",
+          })
+        );
+        return;
+      }
+      try {
+        const updated = await setMlAccountCookiesNetscape(mlUid, netscape);
+        if (updated === 0) {
+          res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error: "no hay cuenta en ml_accounts para ese ml_user_id; registra primero con POST /admin/ml-accounts",
+            })
+          );
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, ml_user_id: mlUid, updated }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+    if (req.method === "DELETE") {
+      if (rejectAdminSecret(req, res)) return;
+      const uid = Number(url.searchParams.get("ml_user_id"));
+      if (!Number.isFinite(uid) || uid <= 0) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "usa ?ml_user_id=123" }));
+        return;
+      }
+      try {
+        const deleted = await clearMlAccountCookiesNetscape(uid);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, ml_user_id: uid, cleared: deleted > 0 }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "usa POST o DELETE" }));
     return;
   }
 

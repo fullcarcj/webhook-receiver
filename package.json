@@ -9,6 +9,7 @@
     "exchange-code": "node exchange-auth-code.js",
     "test-conexion": "node test-conexion.js",
     "test-ventas-detalle": "node test-ventas-detalle-celular.js",
+    "test-ml-cookies": "node test-ml-netscape-cookies.js",
     "registrar-cuenta": "node registrar-cuenta-ml.js",
     "ver-token": "node ver-token.js"
   },

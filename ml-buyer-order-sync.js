@@ -1,8 +1,17 @@
 /**
  * Tras GET de orden (orders_v2): crea buyer o actualiza; si ya existía y ML trae datos distintos, rellena cambio_datos.
+ *
+ * ml_buyers.cambio_datos: **última** anotación de cambio (se sobrescribe en cada actualización con diff),
+ * respecto a nickname, nombre_apellido, phone_1 o phone_2 en esa operación. Origen: Orden ML (webhook/API)
+ * o Detalle ventas ML (HTML GET detalle).
  */
 const { getMlBuyer, upsertMlBuyer } = require("./db");
 const { normalizeCambioDatos, normalizeNombreApellido } = require("./ml-buyer-pref");
+
+/** Prefijo en cambio_datos cuando el diff viene del payload de orden / webhook. */
+const CAMBIO_SOURCE_ORDEN_ML = "Orden ML";
+/** Prefijo cuando el diff viene del parser HTML del detalle de venta. */
+const CAMBIO_SOURCE_DETALLE_VENTAS = "Detalle ventas ML";
 
 function normField(v) {
   if (v == null || v === "") return null;
@@ -24,11 +33,17 @@ function buyerCoreFieldsDiffer(existing, incoming) {
 }
 
 /**
- * Texto para ml_buyers.cambio_datos cuando ML devuelve datos distintos a los guardados.
- * @param {{ nickname?: string|null, phone_1?: string|null, phone_2?: string|null }} existing
- * @param {{ nickname?: string|null, phone_1?: string|null, phone_2?: string|null }} incoming
+ * Texto para ml_buyers.cambio_datos: **un** registro por operación (último cambio en esa operación),
+ * listando cada campo de core que difiere (nickname, nombre_apellido, phone_1, phone_2).
+ * @param {{ nickname?: string|null, nombre_apellido?: string|null, phone_1?: string|null, phone_2?: string|null }} existing
+ * @param {{ nickname?: string|null, nombre_apellido?: string|null, phone_1?: string|null, phone_2?: string|null }} incoming
+ * @param {{ source?: string }} [opts]
  */
-function buildCambioDatosFromDiff(existing, incoming) {
+function buildCambioDatosFromDiff(existing, incoming, opts = {}) {
+  const source =
+    opts.source != null && String(opts.source).trim() !== ""
+      ? String(opts.source).trim()
+      : CAMBIO_SOURCE_ORDEN_ML;
   const parts = [];
   const pushIf = (label, oldV, newV) => {
     const o = normField(oldV);
@@ -45,7 +60,7 @@ function buildCambioDatosFromDiff(existing, incoming) {
   pushIf("phone_2", existing.phone_2, incoming.phone_2);
   if (parts.length === 0) return null;
   const stamp = new Date().toISOString();
-  const raw = `Orden ML ${stamp}. ${parts.join("; ")}`;
+  const raw = `${source} ${stamp}. ${parts.join("; ")}`;
   return normalizeCambioDatos(raw);
 }
 
@@ -54,18 +69,24 @@ function buildCambioDatosFromDiff(existing, incoming) {
  */
 async function upsertBuyerFromOrdersV2Webhook(buyer) {
   if (!buyer || buyer.buyer_id == null) return;
+  const { _cambioSource, ...row } = buyer;
+  const cambioSource =
+    _cambioSource != null && String(_cambioSource).trim() !== ""
+      ? String(_cambioSource).trim()
+      : CAMBIO_SOURCE_ORDEN_ML;
+
   const existing = await getMlBuyer(buyer.buyer_id);
   if (!existing) {
-    await upsertMlBuyer(buyer);
+    await upsertMlBuyer(row);
     return;
   }
-  if (!buyerCoreFieldsDiffer(existing, buyer)) {
-    await upsertMlBuyer(buyer);
+  if (!buyerCoreFieldsDiffer(existing, row)) {
+    await upsertMlBuyer(row);
     return;
   }
-  const note = buildCambioDatosFromDiff(existing, buyer);
+  const note = buildCambioDatosFromDiff(existing, row, { source: cambioSource });
   await upsertMlBuyer({
-    ...buyer,
+    ...row,
     ...(note ? { cambio_datos: note } : {}),
   });
 }
@@ -87,6 +108,7 @@ async function mergeNombreApellidoFromVentasDetalle(buyerId, nombreRaw) {
     phone_1: existing.phone_1,
     phone_2: existing.phone_2,
     nombre_apellido: norm,
+    _cambioSource: CAMBIO_SOURCE_DETALLE_VENTAS,
   });
 }
 
@@ -95,4 +117,6 @@ module.exports = {
   buyerCoreFieldsDiffer,
   buildCambioDatosFromDiff,
   mergeNombreApellidoFromVentasDetalle,
+  CAMBIO_SOURCE_ORDEN_ML,
+  CAMBIO_SOURCE_DETALLE_VENTAS,
 };

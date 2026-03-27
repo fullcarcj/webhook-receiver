@@ -193,6 +193,23 @@ db.exec(`
   }
 })();
 
+(function migrateMlAccountsCookiesNetscape() {
+  try {
+    const t = db.prepare("PRAGMA table_info(ml_accounts)").all();
+    const names = new Set(t.map((c) => c.name));
+    if (!names.has("cookies_netscape")) {
+      db.exec("ALTER TABLE ml_accounts ADD COLUMN cookies_netscape TEXT");
+      console.log("[db] ml_accounts: columna cookies_netscape añadida (migración)");
+    }
+    if (!names.has("cookies_updated_at")) {
+      db.exec("ALTER TABLE ml_accounts ADD COLUMN cookies_updated_at TEXT");
+      console.log("[db] ml_accounts: columna cookies_updated_at añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_accounts cookies netscape:", e.message);
+  }
+})();
+
 (function migrateMlBuyersPrefEntrega() {
   try {
     const t = db.prepare("PRAGMA table_info(ml_buyers)").all();
@@ -472,9 +489,48 @@ function getMlAccount(mlUserId) {
 }
 
 function listMlAccounts() {
-  return db
-    .prepare(`SELECT ml_user_id, nickname, updated_at FROM ml_accounts ORDER BY ml_user_id`)
+  const rows = db
+    .prepare(
+      `SELECT ml_user_id, nickname, updated_at,
+              CASE WHEN cookies_netscape IS NOT NULL AND LENGTH(TRIM(cookies_netscape)) > 0
+                   THEN 1 ELSE 0 END AS cookies_web_stored
+       FROM ml_accounts ORDER BY ml_user_id`
+    )
     .all();
+  return rows.map((r) => ({
+    ml_user_id: r.ml_user_id,
+    nickname: r.nickname,
+    updated_at: r.updated_at,
+    cookies_web_stored: Number(r.cookies_web_stored) === 1,
+  }));
+}
+
+function getMlAccountCookiesNetscape(mlUserId) {
+  const row = db
+    .prepare(`SELECT cookies_netscape FROM ml_accounts WHERE ml_user_id = ?`)
+    .get(mlUserId);
+  const v = row && row.cookies_netscape != null ? String(row.cookies_netscape) : "";
+  return v.trim() !== "" ? v : null;
+}
+
+function setMlAccountCookiesNetscape(mlUserId, netscapeText) {
+  const now = new Date().toISOString();
+  const raw = netscapeText != null ? String(netscapeText) : "";
+  const info = db
+    .prepare(
+      `UPDATE ml_accounts SET cookies_netscape = ?, cookies_updated_at = ? WHERE ml_user_id = ?`
+    )
+    .run(raw.trim() === "" ? null : raw, now, mlUserId);
+  return info.changes || 0;
+}
+
+function clearMlAccountCookiesNetscape(mlUserId) {
+  const info = db
+    .prepare(
+      `UPDATE ml_accounts SET cookies_netscape = NULL, cookies_updated_at = NULL WHERE ml_user_id = ?`
+    )
+    .run(mlUserId);
+  return info.changes || 0;
 }
 
 function deleteMlAccount(mlUserId) {
@@ -978,6 +1034,9 @@ module.exports = {
   upsertMlAccount,
   getMlAccount,
   listMlAccounts,
+  getMlAccountCookiesNetscape,
+  setMlAccountCookiesNetscape,
+  clearMlAccountCookiesNetscape,
   deleteMlAccount,
   insertTopicFetch,
   updateTopicFetch,

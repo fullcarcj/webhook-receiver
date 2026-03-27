@@ -186,6 +186,31 @@ async function runSchemaAndSeed() {
   await migrateMlBuyersActualizacionYDefaults();
   await migrateMlBuyersNombreApellido();
   await migrateMlVentasDetalleAnchorPositions();
+  await migrateMlAccountsCookiesNetscape();
+}
+
+/** Cookies Netscape para GET detalle ventas (.ve); opcional por cuenta (prioridad sobre archivo). */
+async function migrateMlAccountsCookiesNetscape() {
+  try {
+    const { rows: c1 } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_accounts' AND column_name = 'cookies_netscape'`
+    );
+    if (c1.length === 0) {
+      await pool.query(`ALTER TABLE ml_accounts ADD COLUMN cookies_netscape TEXT`);
+      console.log("[db] ml_accounts: columna cookies_netscape añadida (migración)");
+    }
+    const { rows: c2 } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_accounts' AND column_name = 'cookies_updated_at'`
+    );
+    if (c2.length === 0) {
+      await pool.query(`ALTER TABLE ml_accounts ADD COLUMN cookies_updated_at TEXT`);
+      console.log("[db] ml_accounts: columna cookies_updated_at añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_accounts cookies netscape:", e.message);
+  }
 }
 
 /** Columnas de prueba: índice 0-based primera aparición buyer_info_text y label en raw. */
@@ -419,9 +444,57 @@ async function getMlAccount(mlUserId) {
 async function listMlAccounts() {
   await ensureSchema();
   const { rows } = await pool.query(
-    `SELECT ml_user_id, nickname, updated_at FROM ml_accounts ORDER BY ml_user_id`
+    `SELECT ml_user_id, nickname, updated_at,
+            CASE WHEN cookies_netscape IS NOT NULL AND LENGTH(TRIM(cookies_netscape)) > 0
+                 THEN 1 ELSE 0 END AS cookies_web_stored
+     FROM ml_accounts ORDER BY ml_user_id`
   );
-  return rows;
+  return rows.map((r) => ({
+    ml_user_id: r.ml_user_id,
+    nickname: r.nickname,
+    updated_at: r.updated_at,
+    cookies_web_stored: Number(r.cookies_web_stored) === 1,
+  }));
+}
+
+/**
+ * Texto Netscape guardado en BD para `ml_user_id`, o null si no hay.
+ * @param {number} mlUserId
+ * @returns {Promise<string|null>}
+ */
+async function getMlAccountCookiesNetscape(mlUserId) {
+  await ensureSchema();
+  const { rows } = await pool.query(
+    `SELECT cookies_netscape FROM ml_accounts WHERE ml_user_id = $1`,
+    [mlUserId]
+  );
+  const v = rows[0] && rows[0].cookies_netscape != null ? String(rows[0].cookies_netscape) : "";
+  return v.trim() !== "" ? v : null;
+}
+
+/**
+ * Guarda cookies Netscape para detalle ventas web. Requiere fila existente en ml_accounts.
+ * @returns {Promise<number>} filas actualizadas (0 si no existe la cuenta)
+ */
+async function setMlAccountCookiesNetscape(mlUserId, netscapeText) {
+  await ensureSchema();
+  const now = new Date().toISOString();
+  const raw = netscapeText != null ? String(netscapeText) : "";
+  const { rowCount } = await pool.query(
+    `UPDATE ml_accounts SET cookies_netscape = $1, cookies_updated_at = $2 WHERE ml_user_id = $3`,
+    [raw.trim() === "" ? null : raw, now, mlUserId]
+  );
+  return rowCount || 0;
+}
+
+/** Quita cookies web de la cuenta (vuelve a usar archivo / env si existen). */
+async function clearMlAccountCookiesNetscape(mlUserId) {
+  await ensureSchema();
+  const { rowCount } = await pool.query(
+    `UPDATE ml_accounts SET cookies_netscape = NULL, cookies_updated_at = NULL WHERE ml_user_id = $1`,
+    [mlUserId]
+  );
+  return rowCount || 0;
 }
 
 async function deleteMlAccount(mlUserId) {
@@ -942,6 +1015,9 @@ module.exports = {
   upsertMlAccount,
   getMlAccount,
   listMlAccounts,
+  getMlAccountCookiesNetscape,
+  setMlAccountCookiesNetscape,
+  clearMlAccountCookiesNetscape,
   deleteMlAccount,
   insertTopicFetch,
   updateTopicFetch,

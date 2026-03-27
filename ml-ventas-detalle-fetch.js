@@ -11,7 +11,7 @@ const {
   extractNombreApellidoFromVentasHtml,
   computeVentasDetalleAnchorPositions,
 } = require("./ml-ventas-detalle-celular");
-const { insertMlVentasDetalleWeb } = require("./db");
+const { insertMlVentasDetalleWeb, getMlAccountCookiesNetscape } = require("./db");
 const { mergeNombreApellidoFromVentasDetalle } = require("./ml-buyer-order-sync");
 
 const DEFAULT_BASE = "https://www.mercadolibre.com.ve/ventas/";
@@ -90,43 +90,74 @@ async function fetchVentasDetalleAndStore(args) {
     return { ok: false, skip: "bad_ids" };
   }
 
-  const cookiePath = getMlAccountCookiesFilePath(mlUserId);
-  if (!cookiePath || !fs.existsSync(cookiePath)) {
-    try {
-      await insertMlVentasDetalleWeb({
-        ml_user_id: mlUserId,
-        order_id: orderId,
-        request_url: "(sin archivo cookies)",
-        http_status: null,
-        raw: null,
-        celular: null,
-        error: `no_cookie_file:${cookiePath || "null"}`,
-      });
-    } catch (e) {
-      console.error("[ventas-detalle] log sin cookies:", e.message);
+  let rawNetscape = null;
+  let cookieRef = "(sin fuente cookies)";
+  try {
+    rawNetscape = await getMlAccountCookiesNetscape(mlUserId);
+    if (rawNetscape != null && String(rawNetscape).trim() !== "") {
+      cookieRef = "(cookies en base de datos)";
     }
-    return { ok: false, skip: "no_cookie_file", path: cookiePath };
+  } catch (e) {
+    console.error("[ventas-detalle] lectura cookies BD:", e.message);
+  }
+
+  if (rawNetscape == null || String(rawNetscape).trim() === "") {
+    const cookiePath = getMlAccountCookiesFilePath(mlUserId);
+    if (!cookiePath || !fs.existsSync(cookiePath)) {
+      try {
+        await insertMlVentasDetalleWeb({
+          ml_user_id: mlUserId,
+          order_id: orderId,
+          request_url: "(sin archivo cookies)",
+          http_status: null,
+          raw: null,
+          celular: null,
+          error: `no_cookie_file:${cookiePath || "null"}`,
+        });
+      } catch (e) {
+        console.error("[ventas-detalle] log sin cookies:", e.message);
+      }
+      return { ok: false, skip: "no_cookie_file", path: cookiePath };
+    }
+    cookieRef = cookiePath;
+    try {
+      rawNetscape = fs.readFileSync(cookiePath, "utf8");
+    } catch (e) {
+      try {
+        await insertMlVentasDetalleWeb({
+          ml_user_id: mlUserId,
+          order_id: orderId,
+          request_url: cookiePath,
+          http_status: null,
+          raw: null,
+          celular: null,
+          error: `cookie_read:${e.message || String(e)}`,
+        });
+      } catch (err2) {
+        console.error("[ventas-detalle] log read error:", err2.message);
+      }
+      return { ok: false, skip: "cookie_read_error" };
+    }
   }
 
   let cookieHeader;
   try {
-    const raw = fs.readFileSync(cookiePath, "utf8");
-    cookieHeader = buildCookieHeaderFromNetscapeFile(raw);
+    cookieHeader = buildCookieHeaderFromNetscapeFile(rawNetscape);
   } catch (e) {
     try {
       await insertMlVentasDetalleWeb({
         ml_user_id: mlUserId,
         order_id: orderId,
-        request_url: cookiePath,
+        request_url: cookieRef,
         http_status: null,
         raw: null,
         celular: null,
-        error: `cookie_read:${e.message || String(e)}`,
+        error: `cookie_parse:${e.message || String(e)}`,
       });
     } catch (err2) {
-      console.error("[ventas-detalle] log read error:", err2.message);
+      console.error("[ventas-detalle] log parse error:", err2.message);
     }
-    return { ok: false, skip: "cookie_read_error" };
+    return { ok: false, skip: "cookie_parse_error" };
   }
 
   if (!cookieHeader || !String(cookieHeader).trim()) {
@@ -134,7 +165,7 @@ async function fetchVentasDetalleAndStore(args) {
       await insertMlVentasDetalleWeb({
         ml_user_id: mlUserId,
         order_id: orderId,
-        request_url: cookiePath,
+        request_url: cookieRef,
         http_status: null,
         raw: null,
         celular: null,

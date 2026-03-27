@@ -311,10 +311,32 @@ function normalizeMlResourcePath(topic, resource) {
   return `/${r}`;
 }
 
+/**
+ * GET /questions/{id} sin api_version puede omitir o formatear distinto las fechas;
+ * la documentación pide api_version=4 para el JSON estable (date_created, etc.).
+ * No aplica a /questions/search (solo a una pregunta por ID numérico).
+ * @param {string} resourcePath
+ */
+function appendMlQuestionsApiVersionIfNeeded(resourcePath) {
+  if (!resourcePath || typeof resourcePath !== "string") return resourcePath;
+  const path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
+  const qm = path.indexOf("?");
+  const pathname = qm >= 0 ? path.slice(0, qm) : path;
+  const search = qm >= 0 ? path.slice(1 + qm) : "";
+  if (!/^\/questions\/\d+$/i.test(pathname)) return path;
+  const params = new URLSearchParams(search);
+  if (!params.has("api_version")) {
+    params.set("api_version", "4");
+  }
+  const q = params.toString();
+  return q ? `${pathname}?${q}` : pathname;
+}
+
 async function mercadoLibreGetWithToken(getToken, resourcePath) {
   const token = await getToken();
   const base = process.env.ML_API_BASE || "https://api.mercadolibre.com";
-  const path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
+  let path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
+  path = appendMlQuestionsApiVersionIfNeeded(path);
   const url = `${base}${path}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
@@ -336,7 +358,8 @@ async function mercadoLibreGetWithToken(getToken, resourcePath) {
 async function mercadoLibreFetchForUser(mlUserId, resourcePath) {
   const token = await getAccessTokenForMlUser(mlUserId);
   const base = process.env.ML_API_BASE || "https://api.mercadolibre.com";
-  const path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
+  let path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
+  path = appendMlQuestionsApiVersionIfNeeded(path);
   const url = `${base}${path}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },

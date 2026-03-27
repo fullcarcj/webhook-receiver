@@ -61,6 +61,7 @@ if (usePostgres) {
     listMlVentasDetalleWeb: wrap(sqlite.listMlVentasDetalleWeb),
     deleteAllMlVentasDetalleWeb: wrap(sqlite.deleteAllMlVentasDetalleWeb),
     upsertMlQuestionPending: wrap(sqlite.upsertMlQuestionPending),
+    getMlQuestionPendingByQuestionId: wrap(sqlite.getMlQuestionPendingByQuestionId),
     deleteMlQuestionPending: wrap(sqlite.deleteMlQuestionPending),
     upsertMlQuestionAnswered: wrap(sqlite.upsertMlQuestionAnswered),
     listMlQuestionsPending: wrap(sqlite.listMlQuestionsPending),

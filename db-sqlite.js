@@ -127,6 +127,7 @@ db.exec(`
     buyer_id INTEGER,
     question_text TEXT,
     ml_status TEXT,
+    date_created TEXT,
     raw_json TEXT,
     notification_id TEXT,
     created_at TEXT NOT NULL,
@@ -144,13 +145,15 @@ db.exec(`
     question_text TEXT,
     answer_text TEXT NOT NULL,
     ml_status TEXT,
+    date_created TEXT,
     raw_json TEXT,
     notification_id TEXT,
     pending_internal_id INTEGER,
     answered_at TEXT NOT NULL,
     moved_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    response_time_sec INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_ml_questions_answered_user ON ml_questions_answered(ml_user_id);
   CREATE INDEX IF NOT EXISTS idx_ml_questions_answered_at ON ml_questions_answered(answered_at);
@@ -451,6 +454,38 @@ const FETCH_PROCESS_STATUS_POST_SALE_FAILED = "Fallo post-venta";
     );
   } catch (e) {
     console.error("[db] migrate ml_topic_fetches process_status:", e.message);
+  }
+})();
+
+(function migrateMlQuestionsAnsweredResponseTimeSec() {
+  try {
+    const cols = db.prepare("PRAGMA table_info(ml_questions_answered)").all();
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has("response_time_sec")) {
+      db.exec("ALTER TABLE ml_questions_answered ADD COLUMN response_time_sec INTEGER");
+      console.log("[db] ml_questions_answered: columna response_time_sec añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_questions_answered response_time_sec:", e.message);
+  }
+})();
+
+(function migrateMlQuestionsDateCreated() {
+  try {
+    const p = db.prepare("PRAGMA table_info(ml_questions_pending)").all();
+    const pn = new Set(p.map((c) => c.name));
+    if (!pn.has("date_created")) {
+      db.exec("ALTER TABLE ml_questions_pending ADD COLUMN date_created TEXT");
+      console.log("[db] ml_questions_pending: columna date_created añadida (migración)");
+    }
+    const a = db.prepare("PRAGMA table_info(ml_questions_answered)").all();
+    const an = new Set(a.map((c) => c.name));
+    if (!an.has("date_created")) {
+      db.exec("ALTER TABLE ml_questions_answered ADD COLUMN date_created TEXT");
+      console.log("[db] ml_questions_answered: columna date_created añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_questions date_created:", e.message);
   }
 })();
 
@@ -1072,14 +1107,15 @@ function deleteAllMlVentasDetalleWeb() {
 
 const upsertMlQuestionPendingStmt = db.prepare(
   `INSERT INTO ml_questions_pending (
-     ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, raw_json, notification_id, created_at, updated_at
-   ) VALUES (@ml_question_id, @ml_user_id, @item_id, @buyer_id, @question_text, @ml_status, @raw_json, @notification_id, @created_at, @updated_at)
+     ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, created_at, updated_at
+   ) VALUES (@ml_question_id, @ml_user_id, @item_id, @buyer_id, @question_text, @ml_status, @date_created, @raw_json, @notification_id, @created_at, @updated_at)
    ON CONFLICT(ml_question_id) DO UPDATE SET
      ml_user_id = excluded.ml_user_id,
      item_id = excluded.item_id,
      buyer_id = excluded.buyer_id,
      question_text = excluded.question_text,
      ml_status = excluded.ml_status,
+     date_created = excluded.date_created,
      raw_json = excluded.raw_json,
      notification_id = excluded.notification_id,
      updated_at = excluded.updated_at`
@@ -1099,6 +1135,7 @@ function upsertMlQuestionPending(row) {
     buyer_id: row.buyer_id != null ? Number(row.buyer_id) : null,
     question_text: row.question_text != null ? String(row.question_text) : null,
     ml_status: row.ml_status != null ? String(row.ml_status) : null,
+    date_created: row.date_created != null ? String(row.date_created) : null,
     raw_json: row.raw_json != null ? String(row.raw_json) : null,
     notification_id: row.notification_id != null ? String(row.notification_id) : null,
     created_at: now,
@@ -1106,6 +1143,19 @@ function upsertMlQuestionPending(row) {
   });
   const r = db.prepare("SELECT id FROM ml_questions_pending WHERE ml_question_id = ?").get(qid);
   return r && r.id != null ? Number(r.id) : null;
+}
+
+function getMlQuestionPendingByQuestionId(mlQuestionId) {
+  const qid = Number(mlQuestionId);
+  if (!Number.isFinite(qid) || qid <= 0) return null;
+  return (
+    db
+      .prepare(
+        `SELECT id, ml_question_id, ml_user_id, date_created, raw_json
+         FROM ml_questions_pending WHERE ml_question_id = ?`
+      )
+      .get(qid) || null
+  );
 }
 
 function deleteMlQuestionPending(mlQuestionId) {
@@ -1116,8 +1166,8 @@ function deleteMlQuestionPending(mlQuestionId) {
 
 const upsertMlQuestionAnsweredStmt = db.prepare(
   `INSERT INTO ml_questions_answered (
-     ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at
-   ) VALUES (@ml_question_id, @ml_user_id, @item_id, @buyer_id, @question_text, @answer_text, @ml_status, @raw_json, @notification_id, @pending_internal_id, @answered_at, @moved_at, @created_at, @updated_at)
+     ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, date_created, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at, response_time_sec
+   ) VALUES (@ml_question_id, @ml_user_id, @item_id, @buyer_id, @question_text, @answer_text, @ml_status, @date_created, @raw_json, @notification_id, @pending_internal_id, @answered_at, @moved_at, @created_at, @updated_at, @response_time_sec)
    ON CONFLICT(ml_question_id) DO UPDATE SET
      ml_user_id = excluded.ml_user_id,
      item_id = excluded.item_id,
@@ -1125,12 +1175,14 @@ const upsertMlQuestionAnsweredStmt = db.prepare(
      question_text = excluded.question_text,
      answer_text = excluded.answer_text,
      ml_status = excluded.ml_status,
+     date_created = excluded.date_created,
      raw_json = excluded.raw_json,
      notification_id = excluded.notification_id,
      pending_internal_id = excluded.pending_internal_id,
      answered_at = excluded.answered_at,
      moved_at = excluded.moved_at,
-     updated_at = excluded.updated_at`
+     updated_at = excluded.updated_at,
+     response_time_sec = excluded.response_time_sec`
 );
 
 function upsertMlQuestionAnswered(row) {
@@ -1145,6 +1197,10 @@ function upsertMlQuestionAnswered(row) {
   const movedAt = row.moved_at != null ? String(row.moved_at) : now;
   const createdAt = row.created_at != null ? String(row.created_at) : now;
   const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  const rts =
+    row.response_time_sec != null && Number.isFinite(Number(row.response_time_sec))
+      ? Math.floor(Number(row.response_time_sec))
+      : null;
   upsertMlQuestionAnsweredStmt.run({
     ml_question_id: qid,
     ml_user_id: mlUid,
@@ -1153,6 +1209,7 @@ function upsertMlQuestionAnswered(row) {
     question_text: row.question_text != null ? String(row.question_text) : null,
     answer_text: answerText,
     ml_status: row.ml_status != null ? String(row.ml_status) : null,
+    date_created: row.date_created != null ? String(row.date_created) : null,
     raw_json: row.raw_json != null ? String(row.raw_json) : null,
     notification_id: row.notification_id != null ? String(row.notification_id) : null,
     pending_internal_id: row.pending_internal_id != null ? Number(row.pending_internal_id) : null,
@@ -1160,6 +1217,7 @@ function upsertMlQuestionAnswered(row) {
     moved_at: movedAt,
     created_at: createdAt,
     updated_at: updatedAt,
+    response_time_sec: rts,
   });
   const r = db.prepare("SELECT id FROM ml_questions_answered WHERE ml_question_id = ?").get(qid);
   return r && r.id != null ? Number(r.id) : null;
@@ -1170,7 +1228,7 @@ function listMlQuestionsPending(limit, maxAllowed) {
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   return db
     .prepare(
-      `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, raw_json, notification_id, created_at, updated_at
+      `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, created_at, updated_at
        FROM ml_questions_pending ORDER BY id DESC LIMIT ?`
     )
     .all(n);
@@ -1181,7 +1239,7 @@ function listMlQuestionsAnswered(limit, maxAllowed) {
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   return db
     .prepare(
-      `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at
+      `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, date_created, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at, response_time_sec
        FROM ml_questions_answered ORDER BY id DESC LIMIT ?`
     )
     .all(n);
@@ -1229,6 +1287,7 @@ module.exports = {
   listMlVentasDetalleWeb,
   deleteAllMlVentasDetalleWeb,
   upsertMlQuestionPending,
+  getMlQuestionPendingByQuestionId,
   deleteMlQuestionPending,
   upsertMlQuestionAnswered,
   listMlQuestionsPending,

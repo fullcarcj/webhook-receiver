@@ -173,6 +173,7 @@ async function runSchemaAndSeed() {
       buyer_id BIGINT,
       question_text TEXT,
       ml_status TEXT,
+      date_created TEXT,
       raw_json TEXT,
       notification_id TEXT,
       created_at TEXT NOT NULL,
@@ -189,13 +190,15 @@ async function runSchemaAndSeed() {
       question_text TEXT,
       answer_text TEXT NOT NULL,
       ml_status TEXT,
+      date_created TEXT,
       raw_json TEXT,
       notification_id TEXT,
       pending_internal_id BIGINT,
       answered_at TEXT NOT NULL,
       moved_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      response_time_sec INTEGER
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_questions_answered_user ON ml_questions_answered(ml_user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_questions_answered_at ON ml_questions_answered(answered_at)`,
@@ -233,6 +236,46 @@ async function runSchemaAndSeed() {
   await migrateMlBuyersNombreApellido();
   await migrateMlVentasDetalleAnchorPositions();
   await migrateMlAccountsCookiesNetscape();
+  await migrateMlQuestionsAnsweredResponseTimeSec();
+  await migrateMlQuestionsDateCreated();
+}
+
+async function migrateMlQuestionsAnsweredResponseTimeSec() {
+  try {
+    const { rows: col } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_questions_answered' AND column_name = 'response_time_sec'`
+    );
+    if (col.length === 0) {
+      await pool.query(`ALTER TABLE ml_questions_answered ADD COLUMN response_time_sec INTEGER`);
+      console.log("[db] ml_questions_answered: columna response_time_sec añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_questions_answered response_time_sec:", e.message);
+  }
+}
+
+async function migrateMlQuestionsDateCreated() {
+  try {
+    const { rows: p } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_questions_pending' AND column_name = 'date_created'`
+    );
+    if (p.length === 0) {
+      await pool.query(`ALTER TABLE ml_questions_pending ADD COLUMN date_created TEXT`);
+      console.log("[db] ml_questions_pending: columna date_created añadida (migración)");
+    }
+    const { rows: a } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_questions_answered' AND column_name = 'date_created'`
+    );
+    if (a.length === 0) {
+      await pool.query(`ALTER TABLE ml_questions_answered ADD COLUMN date_created TEXT`);
+      console.log("[db] ml_questions_answered: columna date_created añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_questions date_created:", e.message);
+  }
 }
 
 /** Cookies Netscape para GET detalle ventas (.ve); opcional por cuenta (prioridad sobre archivo). */
@@ -966,14 +1009,15 @@ async function upsertMlQuestionPending(row) {
   const now = new Date().toISOString();
   const { rows } = await pool.query(
     `INSERT INTO ml_questions_pending (
-       ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, raw_json, notification_id, created_at, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, created_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      ON CONFLICT (ml_question_id) DO UPDATE SET
        ml_user_id = EXCLUDED.ml_user_id,
        item_id = EXCLUDED.item_id,
        buyer_id = EXCLUDED.buyer_id,
        question_text = EXCLUDED.question_text,
        ml_status = EXCLUDED.ml_status,
+       date_created = EXCLUDED.date_created,
        raw_json = EXCLUDED.raw_json,
        notification_id = EXCLUDED.notification_id,
        updated_at = EXCLUDED.updated_at
@@ -985,6 +1029,7 @@ async function upsertMlQuestionPending(row) {
       row.buyer_id != null ? Number(row.buyer_id) : null,
       row.question_text != null ? String(row.question_text) : null,
       row.ml_status != null ? String(row.ml_status) : null,
+      row.date_created != null ? String(row.date_created) : null,
       row.raw_json != null ? String(row.raw_json) : null,
       row.notification_id != null ? String(row.notification_id) : null,
       now,
@@ -992,6 +1037,23 @@ async function upsertMlQuestionPending(row) {
     ]
   );
   return rows[0] ? Number(rows[0].id) : null;
+}
+
+/**
+ * Fila en pending por id de pregunta ML (p. ej. para reutilizar date_created al pasar a answered).
+ * @param {number|string} mlQuestionId
+ * @returns {Promise<object|null>}
+ */
+async function getMlQuestionPendingByQuestionId(mlQuestionId) {
+  await ensureSchema();
+  const qid = Number(mlQuestionId);
+  if (!Number.isFinite(qid) || qid <= 0) return null;
+  const { rows } = await pool.query(
+    `SELECT id, ml_question_id, ml_user_id, date_created, raw_json
+     FROM ml_questions_pending WHERE ml_question_id = $1`,
+    [qid]
+  );
+  return rows[0] || null;
 }
 
 async function deleteMlQuestionPending(mlQuestionId) {
@@ -1015,10 +1077,14 @@ async function upsertMlQuestionAnswered(row) {
   const movedAt = row.moved_at != null ? String(row.moved_at) : now;
   const createdAt = row.created_at != null ? String(row.created_at) : now;
   const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  const rts =
+    row.response_time_sec != null && Number.isFinite(Number(row.response_time_sec))
+      ? Math.floor(Number(row.response_time_sec))
+      : null;
   const { rows } = await pool.query(
     `INSERT INTO ml_questions_answered (
-       ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, date_created, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at, response_time_sec
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
      ON CONFLICT (ml_question_id) DO UPDATE SET
        ml_user_id = EXCLUDED.ml_user_id,
        item_id = EXCLUDED.item_id,
@@ -1026,12 +1092,14 @@ async function upsertMlQuestionAnswered(row) {
        question_text = EXCLUDED.question_text,
        answer_text = EXCLUDED.answer_text,
        ml_status = EXCLUDED.ml_status,
+       date_created = EXCLUDED.date_created,
        raw_json = EXCLUDED.raw_json,
        notification_id = EXCLUDED.notification_id,
        pending_internal_id = EXCLUDED.pending_internal_id,
        answered_at = EXCLUDED.answered_at,
        moved_at = EXCLUDED.moved_at,
-       updated_at = EXCLUDED.updated_at
+       updated_at = EXCLUDED.updated_at,
+       response_time_sec = EXCLUDED.response_time_sec
      RETURNING id`,
     [
       qid,
@@ -1041,6 +1109,7 @@ async function upsertMlQuestionAnswered(row) {
       row.question_text != null ? String(row.question_text) : null,
       answerText,
       row.ml_status != null ? String(row.ml_status) : null,
+      row.date_created != null ? String(row.date_created) : null,
       row.raw_json != null ? String(row.raw_json) : null,
       row.notification_id != null ? String(row.notification_id) : null,
       row.pending_internal_id != null ? Number(row.pending_internal_id) : null,
@@ -1048,6 +1117,7 @@ async function upsertMlQuestionAnswered(row) {
       movedAt,
       createdAt,
       updatedAt,
+      rts,
     ]
   );
   return rows[0] ? Number(rows[0].id) : null;
@@ -1058,7 +1128,7 @@ async function listMlQuestionsPending(limit, maxAllowed) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   const { rows } = await pool.query(
-    `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, raw_json, notification_id, created_at, updated_at
+    `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, created_at, updated_at
      FROM ml_questions_pending ORDER BY id DESC LIMIT $1`,
     [n]
   );
@@ -1070,7 +1140,7 @@ async function listMlQuestionsAnswered(limit, maxAllowed) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   const { rows } = await pool.query(
-    `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at
+    `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, date_created, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at, response_time_sec
      FROM ml_questions_answered ORDER BY id DESC LIMIT $1`,
     [n]
   );
@@ -1241,6 +1311,7 @@ module.exports = {
   listMlVentasDetalleWeb,
   deleteAllMlVentasDetalleWeb,
   upsertMlQuestionPending,
+  getMlQuestionPendingByQuestionId,
   deleteMlQuestionPending,
   upsertMlQuestionAnswered,
   listMlQuestionsPending,

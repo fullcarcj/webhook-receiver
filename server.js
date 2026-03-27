@@ -36,6 +36,7 @@ const { fetchVentasDetalleAndStore } = require("./ml-ventas-detalle-fetch");
 const {
   buildQuestionPendingRow,
   buildQuestionAnsweredRow,
+  enrichAnsweredRowFromPendingSnapshot,
   isQuestionUnansweredStatus,
   isQuestionAnsweredOrClosedStatus,
 } = require("./ml-question-sync");
@@ -85,6 +86,7 @@ const {
   getMlAccount,
   deletePostSaleSent,
   upsertMlQuestionPending,
+  getMlQuestionPendingByQuestionId,
   deleteMlQuestionPending,
   upsertMlQuestionAnswered,
   listMlQuestionsPending,
@@ -524,10 +526,14 @@ function scheduleTopicFetchFromWebhook(body) {
                 const row = buildQuestionPendingRow(parsed, mlUserId, notifId);
                 if (row) {
                   if (isQuestionAnsweredOrClosedStatus(row.ml_status)) {
-                    await deleteMlQuestionPending(row.ml_question_id);
+                    const pendingSnap = await getMlQuestionPendingByQuestionId(row.ml_question_id);
                     const answeredRow = buildQuestionAnsweredRow(parsed, mlUserId, notifId);
                     if (answeredRow) {
-                      await upsertMlQuestionAnswered(answeredRow);
+                      enrichAnsweredRowFromPendingSnapshot(answeredRow, pendingSnap, parsed);
+                      const answeredId = await upsertMlQuestionAnswered(answeredRow);
+                      if (answeredId != null) {
+                        await deleteMlQuestionPending(row.ml_question_id);
+                      }
                     }
                   } else if (isQuestionUnansweredStatus(row.ml_status)) {
                     await upsertMlQuestionPending(row);
@@ -1662,11 +1668,11 @@ const server = http.createServer(async (req, res) => {
     const navAnswered = tabla === "answered" ? "active" : "";
     const tableHead =
       tabla === "answered"
-        ? "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>respuesta</th><th>status</th><th>answered_at</th></tr></thead>"
-        : "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>status</th><th>updated_at</th></tr></thead>";
+        ? "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>respuesta</th><th>status</th><th>date_created</th><th>Δs</th><th>answered_at</th></tr></thead>"
+        : "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>status</th><th>date_created</th><th>updated_at</th></tr></thead>";
     const tableRows =
       rows.length === 0
-        ? `<tr><td colspan="${tabla === "answered" ? 9 : 8}">Sin registros.</td></tr>`
+        ? `<tr><td colspan="${tabla === "answered" ? 11 : 9}">Sin registros.</td></tr>`
         : tabla === "answered"
           ? rows
               .map((r) => {
@@ -1678,6 +1684,14 @@ const server = http.createServer(async (req, res) => {
                   r.answer_text && String(r.answer_text).length > 80
                     ? `${escapeHtml(String(r.answer_text).slice(0, 80))}…`
                     : escapeHtml(r.answer_text);
+                const dts =
+                  r.response_time_sec != null && String(r.response_time_sec).trim() !== ""
+                    ? escapeHtml(String(r.response_time_sec))
+                    : "—";
+                const qdc =
+                  r.date_created != null && String(r.date_created).trim() !== ""
+                    ? escapeHtml(String(r.date_created))
+                    : "—";
                 return `<tr>
   <td>${escapeHtml(r.id)}</td>
   <td>${escapeHtml(r.ml_question_id)}</td>
@@ -1687,6 +1701,8 @@ const server = http.createServer(async (req, res) => {
   <td class="muted">${qt}</td>
   <td class="muted">${at}</td>
   <td>${escapeHtml(r.ml_status)}</td>
+  <td class="muted" title="date_created de la pregunta (API ML)">${qdc}</td>
+  <td class="muted" title="segundos entre date_created pregunta y respuesta (API ML)">${dts}</td>
   <td class="muted">${escapeHtml(r.answered_at)}</td>
 </tr>`;
               })
@@ -1697,6 +1713,10 @@ const server = http.createServer(async (req, res) => {
                   r.question_text && String(r.question_text).length > 120
                     ? `${escapeHtml(String(r.question_text).slice(0, 120))}…`
                     : escapeHtml(r.question_text);
+                const qdcP =
+                  r.date_created != null && String(r.date_created).trim() !== ""
+                    ? escapeHtml(String(r.date_created))
+                    : "—";
                 return `<tr>
   <td>${escapeHtml(r.id)}</td>
   <td>${escapeHtml(r.ml_question_id)}</td>
@@ -1705,6 +1725,7 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.buyer_id)}</td>
   <td class="muted">${qt}</td>
   <td>${escapeHtml(r.ml_status)}</td>
+  <td class="muted" title="date_created de la pregunta (API ML)">${qdcP}</td>
   <td class="muted">${escapeHtml(r.updated_at)}</td>
 </tr>`;
               })

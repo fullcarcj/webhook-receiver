@@ -245,6 +245,39 @@ function parseJsonBody(req) {
   });
 }
 
+/**
+ * Respuesta 400 JSON para POST/PUT /buyers: ayuda a diagnosticar desde FileMaker/cURL sin exponer secretos.
+ * @param {import("http").ServerResponse} res
+ * @param {{ error: string, code?: string, hint?: string, debug?: Record<string, unknown> }} payload
+ */
+function buyersErrorJson(res, status, payload) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ ok: false, ...payload }));
+}
+
+/**
+ * @param {Record<string, unknown>} body
+ * @returns {{ code: string, hint: string, debug: Record<string, unknown> }}
+ */
+function explainInvalidBuyerId(body) {
+  const has = body != null && Object.prototype.hasOwnProperty.call(body, "buyer_id");
+  const raw = has ? body.buyer_id : undefined;
+  const n = Number(raw);
+  const safe = n <= Number.MAX_SAFE_INTEGER;
+  return {
+    code: "BUYER_ID_INVALID",
+    hint:
+      "buyer_id debe ser un número > 0 (ID ML). Clave exacta: buyer_id. Vacío, 0, texto no numérico o clave mal escrita fallan.",
+    debug: {
+      tiene_clave_buyer_id: has,
+      tipo_valor: raw === undefined ? "undefined" : typeof raw,
+      muestra: raw == null || raw === "" ? raw : String(raw).slice(0, 48),
+      parseado: Number.isFinite(n) ? n : "NaN",
+      bajo_max_safe_integer: !Number.isFinite(n) || safe,
+    },
+  };
+}
+
 function logWebhook(body, req) {
   const line = JSON.stringify({
     time: new Date().toISOString(),
@@ -994,14 +1027,19 @@ const server = http.createServer(async (req, res) => {
       try {
         body = await parseJsonBody(req);
       } catch (e) {
-        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        buyersErrorJson(res, 400, {
+          error: "body debe ser JSON",
+          code: "JSON_BODY_INVALID",
+          hint: "Cuerpo no es JSON válido (UTF-8). Revise comillas, comas y un solo objeto { ... }.",
+        });
         return;
       }
       const buyerId = Number(body.buyer_id);
       if (!Number.isFinite(buyerId) || buyerId <= 0) {
-        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: "buyer_id inválido" }));
+        buyersErrorJson(res, 400, {
+          error: "buyer_id inválido",
+          ...explainInvalidBuyerId(body),
+        });
         return;
       }
       const nickRaw = body.nickname != null ? String(body.nickname).trim() : "";
@@ -1023,13 +1061,12 @@ const server = http.createServer(async (req, res) => {
         } else {
           const pe = normalizeBuyerPrefEntrega(body.pref_entrega);
           if (!pe) {
-            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-            res.end(
-              JSON.stringify({
-                ok: false,
-                error: `pref_entrega debe ser uno de: ${BUYER_PREF_ENTREGA_VALUES.join(", ")}`,
-              })
-            );
+            buyersErrorJson(res, 400, {
+              error: `pref_entrega debe ser uno de: ${BUYER_PREF_ENTREGA_VALUES.join(", ")}`,
+              code: "PREF_ENTREGA_INVALID",
+              hint: "Valores: Pickup, Envio Courier, Delivery. Sinónimos: RETIRO→Pickup (si el servidor está actualizado).",
+              debug: { recibido: String(body.pref_entrega).slice(0, 80) },
+            });
             return;
           }
           row.pref_entrega = pe;
@@ -1072,14 +1109,19 @@ const server = http.createServer(async (req, res) => {
       try {
         body = await parseJsonBody(req);
       } catch (e) {
-        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        buyersErrorJson(res, 400, {
+          error: "body debe ser JSON",
+          code: "JSON_BODY_INVALID",
+          hint: "Cuerpo no es JSON válido (UTF-8). Revise comillas, comas y un solo objeto { ... }.",
+        });
         return;
       }
       const buyerId = Number(body.buyer_id);
       if (!Number.isFinite(buyerId) || buyerId <= 0) {
-        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: "buyer_id inválido" }));
+        buyersErrorJson(res, 400, {
+          error: "buyer_id inválido",
+          ...explainInvalidBuyerId(body),
+        });
         return;
       }
       const patch = {
@@ -1092,13 +1134,12 @@ const server = http.createServer(async (req, res) => {
         } else {
           const pe = normalizeBuyerPrefEntrega(body.pref_entrega);
           if (!pe) {
-            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-            res.end(
-              JSON.stringify({
-                ok: false,
-                error: `pref_entrega debe ser uno de: ${BUYER_PREF_ENTREGA_VALUES.join(", ")}`,
-              })
-            );
+            buyersErrorJson(res, 400, {
+              error: `pref_entrega debe ser uno de: ${BUYER_PREF_ENTREGA_VALUES.join(", ")}`,
+              code: "PREF_ENTREGA_INVALID",
+              hint: "Valores: Pickup, Envio Courier, Delivery. Sinónimos: RETIRO→Pickup (si el servidor está actualizado).",
+              debug: { recibido: String(body.pref_entrega).slice(0, 80) },
+            });
             return;
           }
           patch.pref_entrega = pe;

@@ -271,11 +271,11 @@ function explainInvalidBuyerId(body) {
   return {
     code: "BUYER_ID_INVALID",
     hint:
-      "buyer_id debe ser un número > 0 (ID ML). Clave exacta: buyer_id. En FileMaker: el 1.er JSONSetElement debe usar $data (p.ej. \"{}\"), no \"\".",
+      "buyer_id debe ser un número > 0 (ID ML). Clave recomendada: buyer_id (también se aceptan Buyer_Id, buyerId o data.buyer_id). En FileMaker: el 1.er JSONSetElement debe usar $data (p.ej. \"{}\"), no \"\".",
     debug: {
       tipo_raiz_cuerpo: body == null ? "null" : typeof body,
       claves_recibidas: claves,
-      tiene_clave_buyer_id: has,
+      clave_buyer_id: has ? "presente" : "ausente",
       tipo_valor: raw === undefined ? "undefined" : typeof raw,
       muestra: raw == null || raw === "" ? raw : String(raw).slice(0, 48),
       parseado: Number.isFinite(n) ? n : "NaN",
@@ -303,6 +303,44 @@ function unwrapJsonBodyIfNeeded(body, depth = 0) {
         return unwrapJsonBodyIfNeeded(inner, depth + 1);
       } catch {
         return body;
+      }
+    }
+  }
+  return body;
+}
+
+/**
+ * POST/PUT /buyers: acepta buyer_id como clave canónica o alias (p. ej. FileMaker con mayúsculas).
+ * Si falta o está vacío en la raíz, intenta Buyer_Id, BUYER_ID, buyerId, BuyerId y data.buyer_id.
+ * @param {Record<string, unknown>} body
+ * @returns {Record<string, unknown>}
+ */
+function normalizeBuyerIdForBuyers(body) {
+  if (body == null || typeof body !== "object" || Array.isArray(body)) return body;
+  const hasCanonical = Object.prototype.hasOwnProperty.call(body, "buyer_id");
+  const raw = hasCanonical ? body.buyer_id : undefined;
+  const looksEmpty =
+    raw === undefined ||
+    raw === null ||
+    (typeof raw === "string" && raw.trim() === "");
+
+  if (!looksEmpty) return body;
+
+  const aliases = ["Buyer_Id", "BUYER_ID", "buyerId", "BuyerId"];
+  for (const key of aliases) {
+    if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
+    const v = body[key];
+    if (v !== undefined && v !== null && !(typeof v === "string" && v.trim() === "")) {
+      return { ...body, buyer_id: v };
+    }
+  }
+  const data = body.data;
+  if (data != null && typeof data === "object" && !Array.isArray(data)) {
+    const d = /** @type {Record<string, unknown>} */ (data);
+    if (Object.prototype.hasOwnProperty.call(d, "buyer_id")) {
+      const v = d.buyer_id;
+      if (v !== undefined && v !== null && !(typeof v === "string" && v.trim() === "")) {
+        return { ...body, buyer_id: v };
       }
     }
   }
@@ -1056,7 +1094,7 @@ const server = http.createServer(async (req, res) => {
       }
       let body;
       try {
-        body = unwrapJsonBodyIfNeeded(await parseJsonBody(req));
+        body = normalizeBuyerIdForBuyers(unwrapJsonBodyIfNeeded(await parseJsonBody(req)));
       } catch (e) {
         buyersErrorJson(res, 400, {
           error: "body debe ser JSON",
@@ -1138,7 +1176,7 @@ const server = http.createServer(async (req, res) => {
       }
       let body;
       try {
-        body = unwrapJsonBodyIfNeeded(await parseJsonBody(req));
+        body = normalizeBuyerIdForBuyers(unwrapJsonBodyIfNeeded(await parseJsonBody(req)));
       } catch (e) {
         buyersErrorJson(res, 400, {
           error: "body debe ser JSON",

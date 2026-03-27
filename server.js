@@ -280,18 +280,22 @@ function explainInvalidBuyerId(body) {
 }
 
 /**
- * FileMaker a veces manda el objeto JSON como **string** (doble codificación): el 1.º parse da `string`, no `{...}`.
+ * FileMaker a veces manda el objeto JSON como **string** (doble o triple "JSON dentro de comillas").
+ * Repetir parse mientras el resultado sea string con forma `{...}` / `[...]`.
  * @param {unknown} body
+ * @param {number} [depth]
  */
-function unwrapJsonBodyIfNeeded(body) {
+function unwrapJsonBodyIfNeeded(body, depth = 0) {
+  if (depth > 10) return body;
   if (body != null && typeof body === "string") {
-    const t = body.trim();
+    const t = body.replace(/^\uFEFF/, "").trim();
     if (
       (t.startsWith("{") && t.endsWith("}")) ||
       (t.startsWith("[") && t.endsWith("]"))
     ) {
       try {
-        return JSON.parse(t);
+        const inner = JSON.parse(t);
+        return unwrapJsonBodyIfNeeded(inner, depth + 1);
       } catch {
         return body;
       }

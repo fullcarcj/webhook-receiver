@@ -269,6 +269,7 @@ function explainInvalidBuyerId(body) {
     hint:
       "buyer_id debe ser un número > 0 (ID ML). Clave exacta: buyer_id. Vacío, 0, texto no numérico o clave mal escrita fallan.",
     debug: {
+      tipo_raiz_cuerpo: body == null ? "null" : typeof body,
       tiene_clave_buyer_id: has,
       tipo_valor: raw === undefined ? "undefined" : typeof raw,
       muestra: raw == null || raw === "" ? raw : String(raw).slice(0, 48),
@@ -276,6 +277,27 @@ function explainInvalidBuyerId(body) {
       bajo_max_safe_integer: !Number.isFinite(n) || safe,
     },
   };
+}
+
+/**
+ * FileMaker a veces manda el objeto JSON como **string** (doble codificación): el 1.º parse da `string`, no `{...}`.
+ * @param {unknown} body
+ */
+function unwrapJsonBodyIfNeeded(body) {
+  if (body != null && typeof body === "string") {
+    const t = body.trim();
+    if (
+      (t.startsWith("{") && t.endsWith("}")) ||
+      (t.startsWith("[") && t.endsWith("]"))
+    ) {
+      try {
+        return JSON.parse(t);
+      } catch {
+        return body;
+      }
+    }
+  }
+  return body;
 }
 
 function logWebhook(body, req) {
@@ -1025,7 +1047,7 @@ const server = http.createServer(async (req, res) => {
       }
       let body;
       try {
-        body = await parseJsonBody(req);
+        body = unwrapJsonBodyIfNeeded(await parseJsonBody(req));
       } catch (e) {
         buyersErrorJson(res, 400, {
           error: "body debe ser JSON",
@@ -1107,7 +1129,7 @@ const server = http.createServer(async (req, res) => {
       }
       let body;
       try {
-        body = await parseJsonBody(req);
+        body = unwrapJsonBodyIfNeeded(await parseJsonBody(req));
       } catch (e) {
         buyersErrorJson(res, 400, {
           error: "body debe ser JSON",

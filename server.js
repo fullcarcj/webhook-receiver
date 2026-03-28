@@ -54,6 +54,7 @@ const {
   getQuestionsIaAutoWindowArithmeticBreakdown,
   serializeIaAutoPendingRouteDetail,
   startQuestionsIaAutoPoll,
+  describeIaAutoPendingReason,
 } = require("./ml-questions-ia-auto");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
@@ -718,11 +719,11 @@ function scheduleTopicFetchFromWebhook(body) {
                               why_not_auto: {
                                 ok: r && r.ok,
                                 skip: r && r.skip,
+                                ia_outcome: r && r.ia_outcome != null ? r.ia_outcome : undefined,
                                 http_status: r && r.status,
                                 error: r && r.error != null ? String(r.error).slice(0, 4000) : null,
                               },
-                              human:
-                                "IA automática activa pero el POST no completó (revisar skip, api_error o exception en why_not_auto).",
+                              human: describeIaAutoPendingReason(r),
                             }),
                           });
                         }
@@ -1025,7 +1026,7 @@ const server = http.createServer(async (req, res) => {
           retry_ia_auto_pending:
             "GET /preguntas-ia-auto-retry?k=ADMIN_SECRET — reintenta POST /answers para filas en ml_questions_pending (?limit=50)",
           poll_ia_auto_pending:
-            "ENABLED=1: reintenta pending cada 1 min por defecto (POLL_MS vacío=60000; 0=sin poll; ≥60000=intervalo ms). ML_QUESTIONS_IA_AUTO_POLL_LIMIT=40",
+            "ENABLED=1: reintenta pending cada 5 s por defecto (POLL_MS vacío=5000; mín. 5000 ms; 0=sin poll; p. ej. 60000 en prod.). ML_QUESTIONS_IA_AUTO_POLL_LIMIT=40",
           estado_ia_auto_prueba:
             "GET /preguntas-ia-auto-status?k=ADMIN_SECRET — JSON: modo manual/automático, hora local, env efectivo, checks (IA on, ML_WEBHOOK_FETCH_RESOURCE), texto prueba",
         },

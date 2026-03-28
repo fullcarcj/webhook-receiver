@@ -10,7 +10,9 @@
  * ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 o ML_QUESTIONS_IA_AUTO_FORCE=1 ignora la franja horaria.
  * ML_QUESTIONS_IA_AUTO_UNTIL=ISO UTC: tras esa fecha/hora no se envía.
  *
- * Polling: ML_QUESTIONS_IA_AUTO_POLL_MS vacío → 60000; 0 = sin poll. Respeta la misma ventana.
+ * Polling (respaldo): ML_QUESTIONS_IA_AUTO_POLL_MS vacío → 5000 (5 s); mínimo 5000 ms; 0 = sin poll.
+ *   Intervalos cortos pueden provocar 429 en la API ML. Respeta la misma ventana que el intento inmediato.
+ * ML_QUESTIONS_IA_AUTO_POLL_LIMIT. ML_QUESTIONS_IA_MAX_CHARS=2000 (máx. cuerpo de respuesta).
  *
  * Importante en producción: las variables deben estar en el **servidor** (p. ej. Render). `oauth-env.json`
  * solo aplica en local si el archivo existe; no sustituye env del panel si allí sigue ENABLED=1.
@@ -33,11 +35,13 @@ const {
   hasMlQuestionsPending,
 } = require("./db");
 
-/** Intervalo por defecto del poll de reintentos (1 min). */
-const DEFAULT_IA_AUTO_POLL_MS = 60_000;
+/** Intervalo por defecto del poll de reintentos (5 s). Sobrescribible con ML_QUESTIONS_IA_AUTO_POLL_MS (p. ej. 60000 para producción tranquila). */
+const DEFAULT_IA_AUTO_POLL_MS = 5000;
+/** Rechaza intervalos más cortos (evita bucles absurdos). */
+const MIN_IA_AUTO_POLL_MS = 5000;
 
 /**
- * ms efectivos para el poll: vacío/no definido → 1 min; "0" → desactivado.
+ * ms efectivos para el poll: vacío/no definido → 5000; "0" → desactivado.
  * @returns {number}
  */
 function resolveQuestionsIaAutoPollMs() {
@@ -338,7 +342,7 @@ function getQuestionsIaAutoDiagnostics() {
       poll_ms_efectivo: (() => {
         const ms = resolveQuestionsIaAutoPollMs();
         if (ms <= 0) return 0;
-        return ms >= DEFAULT_IA_AUTO_POLL_MS ? ms : 0;
+        return ms >= MIN_IA_AUTO_POLL_MS ? ms : 0;
       })(),
       webhook_fetch_resource: process.env.ML_WEBHOOK_FETCH_RESOURCE === "1",
     },
@@ -583,11 +587,11 @@ async function retryPendingQuestionsIaAuto(opts) {
             try_result: {
               ok: r && r.ok,
               skip: r && r.skip,
+              ia_outcome: r && r.ia_outcome != null ? r.ia_outcome : undefined,
               http_status: r && r.status,
               error: r && r.error != null ? String(r.error).slice(0, 4000) : null,
             },
-            human:
-              "Intento vía GET /preguntas-ia-auto-retry o poll (ML_QUESTIONS_IA_AUTO_POLL_MS). Si sigue en pending, revisá try_result, token o permisos POST /answers.",
+            human: `${describeIaAutoPendingReason(r)} Reintento: poll o GET /preguntas-ia-auto-retry.`,
           }),
         });
       } catch (eUp) {
@@ -600,8 +604,8 @@ async function retryPendingQuestionsIaAuto(opts) {
 }
 
 /**
- * Temporizador: con ML_QUESTIONS_IA_AUTO_ENABLED=1 reintenta pending cada minuto por defecto
- * (POLL_MS vacío = 60000). POLL_MS=0 desactiva el poll.
+ * Temporizador: con ML_QUESTIONS_IA_AUTO_ENABLED=1 reintenta pending (POLL_MS vacío = 5000 ms).
+ * POLL_MS=0 desactiva el poll.
  */
 function startQuestionsIaAutoPoll() {
   if (process.env.ML_QUESTIONS_IA_AUTO_ENABLED !== "1") {
@@ -612,12 +616,18 @@ function startQuestionsIaAutoPoll() {
   if (!Number.isFinite(ms) || ms <= 0) {
     return;
   }
-  if (ms < DEFAULT_IA_AUTO_POLL_MS) {
+  if (ms < MIN_IA_AUTO_POLL_MS) {
     console.warn(
-      "[questions ia-auto poll] ML_QUESTIONS_IA_AUTO_POLL_MS debe ser >= %s (1 min); poll no iniciado",
-      DEFAULT_IA_AUTO_POLL_MS
+      "[questions ia-auto poll] ML_QUESTIONS_IA_AUTO_POLL_MS debe ser >= %s ms; poll no iniciado",
+      MIN_IA_AUTO_POLL_MS
     );
     return;
+  }
+  if (ms < 60_000) {
+    console.warn(
+      "[questions ia-auto poll] intervalo %s ms: si ves HTTP 429 en la API ML, subí ML_QUESTIONS_IA_AUTO_POLL_MS (p. ej. 60000)",
+      ms
+    );
   }
 
   const limit = Math.min(
@@ -649,13 +659,41 @@ function startQuestionsIaAutoPoll() {
   }
 
   setInterval(tick, ms);
-  setTimeout(tick, 15_000);
+  setTimeout(tick, Math.min(ms, 15_000));
+  const minStr = ms >= 60_000 ? `~${(ms / 60_000).toFixed(ms % 60_000 === 0 ? 0 : 2)} min` : `~${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 2)} s`;
   console.log(
-    "[questions ia-auto poll] cada %s ms (~%s min) · hasta %s pending/ciclo (ENABLED=1)",
+    "[questions ia-auto poll] cada %s ms (%s) · hasta %s pending/ciclo (ENABLED=1)",
     ms,
-    (ms / 60_000).toFixed(ms % 60_000 === 0 ? 0 : 2),
+    minStr,
     limit
   );
+}
+
+/**
+ * Texto legible para pending cuando tryQuestionIaAutoAnswer no dejó la pregunta en answered.
+ * @param {{ ok?: boolean, skip?: string, status?: number, error?: string, ia_outcome?: string }|null|undefined} r
+ * @returns {string}
+ */
+function describeIaAutoPendingReason(r) {
+  if (!r) return "Sin resultado del intento automático.";
+  if (r.ok === true) {
+    if (r.skip === "already_sent") return "Marcada como ya enviada; pending puede limpiarse al sincronizar.";
+    if (r.skip === "disabled") return "En ese momento ENABLED no aplicaba como activo en la evaluación.";
+    if (r.skip === "window_off") {
+      const o = r.ia_outcome ? ` (${r.ia_outcome})` : "";
+      return `No se llamó a POST /answers: ventana/día/UNTIL o zona horaria no permitían envío${o}. Definí ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 o ML_QUESTIONS_IA_AUTO_FORCE=1, o ajustá WINDOW_START/END, Días y TIMEZONE.`;
+    }
+  }
+  if (r.skip === "api_error") {
+    return `Mercado Libre rechazó POST /answers (HTTP ${r.status ?? "?"}). Revisá token OAuth, scopes de la app y rate limit (429).`;
+  }
+  if (r.skip === "exception") {
+    return `Error al llamar a la API: ${String(r.error || "").slice(0, 400)}`;
+  }
+  if (r.skip === "bad_qid" || r.skip === "bad_args") {
+    return "Datos internos inválidos (pregunta o fila); no se pudo enviar.";
+  }
+  return `No quedó respondida automáticamente (ok=${r.ok}, skip=${r.skip ?? "—"}).`;
 }
 
 module.exports = {
@@ -672,4 +710,5 @@ module.exports = {
   getLocalMinutesAndWeekdayInTz,
   QUESTION_IA_BODIES,
   pickRandomIaBody,
+  describeIaAutoPendingReason,
 };

@@ -36,6 +36,10 @@
  * Sin límite de horario (solo si IA habilitada):
  *   ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1  — ignora START/END/DAYS; intenta POST /answers siempre.
  *
+ * Respuesta automática “obligada” (sin mirar franja; solo si IA habilitada):
+ *   ML_QUESTIONS_IA_AUTO_FORCE=1  — equivalente operativo a IGNORE_WINDOW para decidir si intentar POST;
+ *   si es 0 o no está definida, se aplica la ventana START/END/DAYS/UNTIL como siempre.
+ *
  * Polling (pending antiguos o sin webhook reciente):
  *   ML_QUESTIONS_IA_AUTO_POLL_MS=300000  — cada 5 min (mín. 60000) intenta POST /answers sobre pending si la ventana IA está activa (o IGNORE_WINDOW).
  *   ML_QUESTIONS_IA_AUTO_POLL_LIMIT=40    — máx. filas por ciclo.
@@ -171,6 +175,15 @@ function getQuestionsIaAutoWindowEvaluation(atDate) {
     };
   }
 
+  if (process.env.ML_QUESTIONS_IA_AUTO_FORCE === "1") {
+    return {
+      active: true,
+      outcome: "ok",
+      reason_detail:
+        "ML_QUESTIONS_IA_AUTO_FORCE=1 (respuesta automática obligada; sin filtro horario/día/UNTIL)",
+    };
+  }
+
   const ws = process.env.ML_QUESTIONS_IA_AUTO_WINDOW_START;
   const we = process.env.ML_QUESTIONS_IA_AUTO_WINDOW_END;
   const hasStart = ws != null && String(ws).trim() !== "";
@@ -250,6 +263,7 @@ function getQuestionsIaAutoWindowArithmeticBreakdown(atDate) {
     weekday_0_6: weekday,
     ia_enabled: process.env.ML_QUESTIONS_IA_AUTO_ENABLED === "1",
     ignore_window: process.env.ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW === "1",
+    force: process.env.ML_QUESTIONS_IA_AUTO_FORCE === "1",
   };
 
   if (!base.ia_enabled) {
@@ -264,6 +278,13 @@ function getQuestionsIaAutoWindowArithmeticBreakdown(atDate) {
       ...base,
       summary:
         "Sin desglose aritmético de franja: ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 (intento automático sin filtro horario).",
+    };
+  }
+  if (base.force) {
+    return {
+      ...base,
+      summary:
+        "ML_QUESTIONS_IA_AUTO_FORCE=1: intento automático obligado sin comparar franja (START/END/DAYS/UNTIL no condicionan el POST).",
     };
   }
 
@@ -419,6 +440,9 @@ function getQuestionsIaAutoDiagnostics() {
   } else if (process.env.ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW === "1") {
     prueba =
       "IGNORE_WINDOW=1: no se aplica horario ni días; con fetch ON el webhook intenta POST /answers siempre. Pending viejo: /preguntas-ia-auto-retry?k=…";
+  } else if (process.env.ML_QUESTIONS_IA_AUTO_FORCE === "1") {
+    prueba =
+      "FORCE=1: respuesta automática obligada sin filtro horario (como IGNORE_WINDOW para el intento POST). Con fetch ON debería intentarse al llegar webhook questions.";
   } else if (!ev.active) {
     prueba = `Fuera de ventana (${ev.outcome}). Cuando modo sea automatica: webhook questions + fetch; o GET /preguntas-ia-auto-retry?k=… sobre pending. O poné ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 para no depender del reloj.`;
   } else if (process.env.ML_WEBHOOK_FETCH_RESOURCE !== "1") {
@@ -441,6 +465,7 @@ function getQuestionsIaAutoDiagnostics() {
     env: {
       ML_QUESTIONS_IA_AUTO_ENABLED: process.env.ML_QUESTIONS_IA_AUTO_ENABLED || "",
       ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW: process.env.ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW || "",
+      ML_QUESTIONS_IA_AUTO_FORCE: process.env.ML_QUESTIONS_IA_AUTO_FORCE || "",
       ML_QUESTIONS_IA_AUTO_POLL_MS: process.env.ML_QUESTIONS_IA_AUTO_POLL_MS || "",
       ML_QUESTIONS_IA_AUTO_POLL_LIMIT: process.env.ML_QUESTIONS_IA_AUTO_POLL_LIMIT || "",
       ML_QUESTIONS_IA_AUTO_WINDOW_START: process.env.ML_QUESTIONS_IA_AUTO_WINDOW_START || "",
@@ -451,6 +476,7 @@ function getQuestionsIaAutoDiagnostics() {
     checks: {
       ia_enabled: process.env.ML_QUESTIONS_IA_AUTO_ENABLED === "1",
       ignore_window: process.env.ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW === "1",
+      force: process.env.ML_QUESTIONS_IA_AUTO_FORCE === "1",
       poll_ms:
         Number(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS || 0) >= 60000
           ? Number(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS)

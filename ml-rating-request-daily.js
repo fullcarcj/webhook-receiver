@@ -1,7 +1,8 @@
 /**
  * Job diario (cron): envía un mensaje post-venta pidiendo calificación al comprador
- * solo si vos ya calificaste (lado sale) y el comprador aún no (purchase pendiente),
- * y la orden está en la ventana de días configurada.
+ * solo si vos ya calificaste (lado sale) y la calificación compra→nosotros está **pending**
+ * (sin rating: feedback_purchase_value IS NULL y texto pending/vacío; sin fila purchase con rating en ml_order_feedback),
+ * y la orden tiene date_created dentro de la ventana (p. ej. últimos 6 días).
  *
  * REGLA (inviolable): como máximo UN mensaje de recordatorio por comprador y por cuenta
  * vendedora (ml_user_id) por día civil en UTC. Se aplica en tres capas:

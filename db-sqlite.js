@@ -1969,6 +1969,7 @@ function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, d
              WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
                AND f.side = 'purchase' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
            )
+           AND o.feedback_purchase_value IS NULL
            AND (
              o.feedback_purchase IS NULL
              OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
@@ -2006,6 +2007,7 @@ function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, d
            WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
              AND f.side = 'purchase' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
          )
+         AND o.feedback_purchase_value IS NULL
          AND (
            o.feedback_purchase IS NULL
            OR TRIM(COALESCE(o.feedback_purchase, '')) = ''

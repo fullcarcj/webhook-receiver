@@ -1919,8 +1919,11 @@ async function wasRatingRequestSentToBuyerToday(mlUserId, buyerId, dayStartIso, 
 }
 
 /**
- * Órdenes recientes donde el vendedor ya calificó (sale) y el comprador aún no (purchase),
+ * Órdenes recientes donde el vendedor ya calificó (sale) y el comprador aún no (purchase pending),
  * y no se envió aún el recordatorio de calificación.
+ * Compra→nosotros pending: sin rating en ml_order_feedback (purchase), feedback_purchase_value NULL
+ * y texto feedback_purchase NULL / vacío / 'pending' (alineado a feedback.purchase.rating pendiente en ML).
+ * Ventana temporal: date_created >= sinceIso (p. ej. últimos 6 días vía ML_RATING_REQUEST_LOOKBACK_DAYS).
  * @param {number} mlUserId
  * @param {string} sinceIso - límite inferior de date_created (orden creada en ventana)
  * @param {string} [dayStartIso] - inicio del día UTC (incl.) para no repetir comprador
@@ -1976,6 +1979,7 @@ async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStart
          WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
            AND f.side = 'purchase' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
        )
+       AND o.feedback_purchase_value IS NULL
        AND (
          o.feedback_purchase IS NULL
          OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
@@ -2006,6 +2010,7 @@ async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStart
          WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
            AND f.side = 'purchase' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
        )
+       AND o.feedback_purchase_value IS NULL
        AND (
          o.feedback_purchase IS NULL
          OR TRIM(COALESCE(o.feedback_purchase, '')) = ''

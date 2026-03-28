@@ -34,6 +34,51 @@ function defaultDelayMs() {
 }
 
 /**
+ * Persista en BD el JSON de GET /orders/{id}/feedback (o el cuerpo ya obtenido por webhook orders_feedback).
+ * @param {number} mlUserId
+ * @param {number} orderId
+ * @param {object} data - cuerpo JSON API (sale/purchase en raíz o bajo `feedback`)
+ * @param {string} fetchedAt
+ * @param {string} [source] - origen para ml_order_feedback.source
+ * @returns {Promise<{ ok: boolean, upserted: number, err?: string }>}
+ */
+async function upsertOrderFeedbackFromApiResponse(
+  mlUserId,
+  orderId,
+  data,
+  fetchedAt,
+  source = "orders_feedback_get"
+) {
+  const oid = orderId != null ? Number(orderId) : NaN;
+  const uid = Number(mlUserId);
+  if (!Number.isFinite(uid) || uid <= 0 || !Number.isFinite(oid) || oid <= 0) {
+    return { ok: false, upserted: 0, err: "ids inválidos" };
+  }
+  if (!data || typeof data !== "object") {
+    return { ok: false, upserted: 0, err: "respuesta sin JSON objeto" };
+  }
+
+  const feedbackRoot =
+    data.feedback && typeof data.feedback === "object" ? data.feedback : data;
+
+  const rows = feedbackDetailRowsFromOrder(uid, oid, feedbackRoot, {
+    fetched_at: fetchedAt,
+    source,
+  });
+
+  let upserted = 0;
+  for (const row of rows) {
+    await upsertMlOrderFeedback(row);
+    upserted++;
+  }
+
+  const summary = feedbackSummaryFromOrder({ feedback: feedbackRoot });
+  await updateMlOrderFeedbackSummary(uid, oid, summary.feedback_sale, summary.feedback_purchase);
+
+  return { ok: true, upserted };
+}
+
+/**
  * @param {number} mlUserId
  * @param {number} orderId
  * @param {string} fetchedAt
@@ -59,24 +104,8 @@ async function fetchAndUpsertOrderFeedback(mlUserId, orderId, fetchedAt) {
     return { ok: false, upserted: 0, err: "respuesta sin JSON objeto" };
   }
 
-  const feedbackRoot =
-    data.feedback && typeof data.feedback === "object" ? data.feedback : data;
-
-  const rows = feedbackDetailRowsFromOrder(uid, oid, feedbackRoot, {
-    fetched_at: fetchedAt,
-    source: "orders_feedback_get",
-  });
-
-  let upserted = 0;
-  for (const row of rows) {
-    await upsertMlOrderFeedback(row);
-    upserted++;
-  }
-
-  const summary = feedbackSummaryFromOrder({ feedback: feedbackRoot });
-  await updateMlOrderFeedbackSummary(uid, oid, summary.feedback_sale, summary.feedback_purchase);
-
-  return { ok: true, upserted };
+  const out = await upsertOrderFeedbackFromApiResponse(uid, oid, data, fetchedAt, "orders_feedback_get");
+  return out.ok ? { ok: true, upserted: out.upserted } : out;
 }
 
 /**
@@ -261,4 +290,5 @@ if (require.main === module) {
 module.exports = {
   syncOrderFeedbackForMlUser,
   fetchAndUpsertOrderFeedback,
+  upsertOrderFeedbackFromApiResponse,
 };

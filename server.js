@@ -23,7 +23,8 @@ if (process.env.ML_VENTAS_DETALLE_LOG_FILE === "1" || process.env.ML_VENTAS_DETA
 const http = require("http");
 const pkg = require("./package.json");
 const { extractSkuTitleFromMlResponse } = require("./ml-payload-extract");
-const { extractOrderIdFromOrder } = require("./ml-pack-extract");
+const { extractOrderIdFromOrder, extractOrderIdFromResource } = require("./ml-pack-extract");
+const { upsertOrderFeedbackFromApiResponse } = require("./ml-order-feedback-sync");
 const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
 const { upsertBuyerFromOrdersV2Webhook } = require("./ml-buyer-order-sync");
 const {
@@ -464,8 +465,11 @@ function scheduleTopicFetchFromWebhook(body) {
       const tl = String(topic).toLowerCase();
       if (tl === "question" || tl === "questions") topic = "questions";
       if (tl === "item" || tl === "items") topic = "items";
+      if (tl === "orders_feedback") topic = "orders_feedback";
     }
-    if (!topic && /\/orders\/\d/i.test(resourceStr)) {
+    if (!topic && /\/orders\/\d+\/feedback/i.test(resourceStr)) {
+      topic = "orders_feedback";
+    } else if (!topic && /\/orders\/\d/i.test(resourceStr)) {
       topic = "orders_v2";
     } else if (!topic && /\/messages\//i.test(resourceStr)) {
       topic = "messages";
@@ -576,7 +580,8 @@ function scheduleTopicFetchFromWebhook(body) {
             if (
               result.ok &&
               topic &&
-              (topic === "orders_v2" || String(topic).startsWith("orders"))
+              (topic === "orders_v2" ||
+                (String(topic).startsWith("orders") && topic !== "orders_feedback"))
             ) {
               const buyer = extractBuyerFromOrderPayload(parsed);
               if (buyer) {
@@ -585,6 +590,29 @@ function scheduleTopicFetchFromWebhook(body) {
                 } catch (errBuyer) {
                   console.error("[ml buyers]", errBuyer.message);
                 }
+              }
+            }
+            if (result.ok && parsed && topic === "orders_feedback") {
+              try {
+                const oidFb = extractOrderIdFromResource(resourceStr);
+                if (oidFb) {
+                  const rFb = await upsertOrderFeedbackFromApiResponse(
+                    mlUserId,
+                    oidFb,
+                    parsed,
+                    new Date().toISOString(),
+                    "orders_feedback_webhook"
+                  );
+                  console.log(
+                    "[orders_feedback webhook] ml_user_id=%s order_id=%s filas_feedback=%s ok=%s",
+                    mlUserId,
+                    oidFb,
+                    rFb.upserted,
+                    rFb.ok
+                  );
+                }
+              } catch (eFb) {
+                console.error("[orders_feedback webhook]", eFb.message);
               }
             }
             if (
@@ -621,7 +649,8 @@ function scheduleTopicFetchFromWebhook(body) {
               result.ok &&
               ML_WEBHOOK_FETCH_VENTAS_DETALLE &&
               topic &&
-              (topic === "orders_v2" || String(topic).startsWith("orders"))
+              (topic === "orders_v2" ||
+                (String(topic).startsWith("orders") && topic !== "orders_feedback"))
             ) {
               const ventasOrderId = extractOrderIdFromOrder(parsed);
               if (ventasOrderId) {
@@ -715,9 +744,12 @@ function scheduleTopicFetchFromWebhook(body) {
         }
 
         const isOrderTopic =
-          topic && (topic === "orders_v2" || String(topic).startsWith("orders"));
+          topic &&
+          (topic === "orders_v2" ||
+            (String(topic).startsWith("orders") && topic !== "orders_feedback"));
         /** orders_v2: post-venta define el estado. items: siempre cerrado (no dejar job pendiente). Otros topics no-orden suelen quedar pendientes. */
         const isOrdersV2Topic = topic === "orders_v2";
+        const isOrdersFeedbackTopic = topic === "orders_feedback";
         const isItemsTopic = topic === "items" || isMlItemsTopic(topic, resourceStr);
 
         let processStatus = FETCH_PROCESS_STATUS_DONE;
@@ -742,7 +774,7 @@ function scheduleTopicFetchFromWebhook(body) {
             processStatus = FETCH_PROCESS_STATUS_POST_SALE_FAILED;
           }
         }
-        if (result.ok && !isOrdersV2Topic && !isItemsTopic) {
+        if (result.ok && !isOrdersV2Topic && !isItemsTopic && !isOrdersFeedbackTopic) {
           processStatus = FETCH_PROCESS_STATUS_PENDING;
         }
 
@@ -837,7 +869,7 @@ const server = http.createServer(async (req, res) => {
         hooks_recibidos:
           "GET /hooks?k=ADMIN_SECRET (webhook_events: cada POST /webhook guarda JSON; POST /reg también)",
         topic_fetches_ml:
-          "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1)",
+          "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1). Topic orders_feedback: tras GET /orders/{id}/feedback se actualizan ml_order_feedback y feedback_sale/feedback_purchase/feedback_purchase_value en ml_orders",
         borrar_todos_los_fetches:
           "DELETE /admin/topic-fetches (cabecera X-Admin-Secret) vacía tabla ml_topic_fetches",
         borrar_snapshots_ventas_detalle_ve:

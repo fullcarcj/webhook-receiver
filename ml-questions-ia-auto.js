@@ -10,7 +10,8 @@
  * Sigue haciendo falta: ML_WEBHOOK_FETCH_RESOURCE=1 para webhook→GET pregunta, token del vendedor en
  * ml_accounts, y que la API de ML acepte el POST.
  *
- * Polling (respaldo): ML_QUESTIONS_IA_AUTO_POLL_MS (≥60000), ML_QUESTIONS_IA_AUTO_POLL_LIMIT.
+ * Polling (respaldo): si ML_QUESTIONS_IA_AUTO_POLL_MS no está definido o está vacío → 60000 (1 min).
+ *   Explícito 0 = poll desactivado. Valor ≥60000 = intervalo en ms. ML_QUESTIONS_IA_AUTO_POLL_LIMIT.
  * ML_QUESTIONS_IA_MAX_CHARS=2000 (máx. cuerpo de respuesta).
  */
 const { mercadoLibrePostJsonForUser } = require("./oauth-token");
@@ -30,6 +31,22 @@ const {
   listMlQuestionsPending,
   hasMlQuestionsPending,
 } = require("./db");
+
+/** Intervalo por defecto del poll de reintentos (1 min). */
+const DEFAULT_IA_AUTO_POLL_MS = 60_000;
+
+/**
+ * ms efectivos para el poll: vacío/no definido → 1 min; "0" → desactivado.
+ * @returns {number}
+ */
+function resolveQuestionsIaAutoPollMs() {
+  const raw = process.env.ML_QUESTIONS_IA_AUTO_POLL_MS;
+  if (raw == null || String(raw).trim() === "") {
+    return DEFAULT_IA_AUTO_POLL_MS;
+  }
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
+}
 
 const QUESTION_IA_BODIES = Object.freeze([
   "Hola. Si el producto que buscás es el de la publicación, lo más probable es que esté disponible y el precio sea el publicado. Aceptamos tasa BCV. Somos tienda física; mañana abrimos de 9:00 a 16:00. Este mensaje fue generado por una IA; mañana habrá una persona para ayudarte.",
@@ -206,17 +223,21 @@ function getQuestionsIaAutoDiagnostics() {
     env: {
       ML_QUESTIONS_IA_AUTO_ENABLED: process.env.ML_QUESTIONS_IA_AUTO_ENABLED || "",
       ML_QUESTIONS_IA_AUTO_TIMEZONE: process.env.ML_QUESTIONS_IA_AUTO_TIMEZONE || "",
-      ML_QUESTIONS_IA_AUTO_POLL_MS: process.env.ML_QUESTIONS_IA_AUTO_POLL_MS || "",
+      ML_QUESTIONS_IA_AUTO_POLL_MS:
+        process.env.ML_QUESTIONS_IA_AUTO_POLL_MS != null && String(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS).trim() !== ""
+          ? process.env.ML_QUESTIONS_IA_AUTO_POLL_MS
+          : `(vacío→${DEFAULT_IA_AUTO_POLL_MS})`,
       ML_QUESTIONS_IA_AUTO_POLL_LIMIT: process.env.ML_QUESTIONS_IA_AUTO_POLL_LIMIT || "",
       ML_WEBHOOK_FETCH_RESOURCE: process.env.ML_WEBHOOK_FETCH_RESOURCE || "",
     },
     checks: {
       ia_enabled: process.env.ML_QUESTIONS_IA_AUTO_ENABLED === "1",
       plantillas_ia: QUESTION_IA_BODIES.length,
-      poll_ms:
-        Number(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS || 0) >= 60000
-          ? Number(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS)
-          : 0,
+      poll_ms_efectivo: (() => {
+        const ms = resolveQuestionsIaAutoPollMs();
+        if (ms <= 0) return 0;
+        return ms >= DEFAULT_IA_AUTO_POLL_MS ? ms : 0;
+      })(),
       webhook_fetch_resource: process.env.ML_WEBHOOK_FETCH_RESOURCE === "1",
     },
     evaluation: ev,
@@ -476,20 +497,23 @@ async function retryPendingQuestionsIaAuto(opts) {
 }
 
 /**
- * Temporizador: con ML_QUESTIONS_IA_AUTO_ENABLED=1 reintenta pending periódicamente.
- * Requiere ML_QUESTIONS_IA_AUTO_POLL_MS>=60000.
+ * Temporizador: con ML_QUESTIONS_IA_AUTO_ENABLED=1 reintenta pending cada minuto por defecto
+ * (POLL_MS vacío = 60000). POLL_MS=0 desactiva el poll.
  */
 function startQuestionsIaAutoPoll() {
-  const ms = Number(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS || 0);
-  if (!Number.isFinite(ms) || ms <= 0) return;
-  if (ms < 60000) {
-    console.warn(
-      "[questions ia-auto poll] ML_QUESTIONS_IA_AUTO_POLL_MS debe ser >= 60000 (1 min); poll no iniciado"
-    );
-    return;
-  }
   if (process.env.ML_QUESTIONS_IA_AUTO_ENABLED !== "1") {
     console.warn("[questions ia-auto poll] ignorado: ML_QUESTIONS_IA_AUTO_ENABLED≠1");
+    return;
+  }
+  const ms = resolveQuestionsIaAutoPollMs();
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return;
+  }
+  if (ms < DEFAULT_IA_AUTO_POLL_MS) {
+    console.warn(
+      "[questions ia-auto poll] ML_QUESTIONS_IA_AUTO_POLL_MS debe ser >= %s (1 min); poll no iniciado",
+      DEFAULT_IA_AUTO_POLL_MS
+    );
     return;
   }
 
@@ -524,8 +548,9 @@ function startQuestionsIaAutoPoll() {
   setInterval(tick, ms);
   setTimeout(tick, 15_000);
   console.log(
-    "[questions ia-auto poll] cada %s ms · hasta %s pending/ciclo (ML_QUESTIONS_IA_AUTO_ENABLED=1)",
+    "[questions ia-auto poll] cada %s ms (~%s min) · hasta %s pending/ciclo (ENABLED=1)",
     ms,
+    (ms / 60_000).toFixed(ms % 60_000 === 0 ? 0 : 2),
     limit
   );
 }

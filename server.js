@@ -1025,7 +1025,7 @@ const server = http.createServer(async (req, res) => {
           retry_ia_auto_pending:
             "GET /preguntas-ia-auto-retry?k=ADMIN_SECRET — reintenta POST /answers para filas en ml_questions_pending (?limit=50)",
           poll_ia_auto_pending:
-            "ML_QUESTIONS_IA_AUTO_POLL_MS=300000 (≥60000) + ENABLED=1: reintenta pending cada N ms. ML_QUESTIONS_IA_AUTO_POLL_LIMIT=40",
+            "ENABLED=1: reintenta pending cada 1 min por defecto (POLL_MS vacío=60000; 0=sin poll; ≥60000=intervalo ms). ML_QUESTIONS_IA_AUTO_POLL_LIMIT=40",
           estado_ia_auto_prueba:
             "GET /preguntas-ia-auto-status?k=ADMIN_SECRET — JSON: modo manual/automático, hora local, env efectivo, checks (IA on, ML_WEBHOOK_FETCH_RESOURCE), texto prueba",
         },

@@ -1,6 +1,12 @@
 /**
  * Respuestas automáticas a preguntas ML (POST /answers) con plantillas tipo tienda.
  *
+ * ML_QUESTIONS_IA_AUTO_ENABLED=1 solo habilita el intento de respuesta automática; no garantiza que el
+ * 100% de las preguntas queden respondidas por el sistema. Hace falta además: ventana IA activa
+ * (o ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 / ML_QUESTIONS_IA_AUTO_FORCE=1), webhook + GET recurso si usás
+ * ML_WEBHOOK_FETCH_RESOURCE=1, token del **vendedor** válido, y que la API de ML acepte el POST (sin error
+ * de red, permisos, moderación, etc.). Si falla, la pregunta puede quedar en pending o solo en ML.
+ *
  * Flujo en tres pasos (webhook `questions` + ML_WEBHOOK_FETCH_RESOURCE=1 → GET /questions/{id}):
  *
  *   1) Recibir el hook y tener el JSON de la pregunta (estado UNANSWERED o ya respondida).

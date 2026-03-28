@@ -1,6 +1,8 @@
 /**
  * Descarga masiva de publicaciones por cuenta (GET /users/{id}/items/search + GET /items/{id}).
- * Uso: node ml-listings-sync.js [--user=ML_USER_ID] [--all] [--max-batches=N]
+ * Uso: node ml-listings-sync.js [--user=ML_USER_ID | --user ML_USER_ID] [--all] [--max-batches=N]
+ * Alternativa: ML_SYNC_USER_ID=... (env). En PowerShell si npm no reenvía args: ejecutar node directo o
+ *   $env:ML_SYNC_USER_ID="663838076"; npm run sync-listings
  * Requiere DATABASE_URL, cuenta en ml_accounts y tokens válidos.
  */
 require("./load-env-local");
@@ -229,14 +231,28 @@ function parseArgs(argv) {
   let userId = process.env.ML_SYNC_USER_ID != null ? Number(process.env.ML_SYNC_USER_ID) : null;
   let all = false;
   let maxBatches = process.env.ML_SYNC_MAX_BATCHES != null ? Number(process.env.ML_SYNC_MAX_BATCHES) : null;
-  for (const a of argv) {
+  const cleaned = argv.map((a) => String(a).replace(/^\uFEFF/, "").trim());
+  for (let i = 0; i < cleaned.length; i++) {
+    const a = cleaned[i];
     if (a === "--all") all = true;
     else if (a.startsWith("--user=")) {
       const n = Number(a.slice(7));
       if (Number.isFinite(n) && n > 0) userId = n;
+    } else if (a === "--user" && cleaned[i + 1] != null) {
+      const n = Number(String(cleaned[i + 1]).trim());
+      if (Number.isFinite(n) && n > 0) {
+        userId = n;
+        i++;
+      }
     } else if (a.startsWith("--max-batches=")) {
       const n = Number(a.slice(14));
       if (Number.isFinite(n) && n > 0) maxBatches = n;
+    } else if (a === "--max-batches" && cleaned[i + 1] != null) {
+      const n = Number(String(cleaned[i + 1]).trim());
+      if (Number.isFinite(n) && n > 0) {
+        maxBatches = n;
+        i++;
+      }
     }
   }
   return { userId, all, maxBatches };

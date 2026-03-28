@@ -1010,7 +1010,7 @@ const server = http.createServer(async (req, res) => {
           "ml_ventas_detalle_web.raw = HTML; GET /ventas-detalle-web?k= & format=json&include_raw=1 — POST retry JSON write_log:true o ML_VENTAS_DETALLE_LOG_FILE=1 → log.txt (ML_VENTAS_DETALLE_LOG_PATH opcional) — DELETE /admin/ventas-detalle-web vacía la tabla",
         preguntas_ml: {
           ml_questions_pending:
-            "Por responder: GET /preguntas-ml?k=ADMIN_SECRET&tabla=pending · Webhook questions + ML_WEBHOOK_FETCH_RESOURCE=1 → GET /questions/{id}; si UNANSWERED y ML_QUESTIONS_IA_AUTO_ENABLED=1 se intenta POST /answers al instante (plantilla aleatoria) o se deja pending",
+            "Por responder: GET /preguntas-ml?k=ADMIN_SECRET&tabla=pending · Webhook questions + ML_WEBHOOK_FETCH_RESOURCE=1 → GET /questions/{id}; si UNANSWERED y ML_QUESTIONS_IA_AUTO_ENABLED=1 se intenta POST /answers al instante (domingo texto fijo; resto plantilla aleatoria) o se deja pending",
           ml_questions_answered:
             "Respondidas: GET /preguntas-ml?k=ADMIN_SECRET&tabla=answered · Tras GET /questions/{id} con status respondido/cerrado",
           ml_questions_refresh:
@@ -1020,7 +1020,7 @@ const server = http.createServer(async (req, res) => {
           delete_all_ml_questions_pending:
             "DELETE /admin/ml-questions-pending (cabecera X-Admin-Secret) vacía ml_questions_pending (solo BD local; no afecta preguntas en ML)",
           respuesta_automatica_ia:
-            "ML_QUESTIONS_IA_AUTO_ENABLED=1: POST /answers con plantillas QUESTION_IA_BODIES. Ventana opcional: ML_QUESTIONS_IA_AUTO_WINDOW_START/END (HH:mm, timezone ML_QUESTIONS_IA_AUTO_TIMEZONE), cruce medianoche si inicio>fin; ML_QUESTIONS_IA_AUTO_DAYS; ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 o FORCE=1 ignora horario; ML_QUESTIONS_IA_AUTO_UNTIL. Éxito → answered + borrar pending.",
+            "ML_QUESTIONS_IA_AUTO_ENABLED=1: POST /answers; domingo mensaje fijo (cerrado/lunes/vuelta/stock/precio/BCV); otros días plantillas QUESTION_IA_BODIES. Por defecto no hay ventana (ML_QUESTIONS_IA_AUTO_USE_WINDOW=1 para START/END, Días, IGNORE/FORCE). ML_QUESTIONS_IA_AUTO_UNTIL. Éxito → answered + borrar pending.",
           log_ia_auto_omitidos:
             "GET /preguntas-ia-auto-log?k=ADMIN_SECRET — ml_questions_ia_auto_log (intentos sin POST /answers cuando IA desactivada u otros motivos; ?format=json&limit=)",
           retry_ia_auto_pending:

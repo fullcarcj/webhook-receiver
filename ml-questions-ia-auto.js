@@ -3,16 +3,14 @@
  *
  * Activación: ML_QUESTIONS_IA_AUTO_ENABLED=1 (cualquier otro valor = apagado).
  *
- * Ventana (opcional): si están definidos **ambos** ML_QUESTIONS_IA_AUTO_WINDOW_START y
- * ML_QUESTIONS_IA_AUTO_WINDOW_END (HH:mm en ML_QUESTIONS_IA_AUTO_TIMEZONE), solo se intenta POST
- * dentro de esa franja. Si inicio > fin, cruza medianoche (ej. 17:20–07:00).
- * ML_QUESTIONS_IA_AUTO_DAYS=0,1,…,6 (dom–sáb) restringe días; vacío = todos.
- * ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 o ML_QUESTIONS_IA_AUTO_FORCE=1 ignora la franja horaria.
+ * Sin ventana por defecto: no se evalúa horario/días salvo que pongas ML_QUESTIONS_IA_AUTO_USE_WINDOW=1.
+ * Con USE_WINDOW=1: si están definidos **ambos** ML_QUESTIONS_IA_AUTO_WINDOW_START y END (HH:mm en TIMEZONE),
+ * solo se intenta POST en esa franja; ML_QUESTIONS_IA_AUTO_DAYS restringe días; IGNORE_WINDOW/FORCE ignoran franja.
  * ML_QUESTIONS_IA_AUTO_UNTIL=ISO UTC: tras esa fecha/hora no se envía.
  *
  * Polling (respaldo): ML_QUESTIONS_IA_AUTO_POLL_MS vacío → 5000 (5 s); mínimo 5000 ms; 0 = sin poll.
- *   Los reintentos por poll ignoran ventana horaria/día (solo ENABLED + UNTIL) hasta lograr POST OK o vaciar pending.
- *   El intento vía webhook sigue usando ventana/IGNORE/FORCE. Intervalos cortos pueden provocar 429 en la API ML.
+ *   Reintentos por poll: solo ENABLED + UNTIL (igual que intento principal si USE_WINDOW≠1).
+ *   Intervalos cortos pueden provocar 429 en la API ML.
  * ML_QUESTIONS_IA_AUTO_POLL_LIMIT. ML_QUESTIONS_IA_MAX_CHARS=2000 (máx. cuerpo de respuesta).
  *
  * Importante en producción: las variables deben estar en el **servidor** (p. ej. Render). `oauth-env.json`
@@ -66,6 +64,13 @@ const QUESTION_IA_BODIES = Object.freeze([
   "Hola. Publicación = precio publicado en lo posible y disponibilidad habitual. Cobro a tasa BCV. Tienda física; mañana de 9 a 16. Aviso: IA; mañana te responde un humano.",
   "Buenas. Si buscás el producto del aviso, lo más probable es que el precio sea el publicado y que podamos atenderte. Tasa BCV. Local físico; mañana 9–16 h. Mensaje automático (IA); mañana atención personal.",
 ]);
+
+/** Domingo (hora local TIMEZONE): un solo texto, sin plantilla aleatoria. */
+const QUESTION_IA_SUNDAY_BODY =
+  "Hoy domingo no trabajamos; el lunes estaremos de vuelta para atenderte. El producto lo más probable es que haya y el precio es el publicado. Aceptamos a tasa BCV. Mensaje automático.";
+
+/** Índice reservado en logs para plantilla domingo (no es posición en QUESTION_IA_BODIES). */
+const QUESTION_IA_TEMPLATE_INDEX_SUNDAY = 100;
 
 function getQuestionsIaMaxChars() {
   const n = Number(process.env.ML_QUESTIONS_IA_MAX_CHARS || 2000);
@@ -150,7 +155,16 @@ function getQuestionsIaAutoWindowEvaluation(atDate, opts) {
       active: true,
       outcome: "ok_poll_retry",
       reason_detail:
-        "Reintento por poll cada 5 s (configurable): sin ventana horaria ni ML_QUESTIONS_IA_AUTO_DAYS; aplica ENABLED y UNTIL.",
+        "Reintento por poll: solo ENABLED y UNTIL (sin franja ni ML_QUESTIONS_IA_AUTO_DAYS).",
+    };
+  }
+
+  if (process.env.ML_QUESTIONS_IA_AUTO_USE_WINDOW !== "1") {
+    return {
+      active: true,
+      outcome: "ok_no_window",
+      reason_detail:
+        "Sin evaluar ventana: ML_QUESTIONS_IA_AUTO_USE_WINDOW≠1 (poné =1 para usar START/END y Días). Aplica ENABLED y UNTIL.",
     };
   }
 
@@ -320,7 +334,7 @@ function getQuestionsIaAutoDiagnostics() {
     prueba =
       "ENABLED=1 pero ML_WEBHOOK_FETCH_RESOURCE≠1: no se hace GET /questions ni respuesta automática al recibir webhook. Poné =1 y reiniciá.";
   } else {
-    prueba = `ENABLED=1 y fetch ON: al llegar webhook questions con UNANSWERED se intenta POST /answers de inmediato con texto aleatorio entre ${QUESTION_IA_BODIES.length} plantillas (QUESTION_IA_BODIES). Pending viejo: /preguntas-ia-auto-retry?k=…`;
+    prueba = `ENABLED=1 y fetch ON: POST /answers al instante; domingo texto fijo (cerrado), otros días plantilla aleatoria entre ${QUESTION_IA_BODIES.length}. Sin ventana salvo ML_QUESTIONS_IA_AUTO_USE_WINDOW=1. Pending: /preguntas-ia-auto-retry?k=…`;
   }
 
   return {
@@ -340,6 +354,7 @@ function getQuestionsIaAutoDiagnostics() {
       ML_QUESTIONS_IA_AUTO_DAYS: process.env.ML_QUESTIONS_IA_AUTO_DAYS || "",
       ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW: process.env.ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW || "",
       ML_QUESTIONS_IA_AUTO_FORCE: process.env.ML_QUESTIONS_IA_AUTO_FORCE || "",
+      ML_QUESTIONS_IA_AUTO_USE_WINDOW: process.env.ML_QUESTIONS_IA_AUTO_USE_WINDOW || "",
       ML_QUESTIONS_IA_AUTO_UNTIL: process.env.ML_QUESTIONS_IA_AUTO_UNTIL || "",
       ML_QUESTIONS_IA_AUTO_POLL_MS:
         process.env.ML_QUESTIONS_IA_AUTO_POLL_MS != null && String(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS).trim() !== ""
@@ -380,6 +395,20 @@ function pickRandomIaBody(lastIndex) {
     }
   }
   return { text: QUESTION_IA_BODIES[idx], index: idx };
+}
+
+/**
+ * Domingo (hora local): texto fijo; resto de días: plantilla aleatoria.
+ * @param {Date} evalAt
+ * @returns {{ text: string, index: number }}
+ */
+function pickIaBodyForAuto(evalAt) {
+  const tz = getQuestionsIaTimezone();
+  const { weekday } = getLocalMinutesAndWeekdayInTz(evalAt, tz);
+  if (weekday === 0) {
+    return { text: QUESTION_IA_SUNDAY_BODY, index: QUESTION_IA_TEMPLATE_INDEX_SUNDAY };
+  }
+  return pickRandomIaBody(null);
 }
 
 /**
@@ -429,7 +458,7 @@ async function tryQuestionIaAutoAnswer(args) {
 
   console.log("[questions ia-auto] intento POST /answers question_id=%s ml_user_id=%s", qid, mlUid);
 
-  const { text, index } = pickRandomIaBody(null);
+  const { text, index } = pickIaBodyForAuto(evalAt);
   const maxC = getQuestionsIaMaxChars();
   let body = String(text).trim();
   if (body.length > maxC) {

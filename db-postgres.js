@@ -164,6 +164,16 @@ async function runSchemaAndSeed() {
       PRIMARY KEY (order_id, step_index)
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_post_sale_steps_order ON ml_post_sale_steps_sent(order_id)`,
+    `CREATE TABLE IF NOT EXISTS ml_rating_request_sent (
+      order_id BIGINT PRIMARY KEY,
+      ml_user_id BIGINT NOT NULL,
+      buyer_id BIGINT,
+      sent_at TEXT NOT NULL,
+      http_status INTEGER,
+      error_message TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user ON ml_rating_request_sent(ml_user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user_buyer_sent ON ml_rating_request_sent(ml_user_id, buyer_id, sent_at)`,
     `CREATE TABLE IF NOT EXISTS ml_questions_pending (
       id SERIAL PRIMARY KEY,
       ml_question_id BIGINT NOT NULL UNIQUE,
@@ -303,6 +313,45 @@ async function runSchemaAndSeed() {
     `CREATE INDEX IF NOT EXISTS idx_ml_orders_user_status ON ml_orders(ml_user_id, status)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_orders_user_created ON ml_orders(ml_user_id, date_created DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_orders_order_id ON ml_orders(order_id)`,
+    `CREATE TABLE IF NOT EXISTS ml_order_feedback (
+      id BIGSERIAL PRIMARY KEY,
+      ml_user_id BIGINT NOT NULL,
+      order_id BIGINT NOT NULL,
+      side TEXT NOT NULL,
+      ml_feedback_id BIGINT NOT NULL,
+      role TEXT,
+      fulfilled BOOLEAN,
+      rating TEXT,
+      reason TEXT,
+      message TEXT,
+      reply TEXT,
+      date_created TEXT,
+      visibility_date TEXT,
+      feedback_status TEXT,
+      modified BOOLEAN,
+      restock_item BOOLEAN,
+      has_seller_refunded_money BOOLEAN,
+      from_user_id BIGINT,
+      to_user_id BIGINT,
+      from_nickname TEXT,
+      to_nickname TEXT,
+      item_id TEXT,
+      item_title TEXT,
+      item_price NUMERIC(20, 4),
+      item_currency_id TEXT,
+      extended_feedback JSONB,
+      site_id TEXT,
+      app_id TEXT,
+      raw_json TEXT NOT NULL,
+      source TEXT,
+      fetched_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CONSTRAINT uq_ml_order_feedback_ml_id UNIQUE (ml_feedback_id),
+      CONSTRAINT chk_ml_order_feedback_side CHECK (side IN ('sale', 'purchase'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_user_order ON ml_order_feedback(ml_user_id, order_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_user_rating ON ml_order_feedback(ml_user_id, rating)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_date ON ml_order_feedback(date_created DESC)`,
   ];
   for (const sql of stmts) {
     await pool.query(sql);
@@ -328,6 +377,31 @@ async function runSchemaAndSeed() {
   await migrateMlQuestionsAnsweredResponseTimeSec();
   await migrateMlQuestionsDateCreated();
   await migrateMlOrdersExtraColumns();
+  await migrateMlRatingRequestSentBuyerId();
+}
+
+async function migrateMlRatingRequestSentBuyerId() {
+  try {
+    const { rows: c } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_rating_request_sent' AND column_name = 'buyer_id'`
+    );
+    if (c.length === 0) {
+      await pool.query(`ALTER TABLE ml_rating_request_sent ADD COLUMN buyer_id BIGINT`);
+      console.log("[db] ml_rating_request_sent: columna buyer_id añadida (migración)");
+    }
+    await pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user_buyer_sent ON ml_rating_request_sent(ml_user_id, buyer_id, sent_at)`
+    );
+    await pool.query(`
+      UPDATE ml_rating_request_sent r
+      SET buyer_id = o.buyer_id
+      FROM ml_orders o
+      WHERE o.order_id = r.order_id AND r.buyer_id IS NULL AND o.buyer_id IS NOT NULL
+    `);
+  } catch (e) {
+    console.error("[db] migrate ml_rating_request_sent buyer_id:", e.message);
+  }
 }
 
 async function migrateMlOrdersExtraColumns() {
@@ -1551,6 +1625,316 @@ async function listMlOrderCountsByUser() {
   return rows;
 }
 
+async function upsertMlOrderFeedback(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  const fid = row.ml_feedback_id != null ? Number(row.ml_feedback_id) : NaN;
+  const side = row.side != null ? String(row.side).trim() : "";
+  if (
+    !Number.isFinite(mlUid) ||
+    mlUid <= 0 ||
+    !Number.isFinite(oid) ||
+    oid <= 0 ||
+    !Number.isFinite(fid) ||
+    fid <= 0 ||
+    (side !== "sale" && side !== "purchase")
+  ) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const fetchedAt = row.fetched_at != null ? String(row.fetched_at) : now;
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  const rawJson = row.raw_json != null ? String(row.raw_json) : "{}";
+  const ext = row.extended_feedback;
+  const extVal =
+    ext === null || ext === undefined
+      ? null
+      : typeof ext === "object"
+        ? ext
+        : null;
+
+  const { rows: out } = await pool.query(
+    `INSERT INTO ml_order_feedback (
+       ml_user_id, order_id, side, ml_feedback_id, role, fulfilled, rating, reason, message, reply,
+       date_created, visibility_date, feedback_status, modified, restock_item, has_seller_refunded_money,
+       from_user_id, to_user_id, from_nickname, to_nickname,
+       item_id, item_title, item_price, item_currency_id,
+       extended_feedback, site_id, app_id, raw_json, source, fetched_at, updated_at
+     ) VALUES (
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
+     )
+     ON CONFLICT (ml_feedback_id) DO UPDATE SET
+       ml_user_id = EXCLUDED.ml_user_id,
+       order_id = EXCLUDED.order_id,
+       side = EXCLUDED.side,
+       role = EXCLUDED.role,
+       fulfilled = EXCLUDED.fulfilled,
+       rating = EXCLUDED.rating,
+       reason = EXCLUDED.reason,
+       message = EXCLUDED.message,
+       reply = EXCLUDED.reply,
+       date_created = EXCLUDED.date_created,
+       visibility_date = EXCLUDED.visibility_date,
+       feedback_status = EXCLUDED.feedback_status,
+       modified = EXCLUDED.modified,
+       restock_item = EXCLUDED.restock_item,
+       has_seller_refunded_money = EXCLUDED.has_seller_refunded_money,
+       from_user_id = EXCLUDED.from_user_id,
+       to_user_id = EXCLUDED.to_user_id,
+       from_nickname = EXCLUDED.from_nickname,
+       to_nickname = EXCLUDED.to_nickname,
+       item_id = EXCLUDED.item_id,
+       item_title = EXCLUDED.item_title,
+       item_price = EXCLUDED.item_price,
+       item_currency_id = EXCLUDED.item_currency_id,
+       extended_feedback = EXCLUDED.extended_feedback,
+       site_id = EXCLUDED.site_id,
+       app_id = EXCLUDED.app_id,
+       raw_json = EXCLUDED.raw_json,
+       source = EXCLUDED.source,
+       fetched_at = EXCLUDED.fetched_at,
+       updated_at = EXCLUDED.updated_at
+     RETURNING id`,
+    [
+      mlUid,
+      oid,
+      side,
+      fid,
+      row.role != null ? String(row.role) : null,
+      row.fulfilled === true ? true : row.fulfilled === false ? false : null,
+      row.rating != null ? String(row.rating).slice(0, 64) : null,
+      row.reason != null ? String(row.reason).slice(0, 128) : null,
+      row.message != null ? String(row.message).slice(0, 4000) : null,
+      row.reply != null ? String(row.reply).slice(0, 4000) : null,
+      row.date_created != null ? String(row.date_created) : null,
+      row.visibility_date != null ? String(row.visibility_date) : null,
+      row.feedback_status != null ? String(row.feedback_status).slice(0, 64) : null,
+      row.modified === true ? true : row.modified === false ? false : null,
+      row.restock_item === true ? true : row.restock_item === false ? false : null,
+      row.has_seller_refunded_money === true
+        ? true
+        : row.has_seller_refunded_money === false
+          ? false
+          : null,
+      row.from_user_id != null ? Number(row.from_user_id) : null,
+      row.to_user_id != null ? Number(row.to_user_id) : null,
+      row.from_nickname != null ? String(row.from_nickname).slice(0, 256) : null,
+      row.to_nickname != null ? String(row.to_nickname).slice(0, 256) : null,
+      row.item_id != null ? String(row.item_id).slice(0, 64) : null,
+      row.item_title != null ? String(row.item_title).slice(0, 512) : null,
+      row.item_price != null && String(row.item_price).trim() !== "" ? row.item_price : null,
+      row.item_currency_id != null ? String(row.item_currency_id).slice(0, 16) : null,
+      extVal,
+      row.site_id != null ? String(row.site_id).slice(0, 16) : null,
+      row.app_id != null ? String(row.app_id).slice(0, 32) : null,
+      rawJson,
+      row.source != null ? String(row.source).slice(0, 64) : null,
+      fetchedAt,
+      updatedAt,
+    ]
+  );
+  return out[0] ? Number(out[0].id) : null;
+}
+
+async function listMlOrderFeedbackByOrder(mlUserId, orderId) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) return [];
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id, order_id, side, ml_feedback_id, role, fulfilled, rating, reason, message, reply,
+            date_created, visibility_date, feedback_status, modified, restock_item, has_seller_refunded_money,
+            from_user_id, to_user_id, from_nickname, to_nickname,
+            item_id, item_title, item_price, item_currency_id,
+            extended_feedback, site_id, app_id, raw_json, source, fetched_at, updated_at
+     FROM ml_order_feedback
+     WHERE ml_user_id = $1 AND order_id = $2
+     ORDER BY side ASC`,
+    [mlUid, oid]
+  );
+  return rows;
+}
+
+async function listMlOrderFeedbackByUser(mlUserId, limit, maxAllowed) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const cap = maxAllowed != null ? maxAllowed : 20000;
+  const n = Math.min(Math.max(Number(limit) || 500, 1), cap);
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id, order_id, side, ml_feedback_id, role, fulfilled, rating, reason, message, reply,
+            date_created, visibility_date, feedback_status, modified, restock_item, has_seller_refunded_money,
+            from_user_id, to_user_id, from_nickname, to_nickname,
+            item_id, item_title, item_price, item_currency_id,
+            extended_feedback, site_id, app_id, raw_json, source, fetched_at, updated_at
+     FROM ml_order_feedback
+     WHERE ml_user_id = $1
+     ORDER BY date_created DESC NULLS LAST, id DESC
+     LIMIT $2`,
+    [mlUid, n]
+  );
+  return rows;
+}
+
+async function wasMlRatingRequestSent(orderId) {
+  await ensureSchema();
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(oid) || oid <= 0) return false;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM ml_rating_request_sent WHERE order_id = $1 LIMIT 1`,
+    [oid]
+  );
+  return rows.length > 0;
+}
+
+async function insertMlRatingRequestSent(row) {
+  await ensureSchema();
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  const mlUid = row.ml_user_id != null ? Number(row.ml_user_id) : NaN;
+  const bid = row.buyer_id != null ? Number(row.buyer_id) : NaN;
+  if (
+    !Number.isFinite(oid) ||
+    oid <= 0 ||
+    !Number.isFinite(mlUid) ||
+    mlUid <= 0 ||
+    !Number.isFinite(bid) ||
+    bid <= 0
+  ) {
+    return null;
+  }
+  const sentAt = row.sent_at != null ? String(row.sent_at) : new Date().toISOString();
+  await pool.query(
+    `INSERT INTO ml_rating_request_sent (order_id, ml_user_id, buyer_id, sent_at, http_status, error_message)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (order_id) DO NOTHING`,
+    [
+      oid,
+      mlUid,
+      bid,
+      sentAt,
+      row.http_status != null ? Number(row.http_status) : null,
+      row.error_message != null ? String(row.error_message).slice(0, 2000) : null,
+    ]
+  );
+  return oid;
+}
+
+/**
+ * ¿Ya se envió hoy (rango UTC [dayStartIso, dayEndIso)) un recordatorio a este comprador desde esta cuenta?
+ */
+async function wasRatingRequestSentToBuyerToday(mlUserId, buyerId, dayStartIso, dayEndIso) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const bid = buyerId != null ? Number(buyerId) : NaN;
+  const ds = dayStartIso != null ? String(dayStartIso).trim() : "";
+  const de = dayEndIso != null ? String(dayEndIso).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(bid) || bid <= 0 || !ds || !de) {
+    return false;
+  }
+  const { rows } = await pool.query(
+    `SELECT 1 FROM ml_rating_request_sent
+     WHERE ml_user_id = $1 AND buyer_id = $2
+       AND sent_at >= $3 AND sent_at < $4
+     LIMIT 1`,
+    [mlUid, bid, ds, de]
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Órdenes recientes donde el vendedor ya calificó (sale) y el comprador aún no (purchase),
+ * y no se envió aún el recordatorio de calificación.
+ * @param {number} mlUserId
+ * @param {string} sinceIso - límite inferior de date_created (orden creada en ventana)
+ * @param {string} [dayStartIso] - inicio del día UTC (incl.) para no repetir comprador
+ * @param {string} [dayEndIso] - fin del día UTC (excl.)
+ */
+async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, dayEndIso) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const since = sinceIso != null ? String(sinceIso).trim() : "";
+  if (!since) return [];
+
+  const ds = dayStartIso != null ? String(dayStartIso).trim() : "";
+  const de = dayEndIso != null ? String(dayEndIso).trim() : "";
+  const filterBuyerDay = ds !== "" && de !== "";
+
+  const sql = filterBuyerDay
+    ? `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
+     FROM ml_orders o
+     WHERE o.ml_user_id = $1
+       AND o.date_created >= $2
+       AND o.buyer_id IS NOT NULL
+       AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
+       AND NOT EXISTS (SELECT 1 FROM ml_rating_request_sent r WHERE r.order_id = o.order_id)
+       AND NOT EXISTS (
+         SELECT 1 FROM ml_rating_request_sent r
+         WHERE r.ml_user_id = o.ml_user_id
+           AND r.buyer_id = o.buyer_id
+           AND r.buyer_id IS NOT NULL
+           AND r.sent_at >= $3 AND r.sent_at < $4
+       )
+       AND (
+         EXISTS (
+           SELECT 1 FROM ml_order_feedback f
+           WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+             AND f.side = 'sale' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+         )
+         OR (
+           o.feedback_sale IS NOT NULL
+           AND TRIM(o.feedback_sale) <> ''
+           AND LOWER(TRIM(o.feedback_sale)) <> 'pending'
+         )
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM ml_order_feedback f
+         WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+           AND f.side = 'purchase' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+       )
+       AND (
+         o.feedback_purchase IS NULL
+         OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
+         OR LOWER(TRIM(o.feedback_purchase)) = 'pending'
+       )
+     ORDER BY o.date_created DESC NULLS LAST, o.id DESC`
+    : `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
+     FROM ml_orders o
+     WHERE o.ml_user_id = $1
+       AND o.date_created >= $2
+       AND o.buyer_id IS NOT NULL
+       AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
+       AND NOT EXISTS (SELECT 1 FROM ml_rating_request_sent r WHERE r.order_id = o.order_id)
+       AND (
+         EXISTS (
+           SELECT 1 FROM ml_order_feedback f
+           WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+             AND f.side = 'sale' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+         )
+         OR (
+           o.feedback_sale IS NOT NULL
+           AND TRIM(o.feedback_sale) <> ''
+           AND LOWER(TRIM(o.feedback_sale)) <> 'pending'
+         )
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM ml_order_feedback f
+         WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+           AND f.side = 'purchase' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+       )
+       AND (
+         o.feedback_purchase IS NULL
+         OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
+         OR LOWER(TRIM(o.feedback_purchase)) = 'pending'
+       )
+     ORDER BY o.date_created DESC NULLS LAST, o.id DESC`;
+
+  const params = filterBuyerDay ? [mlUid, since, ds, de] : [mlUid, since];
+  const { rows } = await pool.query(sql, params);
+  return rows;
+}
+
 async function upsertMlListing(row) {
   await ensureSchema();
   const mlUid = Number(row.ml_user_id);
@@ -1930,6 +2314,13 @@ module.exports = {
   listMlOrdersAll,
   listMlOrderCountsByUserStatus,
   listMlOrderCountsByUser,
+  upsertMlOrderFeedback,
+  listMlOrderFeedbackByOrder,
+  listMlOrderFeedbackByUser,
+  wasMlRatingRequestSent,
+  insertMlRatingRequestSent,
+  wasRatingRequestSentToBuyerToday,
+  listMlOrdersEligibleForRatingRequest,
   /** Cierra el pool (tests). */
   _poolEnd: () => pool.end(),
 };

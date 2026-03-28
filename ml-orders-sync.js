@@ -9,9 +9,9 @@
 require("./load-env-local");
 
 const { mercadoLibreFetchForUser } = require("./oauth-token");
-const { orderRowFromMlApi } = require("./ml-order-map");
+const { orderRowFromMlApi, feedbackDetailRowsFromOrder } = require("./ml-order-map");
 const { defaultStatusesCsv } = require("./ml-order-statuses");
-const { listMlAccounts, upsertMlOrder } = require("./db");
+const { listMlAccounts, upsertMlOrder, upsertMlOrderFeedback } = require("./db");
 
 const PAGE_LIMIT = 50;
 
@@ -108,14 +108,22 @@ async function syncOrdersForMlUser(mlUserId, options = {}) {
       const results = Array.isArray(data.results) ? data.results : [];
 
       for (const ord of results) {
+        const fetchedAt = now();
         const row = orderRowFromMlApi(mlUid, ord, {
           http_status: res.status,
           sync_error: null,
-          fetched_at: now(),
+          fetched_at: fetchedAt,
         });
         if (row) {
           await upsertMlOrder(row);
           upserted++;
+          const fbRows = feedbackDetailRowsFromOrder(mlUid, ord.id, ord.feedback, {
+            fetched_at: fetchedAt,
+            source: "order_search",
+          });
+          for (const fr of fbRows) {
+            await upsertMlOrderFeedback(fr);
+          }
         }
       }
 

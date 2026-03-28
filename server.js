@@ -837,7 +837,7 @@ const server = http.createServer(async (req, res) => {
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         envio_auto_postventa:
-          "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}}",
+          "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1, ML_RATING_REQUEST_LOOKBACK_DAYS=3|6",
         log_envios_postventa:
           "GET /envios-postventa?k=ADMIN_SECRET (historial). POST /envios-postventa/retry?k=… JSON {order_id,ml_user_id,buyer_id?} opcional force, topic",
         cookies_ml_web:
@@ -857,7 +857,7 @@ const server = http.createServer(async (req, res) => {
         listing_change_ack:
           "GET|POST /listing-change-ack?k=ADMIN_SECRET — tabla ml_listing_change_ack: marcar ítem procesado (action: activate|add_stock|pause|delete|dismiss). POST JSON { ml_user_id, item_id, action, note?, webhook_log_id? }",
         ordenes_ml:
-          "GET /ordenes-ml?k=ADMIN_SECRET — ml_orders (descarga: npm run sync-orders | npm run sync-orders-all); ?cuenta= ?status= ?format=json; status ML típicos en raíz JSON bajo ordenes_estados_ml",
+          "GET /ordenes-ml?k=ADMIN_SECRET — ml_orders (descarga: npm run sync-orders | npm run sync-orders-all); feedback detalle: npm run sync-order-feedback | sync-order-feedback-all; ?cuenta= ?status= ?format=json; status ML típicos en raíz JSON bajo ordenes_estados_ml",
         ordenes_estados_ml: ML_ORDER_STATUSES_KNOWN,
       })
     );

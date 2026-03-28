@@ -15,7 +15,11 @@
     "sync-listings": "node ml-listings-sync.js",
     "sync-listings-all": "node ml-listings-sync.js --all",
     "sync-orders": "node ml-orders-sync.js",
-    "sync-orders-all": "node ml-orders-sync.js --all"
+    "sync-orders-all": "node ml-orders-sync.js --all",
+    "sync-order-feedback": "node ml-order-feedback-sync.js",
+    "sync-order-feedback-all": "node ml-order-feedback-sync.js --all",
+    "rating-request-daily": "node ml-rating-request-daily.js",
+    "rating-request-daily-all": "node ml-rating-request-daily.js --all"
   },
   "engines": {
     "node": ">=18"

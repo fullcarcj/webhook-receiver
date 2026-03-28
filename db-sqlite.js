@@ -78,6 +78,17 @@ db.exec(`
     sent_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS ml_rating_request_sent (
+    order_id INTEGER PRIMARY KEY,
+    ml_user_id INTEGER NOT NULL,
+    buyer_id INTEGER,
+    sent_at TEXT NOT NULL,
+    http_status INTEGER,
+    error_message TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user ON ml_rating_request_sent(ml_user_id);
+  CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user_buyer_sent ON ml_rating_request_sent(ml_user_id, buyer_id, sent_at);
+
   CREATE TABLE IF NOT EXISTS ml_post_sale_auto_send_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
@@ -261,6 +272,44 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ml_orders_user_status ON ml_orders(ml_user_id, status);
   CREATE INDEX IF NOT EXISTS idx_ml_orders_user_created ON ml_orders(ml_user_id, date_created);
   CREATE INDEX IF NOT EXISTS idx_ml_orders_order_id ON ml_orders(order_id);
+
+  CREATE TABLE IF NOT EXISTS ml_order_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ml_user_id INTEGER NOT NULL,
+    order_id INTEGER NOT NULL,
+    side TEXT NOT NULL,
+    ml_feedback_id INTEGER NOT NULL UNIQUE,
+    role TEXT,
+    fulfilled INTEGER,
+    rating TEXT,
+    reason TEXT,
+    message TEXT,
+    reply TEXT,
+    date_created TEXT,
+    visibility_date TEXT,
+    feedback_status TEXT,
+    modified INTEGER,
+    restock_item INTEGER,
+    has_seller_refunded_money INTEGER,
+    from_user_id INTEGER,
+    to_user_id INTEGER,
+    from_nickname TEXT,
+    to_nickname TEXT,
+    item_id TEXT,
+    item_title TEXT,
+    item_price REAL,
+    item_currency_id TEXT,
+    extended_feedback TEXT,
+    site_id TEXT,
+    app_id TEXT,
+    raw_json TEXT NOT NULL,
+    source TEXT,
+    fetched_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_user_order ON ml_order_feedback(ml_user_id, order_id);
+  CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_user_rating ON ml_order_feedback(ml_user_id, rating);
+  CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_date ON ml_order_feedback(date_created DESC);
 `);
 
 (function migratePostSalePackIdToOrderId() {
@@ -598,6 +647,27 @@ const FETCH_PROCESS_STATUS_POST_SALE_FAILED = "Fallo post-venta";
     }
   } catch (e) {
     console.error("[db] migrate ml_orders extra columns:", e.message);
+  }
+})();
+
+(function migrateMlRatingRequestSentBuyerId() {
+  try {
+    const t = db.prepare("PRAGMA table_info(ml_rating_request_sent)").all();
+    const names = new Set(t.map((c) => c.name));
+    if (!names.has("buyer_id")) {
+      db.exec("ALTER TABLE ml_rating_request_sent ADD COLUMN buyer_id INTEGER");
+      console.log("[db] ml_rating_request_sent: columna buyer_id añadida (migración)");
+    }
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user_buyer_sent ON ml_rating_request_sent(ml_user_id, buyer_id, sent_at)"
+    );
+    db.exec(`
+      UPDATE ml_rating_request_sent
+      SET buyer_id = (SELECT buyer_id FROM ml_orders o WHERE o.order_id = ml_rating_request_sent.order_id)
+      WHERE buyer_id IS NULL
+    `);
+  } catch (e) {
+    console.error("[db] migrate ml_rating_request_sent buyer_id:", e.message);
   }
 })();
 
@@ -1507,6 +1577,7 @@ function listMlOrdersByUser(mlUserId, limit, maxAllowed, options = {}) {
     return db
       .prepare(
         `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+                buyer_phone_registered, feedback_sale, feedback_purchase,
                 raw_json, http_status, sync_error, fetched_at, updated_at
          FROM ml_orders WHERE ml_user_id = ?
            AND LOWER(TRIM(COALESCE(status, ''))) = LOWER(?)
@@ -1570,6 +1641,390 @@ function listMlOrderCountsByUser() {
       `SELECT ml_user_id, COUNT(*) AS total FROM ml_orders GROUP BY ml_user_id ORDER BY ml_user_id ASC`
     )
     .all();
+}
+
+const ML_LISTING_CHANGE_ACK_ACTIONS = Object.freeze([
+  "activate",
+  "add_stock",
+  "pause",
+  "delete",
+  "dismiss",
+]);
+
+function boolSqlite(v) {
+  if (v === true) return 1;
+  if (v === false) return 0;
+  return null;
+}
+
+function upsertMlOrderFeedback(row) {
+  const mlUid = Number(row.ml_user_id);
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  const fid = row.ml_feedback_id != null ? Number(row.ml_feedback_id) : NaN;
+  const side = row.side != null ? String(row.side).trim() : "";
+  if (
+    !Number.isFinite(mlUid) ||
+    mlUid <= 0 ||
+    !Number.isFinite(oid) ||
+    oid <= 0 ||
+    !Number.isFinite(fid) ||
+    fid <= 0 ||
+    (side !== "sale" && side !== "purchase")
+  ) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const fetchedAt = row.fetched_at != null ? String(row.fetched_at) : now;
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  const rawJson = row.raw_json != null ? String(row.raw_json) : "{}";
+  let extStr = null;
+  if (row.extended_feedback != null) {
+    try {
+      extStr =
+        typeof row.extended_feedback === "object"
+          ? JSON.stringify(row.extended_feedback)
+          : String(row.extended_feedback);
+    } catch {
+      extStr = null;
+    }
+  }
+  const priceVal =
+    row.item_price != null && String(row.item_price).trim() !== ""
+      ? Number(row.item_price)
+      : null;
+  db.prepare(
+    `INSERT INTO ml_order_feedback (
+       ml_user_id, order_id, side, ml_feedback_id, role, fulfilled, rating, reason, message, reply,
+       date_created, visibility_date, feedback_status, modified, restock_item, has_seller_refunded_money,
+       from_user_id, to_user_id, from_nickname, to_nickname,
+       item_id, item_title, item_price, item_currency_id,
+       extended_feedback, site_id, app_id, raw_json, source, fetched_at, updated_at
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(ml_feedback_id) DO UPDATE SET
+       ml_user_id = excluded.ml_user_id,
+       order_id = excluded.order_id,
+       side = excluded.side,
+       role = excluded.role,
+       fulfilled = excluded.fulfilled,
+       rating = excluded.rating,
+       reason = excluded.reason,
+       message = excluded.message,
+       reply = excluded.reply,
+       date_created = excluded.date_created,
+       visibility_date = excluded.visibility_date,
+       feedback_status = excluded.feedback_status,
+       modified = excluded.modified,
+       restock_item = excluded.restock_item,
+       has_seller_refunded_money = excluded.has_seller_refunded_money,
+       from_user_id = excluded.from_user_id,
+       to_user_id = excluded.to_user_id,
+       from_nickname = excluded.from_nickname,
+       to_nickname = excluded.to_nickname,
+       item_id = excluded.item_id,
+       item_title = excluded.item_title,
+       item_price = excluded.item_price,
+       item_currency_id = excluded.item_currency_id,
+       extended_feedback = excluded.extended_feedback,
+       site_id = excluded.site_id,
+       app_id = excluded.app_id,
+       raw_json = excluded.raw_json,
+       source = excluded.source,
+       fetched_at = excluded.fetched_at,
+       updated_at = excluded.updated_at`
+  ).run(
+    mlUid,
+    oid,
+    side,
+    fid,
+    row.role != null ? String(row.role) : null,
+    boolSqlite(row.fulfilled),
+    row.rating != null ? String(row.rating).slice(0, 64) : null,
+    row.reason != null ? String(row.reason).slice(0, 128) : null,
+    row.message != null ? String(row.message).slice(0, 4000) : null,
+    row.reply != null ? String(row.reply).slice(0, 4000) : null,
+    row.date_created != null ? String(row.date_created) : null,
+    row.visibility_date != null ? String(row.visibility_date) : null,
+    row.feedback_status != null ? String(row.feedback_status).slice(0, 64) : null,
+    boolSqlite(row.modified),
+    boolSqlite(row.restock_item),
+    boolSqlite(row.has_seller_refunded_money),
+    row.from_user_id != null ? Number(row.from_user_id) : null,
+    row.to_user_id != null ? Number(row.to_user_id) : null,
+    row.from_nickname != null ? String(row.from_nickname).slice(0, 256) : null,
+    row.to_nickname != null ? String(row.to_nickname).slice(0, 256) : null,
+    row.item_id != null ? String(row.item_id).slice(0, 64) : null,
+    row.item_title != null ? String(row.item_title).slice(0, 512) : null,
+    priceVal != null && Number.isFinite(priceVal) ? priceVal : null,
+    row.item_currency_id != null ? String(row.item_currency_id).slice(0, 16) : null,
+    extStr,
+    row.site_id != null ? String(row.site_id).slice(0, 16) : null,
+    row.app_id != null ? String(row.app_id).slice(0, 32) : null,
+    rawJson,
+    row.source != null ? String(row.source).slice(0, 64) : null,
+    fetchedAt,
+    updatedAt
+  );
+  const r = db.prepare("SELECT id FROM ml_order_feedback WHERE ml_feedback_id = ?").get(fid);
+  return r && r.id != null ? Number(r.id) : null;
+}
+
+function listMlOrderFeedbackByOrder(mlUserId, orderId) {
+  const mlUid = Number(mlUserId);
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) return [];
+  return db
+    .prepare(
+      `SELECT id, ml_user_id, order_id, side, ml_feedback_id, role, fulfilled, rating, reason, message, reply,
+              date_created, visibility_date, feedback_status, modified, restock_item, has_seller_refunded_money,
+              from_user_id, to_user_id, from_nickname, to_nickname,
+              item_id, item_title, item_price, item_currency_id,
+              extended_feedback, site_id, app_id, raw_json, source, fetched_at, updated_at
+       FROM ml_order_feedback
+       WHERE ml_user_id = ? AND order_id = ?
+       ORDER BY side ASC`
+    )
+    .all(mlUid, oid);
+}
+
+function listMlOrderFeedbackByUser(mlUserId, limit, maxAllowed) {
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const cap = maxAllowed != null ? maxAllowed : 20000;
+  const n = Math.min(Math.max(Number(limit) || 500, 1), cap);
+  return db
+    .prepare(
+      `SELECT id, ml_user_id, order_id, side, ml_feedback_id, role, fulfilled, rating, reason, message, reply,
+              date_created, visibility_date, feedback_status, modified, restock_item, has_seller_refunded_money,
+              from_user_id, to_user_id, from_nickname, to_nickname,
+              item_id, item_title, item_price, item_currency_id,
+              extended_feedback, site_id, app_id, raw_json, source, fetched_at, updated_at
+       FROM ml_order_feedback
+       WHERE ml_user_id = ?
+       ORDER BY date_created DESC, id DESC
+       LIMIT ?`
+    )
+    .all(mlUid, n);
+}
+
+function wasMlRatingRequestSent(orderId) {
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(oid) || oid <= 0) return false;
+  const r = db.prepare("SELECT 1 FROM ml_rating_request_sent WHERE order_id = ?").get(oid);
+  return Boolean(r);
+}
+
+function insertMlRatingRequestSent(row) {
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  const mlUid = row.ml_user_id != null ? Number(row.ml_user_id) : NaN;
+  const bid = row.buyer_id != null ? Number(row.buyer_id) : NaN;
+  if (
+    !Number.isFinite(oid) ||
+    oid <= 0 ||
+    !Number.isFinite(mlUid) ||
+    mlUid <= 0 ||
+    !Number.isFinite(bid) ||
+    bid <= 0
+  ) {
+    return null;
+  }
+  const sentAt = row.sent_at != null ? String(row.sent_at) : new Date().toISOString();
+  db.prepare(
+    `INSERT OR IGNORE INTO ml_rating_request_sent (order_id, ml_user_id, buyer_id, sent_at, http_status, error_message)
+     VALUES (?,?,?,?,?,?)`
+  ).run(
+    oid,
+    mlUid,
+    bid,
+    sentAt,
+    row.http_status != null ? Number(row.http_status) : null,
+    row.error_message != null ? String(row.error_message).slice(0, 2000) : null
+  );
+  return oid;
+}
+
+function wasRatingRequestSentToBuyerToday(mlUserId, buyerId, dayStartIso, dayEndIso) {
+  const mlUid = Number(mlUserId);
+  const bid = buyerId != null ? Number(buyerId) : NaN;
+  const ds = dayStartIso != null ? String(dayStartIso).trim() : "";
+  const de = dayEndIso != null ? String(dayEndIso).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(bid) || bid <= 0 || !ds || !de) {
+    return false;
+  }
+  const r = db
+    .prepare(
+      `SELECT 1 FROM ml_rating_request_sent
+       WHERE ml_user_id = ? AND buyer_id = ?
+         AND sent_at >= ? AND sent_at < ?
+       LIMIT 1`
+    )
+    .get(mlUid, bid, ds, de);
+  return Boolean(r);
+}
+
+function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, dayEndIso) {
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const since = sinceIso != null ? String(sinceIso).trim() : "";
+  if (!since) return [];
+  const ds = dayStartIso != null ? String(dayStartIso).trim() : "";
+  const de = dayEndIso != null ? String(dayEndIso).trim() : "";
+  const filterBuyerDay = ds !== "" && de !== "";
+
+  if (filterBuyerDay) {
+    return db
+      .prepare(
+        `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
+         FROM ml_orders o
+         WHERE o.ml_user_id = ?
+           AND o.date_created >= ?
+           AND o.buyer_id IS NOT NULL
+           AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
+           AND NOT EXISTS (SELECT 1 FROM ml_rating_request_sent r WHERE r.order_id = o.order_id)
+           AND NOT EXISTS (
+             SELECT 1 FROM ml_rating_request_sent r
+             WHERE r.ml_user_id = o.ml_user_id
+               AND r.buyer_id = o.buyer_id
+               AND r.buyer_id IS NOT NULL
+               AND r.sent_at >= ? AND r.sent_at < ?
+           )
+           AND (
+             EXISTS (
+               SELECT 1 FROM ml_order_feedback f
+               WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+                 AND f.side = 'sale' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+             )
+             OR (
+               o.feedback_sale IS NOT NULL
+               AND TRIM(o.feedback_sale) <> ''
+               AND LOWER(TRIM(o.feedback_sale)) <> 'pending'
+             )
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM ml_order_feedback f
+             WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+               AND f.side = 'purchase' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+           )
+           AND (
+             o.feedback_purchase IS NULL
+             OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
+             OR LOWER(TRIM(o.feedback_purchase)) = 'pending'
+           )
+         ORDER BY o.date_created DESC, o.id DESC`
+      )
+      .all(mlUid, since, ds, de);
+  }
+
+  return db
+    .prepare(
+      `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
+       FROM ml_orders o
+       WHERE o.ml_user_id = ?
+         AND o.date_created >= ?
+         AND o.buyer_id IS NOT NULL
+         AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
+         AND NOT EXISTS (SELECT 1 FROM ml_rating_request_sent r WHERE r.order_id = o.order_id)
+         AND (
+           EXISTS (
+             SELECT 1 FROM ml_order_feedback f
+             WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+               AND f.side = 'sale' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+           )
+           OR (
+             o.feedback_sale IS NOT NULL
+             AND TRIM(o.feedback_sale) <> ''
+             AND LOWER(TRIM(o.feedback_sale)) <> 'pending'
+           )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM ml_order_feedback f
+           WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+             AND f.side = 'purchase' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+         )
+         AND (
+           o.feedback_purchase IS NULL
+           OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
+           OR LOWER(TRIM(o.feedback_purchase)) = 'pending'
+         )
+       ORDER BY o.date_created DESC, o.id DESC`
+    )
+    .all(mlUid, since);
+}
+
+function insertMlListingChangeAck(row) {
+  const mlUid = Number(row.ml_user_id);
+  const itemId = row.item_id != null ? String(row.item_id).trim() : "";
+  const action = row.action != null ? String(row.action).trim().toLowerCase() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !itemId) {
+    return null;
+  }
+  if (!ML_LISTING_CHANGE_ACK_ACTIONS.includes(action)) {
+    return null;
+  }
+  const createdAt = row.created_at != null ? String(row.created_at) : new Date().toISOString();
+  const r = db
+    .prepare(
+      `INSERT INTO ml_listing_change_ack (
+         ml_user_id, item_id, webhook_log_id, action, note, created_at
+       ) VALUES (?,?,?,?,?,?) RETURNING id`
+    )
+    .get(
+      mlUid,
+      itemId,
+      row.webhook_log_id != null ? Number(row.webhook_log_id) : null,
+      action,
+      row.note != null ? String(row.note).slice(0, 4000) : null,
+      createdAt
+    );
+  return r && r.id != null ? Number(r.id) : null;
+}
+
+function listMlListingChangeAck(limit, maxAllowed, options = {}) {
+  const cap = maxAllowed != null ? maxAllowed : 5000;
+  const n = Math.min(Math.max(Number(limit) || 200, 1), cap);
+  const uid =
+    options.ml_user_id != null && Number.isFinite(Number(options.ml_user_id))
+      ? Number(options.ml_user_id)
+      : null;
+  const iid =
+    options.item_id != null && String(options.item_id).trim() !== ""
+      ? String(options.item_id).trim()
+      : null;
+  if (uid != null && iid != null) {
+    return db
+      .prepare(
+        `SELECT id, ml_user_id, item_id, webhook_log_id, action, note, created_at
+         FROM ml_listing_change_ack
+         WHERE ml_user_id = ? AND item_id = ?
+         ORDER BY id DESC LIMIT ?`
+      )
+      .all(uid, iid, n);
+  }
+  if (uid != null) {
+    return db
+      .prepare(
+        `SELECT id, ml_user_id, item_id, webhook_log_id, action, note, created_at
+         FROM ml_listing_change_ack
+         WHERE ml_user_id = ?
+         ORDER BY id DESC LIMIT ?`
+      )
+      .all(uid, n);
+  }
+  if (iid != null) {
+    return db
+      .prepare(
+        `SELECT id, ml_user_id, item_id, webhook_log_id, action, note, created_at
+         FROM ml_listing_change_ack
+         WHERE item_id = ?
+         ORDER BY id DESC LIMIT ?`
+      )
+      .all(iid, n);
+  }
+  return db
+    .prepare(
+      `SELECT id, ml_user_id, item_id, webhook_log_id, action, note, created_at
+       FROM ml_listing_change_ack ORDER BY id DESC LIMIT ?`
+    )
+    .all(n);
 }
 
 function upsertMlListing(row) {
@@ -1813,4 +2268,11 @@ module.exports = {
   listMlOrdersAll,
   listMlOrderCountsByUserStatus,
   listMlOrderCountsByUser,
+  upsertMlOrderFeedback,
+  listMlOrderFeedbackByOrder,
+  listMlOrderFeedbackByUser,
+  wasMlRatingRequestSent,
+  insertMlRatingRequestSent,
+  wasRatingRequestSentToBuyerToday,
+  listMlOrdersEligibleForRatingRequest,
 };

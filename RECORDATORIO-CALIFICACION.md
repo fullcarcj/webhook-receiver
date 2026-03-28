@@ -80,4 +80,23 @@ Ajustá la ruta a `node` y al proyecto. Si el servidor está en hora local Argen
 | `ML_RATING_REQUEST_ORDER_STATUS` o `--status=` | Opcional: filtrar por estado ML, ej. `confirmed`. |
 | `ML_RATING_REQUEST_BODY` | Opcional: texto fijo; si no está, se elige al azar entre 10 plantillas. |
 
-Los envíos quedan registrados en la tabla **`ml_rating_request_log`** y podés consultarlos en la ruta de administración que ya uses para recordatorios (según tu `server.js`).
+Los envíos quedan registrados en la tabla **`ml_rating_request_log`**.
+
+---
+
+## Dónde ver los envíos en el navegador
+
+La vista **solo existe en el servidor HTTP** de este proyecto (`server.js`), no en el job por consola.
+
+1. Definí **`ADMIN_SECRET`** en el entorno o en `oauth-env.json` (ver `oauth-env.json.example`). Sin eso la ruta responde **503**.
+2. Levantá el servidor: `npm start` (o tu proceso en Render, etc.).
+3. Abrí en el navegador (reemplazá host, puerto y clave):
+
+   - `http://localhost:PUERTO/recordatorios-calificacion?k=TU_ADMIN_SECRET`
+   - Atajo: `http://localhost:PUERTO/recordatorios?k=TU_ADMIN_SECRET`
+
+4. **401** = la clave en `?k=` no coincide con `ADMIN_SECRET`. **503** = falta definir `ADMIN_SECRET`.
+
+**JSON** (útil para scripts): añadí `&format=json` a la misma URL.
+
+En la raíz del servicio, **`GET /`** (JSON) incluye la clave `como_ver_recordatorios_calificacion` con estos pasos resumidos.

@@ -150,7 +150,12 @@ function isPostSaleEnviosPath(pathname) {
 }
 
 function isRecordatoriosCalificacionPath(pathname) {
-  return pathname === "/recordatorios-calificacion" || pathname === "/recordatorios-calificacion/";
+  return (
+    pathname === "/recordatorios-calificacion" ||
+    pathname === "/recordatorios-calificacion/" ||
+    pathname === "/recordatorios" ||
+    pathname === "/recordatorios/"
+  );
 }
 
 function isVentasDetalleWebPath(pathname) {
@@ -846,9 +851,16 @@ const server = http.createServer(async (req, res) => {
         log_envios_postventa:
           "GET /envios-postventa?k=ADMIN_SECRET (historial). POST /envios-postventa/retry?k=… JSON {order_id,ml_user_id,buyer_id?} opcional force, topic",
         recordatorios_calificacion:
-          "GET /recordatorios-calificacion?k=ADMIN_SECRET — visualiza tabla ml_rating_request_log (cada POST recordatorio calificación; HTML o ?format=json; ?outcome=all|success|api_error; columna feedback comprador = snapshot ml_orders)",
+          "GET /recordatorios-calificacion?k=ADMIN_SECRET — visualiza tabla ml_rating_request_log (cada POST recordatorio calificación; HTML o ?format=json; ?outcome=all|success|api_error; columna feedback comprador = snapshot ml_orders). Alias corto: GET /recordatorios?k=…",
         ml_rating_request_log:
-          "Misma vista que recordatorios_calificacion — GET /recordatorios-calificacion?k=ADMIN_SECRET",
+          "Misma vista — GET /recordatorios-calificacion?k=ADMIN_SECRET o /recordatorios?k=ADMIN_SECRET",
+        como_ver_recordatorios_calificacion: {
+          paso_1: "El servidor debe tener definida la variable de entorno ADMIN_SECRET (misma clave que usás en ?k=).",
+          paso_2:
+            "Con el servidor en marcha (npm start), abrí en el navegador: https://TU_HOST/recordatorios-calificacion?k=TU_CLAVE (o /recordatorios?k=…). Local: http://localhost:PUERTO/recordatorios-calificacion?k=TU_CLAVE",
+          paso_3: "Si ves 503, falta ADMIN_SECRET; si 401, la clave en ?k= no coincide.",
+          json: "GET …/recordatorios-calificacion?k=…&format=json",
+        },
         cookies_ml_web:
           "Cookies detalle .ve: prioridad (1) ml_accounts.cookies_netscape (POST /admin/ml-web-cookies), (2) archivo, (3) ML_COOKIE_NETSCAPE_*. Formatos: Netscape, JSON o Header String (Cookie-Editor).",
         ventas_detalle_web:
@@ -2749,7 +2761,7 @@ const server = http.createServer(async (req, res) => {
     if (k !== adminSecret) {
       res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
       res.end(
-        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Recordatorios</title><p>Acceso denegado. <code>/recordatorios-calificacion?k=…</code></p>"
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Recordatorios</title><p>Acceso denegado. <code>/recordatorios-calificacion?k=…</code> o <code>/recordatorios?k=…</code> (misma clave que <code>ADMIN_SECRET</code>).</p>"
       );
       return;
     }
@@ -3437,7 +3449,9 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
     console.log(`Log envíos post-venta: http://localhost:${PORT}/envios-postventa?k=TU_ADMIN_SECRET`);
-    console.log(`Log recordatorios calificación: http://localhost:${PORT}/recordatorios-calificacion?k=TU_ADMIN_SECRET`);
+    console.log(
+      `Log recordatorios calificación: http://localhost:${PORT}/recordatorios-calificacion?k=TU_ADMIN_SECRET (alias: /recordatorios?k=…)`
+    );
     console.log(`Preguntas ML (pending/answered): http://localhost:${PORT}/preguntas-ml?k=TU_ADMIN_SECRET`);
     console.log(`Publicaciones ML (listings por cuenta): http://localhost:${PORT}/publicaciones-ml?k=TU_ADMIN_SECRET`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);

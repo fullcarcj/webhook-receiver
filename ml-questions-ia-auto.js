@@ -11,7 +11,8 @@
  * ML_QUESTIONS_IA_AUTO_UNTIL=ISO UTC: tras esa fecha/hora no se envía.
  *
  * Polling (respaldo): ML_QUESTIONS_IA_AUTO_POLL_MS vacío → 5000 (5 s); mínimo 5000 ms; 0 = sin poll.
- *   Intervalos cortos pueden provocar 429 en la API ML. Respeta la misma ventana que el intento inmediato.
+ *   Los reintentos por poll ignoran ventana horaria/día (solo ENABLED + UNTIL) hasta lograr POST OK o vaciar pending.
+ *   El intento vía webhook sigue usando ventana/IGNORE/FORCE. Intervalos cortos pueden provocar 429 en la API ML.
  * ML_QUESTIONS_IA_AUTO_POLL_LIMIT. ML_QUESTIONS_IA_MAX_CHARS=2000 (máx. cuerpo de respuesta).
  *
  * Importante en producción: las variables deben estar en el **servidor** (p. ej. Render). `oauth-env.json`
@@ -120,11 +121,13 @@ function parseQuestionsIaWindowHHMM(s) {
 
 /**
  * @param {Date} [atDate]
+ * @param {{ forPollRetry?: boolean }} [opts] Si forPollRetry=true (reintentos del poll), no aplica ventana HH:mm ni ML_QUESTIONS_IA_AUTO_DAYS.
  * @returns {{ active: boolean, outcome: string, reason_detail: string|null }}
  */
-function getQuestionsIaAutoWindowEvaluation(atDate) {
+function getQuestionsIaAutoWindowEvaluation(atDate, opts) {
   const ref =
     atDate instanceof Date && !Number.isNaN(atDate.getTime()) ? atDate : new Date();
+  const forPollRetry = opts && opts.forPollRetry === true;
 
   if (process.env.ML_QUESTIONS_IA_AUTO_ENABLED !== "1") {
     return { active: false, outcome: "skip_disabled", reason_detail: null };
@@ -140,6 +143,15 @@ function getQuestionsIaAutoWindowEvaluation(atDate) {
         reason_detail: `ML_QUESTIONS_IA_AUTO_UNTIL ya pasó (${String(untilRaw).trim()})`,
       };
     }
+  }
+
+  if (forPollRetry) {
+    return {
+      active: true,
+      outcome: "ok_poll_retry",
+      reason_detail:
+        "Reintento por poll cada 5 s (configurable): sin ventana horaria ni ML_QUESTIONS_IA_AUTO_DAYS; aplica ENABLED y UNTIL.",
+    };
   }
 
   const ignoreWindow =
@@ -372,7 +384,8 @@ function pickRandomIaBody(lastIndex) {
 
 /**
  * Si ML_QUESTIONS_IA_AUTO_ENABLED=1: POST /answers con plantilla aleatoria; éxito → answered + borrar pending.
- * @param {{ mlUserId: number, pendingRow: object, parsed: object, notifId: string|null, iaAutoSentCache?: Set<number>, evalAt?: Date }} args
+ * @param {{ mlUserId: number, pendingRow: object, parsed: object, notifId: string|null, iaAutoSentCache?: Set<number>, evalAt?: Date, pollRetry?: boolean }} args
+ *   pollRetry=true: reintento del poll (sin ventana horaria/día; solo ENABLED+UNTIL).
  */
 async function tryQuestionIaAutoAnswer(args) {
   const mlUid = Number(args.mlUserId);
@@ -382,7 +395,9 @@ async function tryQuestionIaAutoAnswer(args) {
 
   const evalAt =
     args.evalAt instanceof Date && !Number.isNaN(args.evalAt.getTime()) ? args.evalAt : new Date();
-  const win = getQuestionsIaAutoWindowEvaluation(evalAt);
+  const win = getQuestionsIaAutoWindowEvaluation(evalAt, {
+    forPollRetry: args.pollRetry === true,
+  });
   if (!win.active) {
     try {
       await insertMlQuestionsIaAutoLog({
@@ -558,7 +573,7 @@ async function retryPendingQuestionsIaAuto(opts) {
     }
     const mlUserId = Number(row.ml_user_id);
     const evalAt = new Date();
-    const win = getQuestionsIaAutoWindowEvaluation(evalAt);
+    const win = getQuestionsIaAutoWindowEvaluation(evalAt, { forPollRetry: true });
     const arithmetic = getQuestionsIaAutoWindowArithmeticBreakdown(evalAt);
     const r = await tryQuestionIaAutoAnswer({
       mlUserId,
@@ -567,6 +582,7 @@ async function retryPendingQuestionsIaAuto(opts) {
       notifId: row.notification_id,
       iaAutoSentCache: sentSet,
       evalAt,
+      pollRetry: true,
     });
     const resueltaAuto =
       r && r.ok === true && (r.question_id != null || r.skip === "already_sent");
@@ -638,8 +654,6 @@ function startQuestionsIaAutoPoll() {
 
   async function tick() {
     if (running) return;
-    const ev = getQuestionsIaAutoWindowEvaluation();
-    if (!ev.active) return;
     running = true;
     try {
       const out = await retryPendingQuestionsIaAuto({ limit });
@@ -659,7 +673,7 @@ function startQuestionsIaAutoPoll() {
   }
 
   setInterval(tick, ms);
-  setTimeout(tick, Math.min(ms, 15_000));
+  setTimeout(tick, ms);
   const minStr = ms >= 60_000 ? `~${(ms / 60_000).toFixed(ms % 60_000 === 0 ? 0 : 2)} min` : `~${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 2)} s`;
   console.log(
     "[questions ia-auto poll] cada %s ms (%s) · hasta %s pending/ciclo (ENABLED=1)",

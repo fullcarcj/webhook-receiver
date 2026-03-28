@@ -468,7 +468,7 @@ function scheduleTopicFetchFromWebhook(body) {
       if (tl === "orders_feedback") topic = "orders_feedback";
     }
     if (!topic && /\/orders\/\d+\/feedback/i.test(resourceStr)) {
-      topic = "orders_feedback";
+      /* No inferir orders_feedback: ML debe enviar body.topic estrictamente "orders_feedback". */
     } else if (!topic && /\/orders\/\d/i.test(resourceStr)) {
       topic = "orders_v2";
     } else if (!topic && /\/messages\//i.test(resourceStr)) {
@@ -869,7 +869,7 @@ const server = http.createServer(async (req, res) => {
         hooks_recibidos:
           "GET /hooks?k=ADMIN_SECRET (webhook_events: cada POST /webhook guarda JSON; POST /reg también)",
         topic_fetches_ml:
-          "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1). Topic orders_feedback: tras GET /orders/{id}/feedback se actualizan ml_order_feedback y feedback_sale/feedback_purchase/feedback_purchase_value en ml_orders",
+          "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1). Solo si body.topic es exactamente orders_feedback: tras GET /orders/{id}/feedback se actualizan ml_order_feedback y feedback_* en ml_orders (no se infiere el topic desde el resource)",
         borrar_todos_los_fetches:
           "DELETE /admin/topic-fetches (cabecera X-Admin-Secret) vacía tabla ml_topic_fetches",
         borrar_snapshots_ventas_detalle_ve:

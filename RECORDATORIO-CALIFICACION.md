@@ -8,6 +8,8 @@ Este proyecto incluye el script `ml-rating-request-daily.js`, que envía mensaje
 
 Si usás **GitHub** con este repositorio:
 
+**Importante:** el cron programado (`schedule`) solo corre en la **rama por defecto** del repo (suele ser `main`). Si el workflow está solo en otra rama, fusionalo a la default o cambiá la rama por defecto en **Settings → General**. La ejecución manual (**Run workflow**) sí puede lanzarse desde la rama que elijas.
+
 1. En el repo: **Settings → Secrets and variables → Actions → New repository secret**.
 2. Creá el secret **`DATABASE_URL`** con la misma cadena de conexión PostgreSQL que usa tu app en producción (debe ser alcanzable desde internet; muchas BDs en la nube ya lo permiten).
 3. Los tokens OAuth por cuenta deben estar **guardados en la base** (`ml_accounts`), como cuando corrés el servidor localmente: el job no usa `oauth-env.json` en GitHub.

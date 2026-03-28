@@ -1,0 +1,36 @@
+# Recordatorios de calificación ML: todos los días a las 10:00 UTC.
+# Requiere el secret DATABASE_URL (PostgreSQL con ml_accounts y datos de órdenes).
+# Ejecución manual: pestaña Actions → este workflow → Run workflow.
+
+name: Recordatorio calificación ML
+
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: rating-request-daily
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Enviar recordatorios (--all)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ML_RATING_REQUEST_ENABLED: "1"
+          ML_RATING_REQUEST_LOOKBACK_DAYS: "6"
+        run: node ml-rating-request-daily.js --all

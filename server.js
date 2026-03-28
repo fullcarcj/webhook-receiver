@@ -53,7 +53,6 @@ const {
   getQuestionsIaAutoWindowEvaluation,
   getQuestionsIaAutoWindowArithmeticBreakdown,
   serializeIaAutoPendingRouteDetail,
-  isQuestionsIaAutoForceRequired,
   startQuestionsIaAutoPoll,
 } = require("./ml-questions-ia-auto");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
@@ -679,15 +678,13 @@ function scheduleTopicFetchFromWebhook(body) {
                     }
                   } else if (isQuestionUnansweredStatus(row.ml_status)) {
                     /**
-                     * Tres pasos lógicos: (1) hook ya recibido + GET → fila `row`. (2) Mirar hora/ventana;
-                     * si IA+ventana activa → POST /answers; si no → pending. (3) Si auto OK, tryQuestionIaAutoAnswer
-                     * hace answered + delete pending; aquí solo pending si no hubo respuesta automática completa.
+                     * (1) Hook + GET → fila `row`. (2) Si ML_QUESTIONS_IA_AUTO_ENABLED=1 → tryQuestionIaAutoAnswer
+                     * (POST /answers, plantilla aleatoria). (3) Si OK → answered + delete pending; si no → pending.
                      */
                     const evalAt = new Date();
                     const win = getQuestionsIaAutoWindowEvaluation(evalAt);
                     const arithmetic = getQuestionsIaAutoWindowArithmeticBreakdown(evalAt);
                     const iaOn = process.env.ML_QUESTIONS_IA_AUTO_ENABLED === "1";
-                    const forceRequired = isQuestionsIaAutoForceRequired();
                     const buildIaRouteDetail = (route, extra) =>
                       serializeIaAutoPendingRouteDetail({
                         route,
@@ -701,7 +698,7 @@ function scheduleTopicFetchFromWebhook(body) {
                         arithmetic_breakdown: arithmetic,
                         ...extra,
                       });
-                    if (iaOn && (win.active || forceRequired)) {
+                    if (iaOn) {
                       try {
                         const r = await tryQuestionIaAutoAnswer({
                           mlUserId,
@@ -725,7 +722,7 @@ function scheduleTopicFetchFromWebhook(body) {
                                 error: r && r.error != null ? String(r.error).slice(0, 4000) : null,
                               },
                               human:
-                                "Ventana IA activa pero el POST automático no completó (revisar skip, api_error o exception en why_not_auto).",
+                                "IA automática activa pero el POST no completó (revisar skip, api_error o exception en why_not_auto).",
                             }),
                           });
                         }
@@ -743,12 +740,9 @@ function scheduleTopicFetchFromWebhook(body) {
                       await upsertMlQuestionPending({
                         ...row,
                         ia_auto_route_detail: buildIaRouteDetail("pending_no_auto_attempt", {
-                          why: !iaOn
-                            ? "ML_QUESTIONS_IA_AUTO_ENABLED distinto de 1"
-                            : "ventana IA inactiva y ML_QUESTIONS_IA_AUTO_FORCE distinto de 1 (ver evaluation.outcome)",
-                          human: !iaOn
-                            ? "IA automática deshabilitada: solo se guarda pending."
-                            : "Fuera de ventana y sin FORCE=1: solo pending (manual o retry/poll). Con ENABLED=1 y FORCE=1 siempre se intenta POST.",
+                          why: "ML_QUESTIONS_IA_AUTO_ENABLED distinto de 1",
+                          human:
+                            "IA automática deshabilitada: no se intenta POST /answers; solo se guarda pending.",
                         }),
                       });
                     }
@@ -1015,7 +1009,7 @@ const server = http.createServer(async (req, res) => {
           "ml_ventas_detalle_web.raw = HTML; GET /ventas-detalle-web?k= & format=json&include_raw=1 — POST retry JSON write_log:true o ML_VENTAS_DETALLE_LOG_FILE=1 → log.txt (ML_VENTAS_DETALLE_LOG_PATH opcional) — DELETE /admin/ventas-detalle-web vacía la tabla",
         preguntas_ml: {
           ml_questions_pending:
-            "Por responder: GET /preguntas-ml?k=ADMIN_SECRET&tabla=pending · Webhook questions + ML_WEBHOOK_FETCH_RESOURCE=1 → GET /questions/{id}; al recibir UNANSWERED se evalúa hora/ventana y se intenta POST /answers o se deja para manual",
+            "Por responder: GET /preguntas-ml?k=ADMIN_SECRET&tabla=pending · Webhook questions + ML_WEBHOOK_FETCH_RESOURCE=1 → GET /questions/{id}; si UNANSWERED y ML_QUESTIONS_IA_AUTO_ENABLED=1 se intenta POST /answers al instante (plantilla aleatoria) o se deja pending",
           ml_questions_answered:
             "Respondidas: GET /preguntas-ml?k=ADMIN_SECRET&tabla=answered · Tras GET /questions/{id} con status respondido/cerrado",
           ml_questions_refresh:
@@ -1025,13 +1019,13 @@ const server = http.createServer(async (req, res) => {
           delete_all_ml_questions_pending:
             "DELETE /admin/ml-questions-pending (cabecera X-Admin-Secret) vacía ml_questions_pending (solo BD local; no afecta preguntas en ML)",
           respuesta_automatica_ia:
-            "Ventana diaria (prioridad): ML_QUESTIONS_IA_AUTO_WINDOW_START=HH:MM y ML_QUESTIONS_IA_AUTO_WINDOW_END=HH:MM en ML_QUESTIONS_IA_AUTO_TIMEZONE (ej. America/Caracas); ML_QUESTIONS_IA_AUTO_DAYS=0,1,2,3,4,5,6 (0=dom…6=sáb, vacío=todos). Cruce medianoche si START>END. ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 ignora horario y días (respuesta automática 24h si IA enabled). Alternativa: ML_QUESTIONS_IA_AUTO_UNTIL=ISO8601 (un solo corte). POST /answers, ml_questions_ia_auto_sent.",
+            "ML_QUESTIONS_IA_AUTO_ENABLED=1: POST /answers inmediato con texto aleatorio entre las plantillas QUESTION_IA_BODIES; éxito → ml_questions_answered + borrar pending; ml_questions_ia_auto_sent. ML_QUESTIONS_IA_AUTO_TIMEZONE solo afecta la hora mostrada en diagnósticos.",
           log_ia_auto_omitidos:
-            "GET /preguntas-ia-auto-log?k=ADMIN_SECRET — ml_questions_ia_auto_log (intentos sin POST /answers: fuera de ventana, día no permitido, etc.; ?format=json&limit=)",
+            "GET /preguntas-ia-auto-log?k=ADMIN_SECRET — ml_questions_ia_auto_log (intentos sin POST /answers cuando IA desactivada u otros motivos; ?format=json&limit=)",
           retry_ia_auto_pending:
-            "GET /preguntas-ia-auto-retry?k=ADMIN_SECRET — reintenta respuesta IA para filas en ml_questions_pending (útil si el webhook llegó fuera de ventana; ejecutar en cron dentro de la ventana; ?limit=50)",
+            "GET /preguntas-ia-auto-retry?k=ADMIN_SECRET — reintenta POST /answers para filas en ml_questions_pending (?limit=50)",
           poll_ia_auto_pending:
-            "ML_QUESTIONS_IA_AUTO_POLL_MS=300000 (≥60000) + ENABLED=1: el proceso reintenta pending cada N ms mientras la ventana IA esté activa (o IGNORE_WINDOW). ML_QUESTIONS_IA_AUTO_POLL_LIMIT=40",
+            "ML_QUESTIONS_IA_AUTO_POLL_MS=300000 (≥60000) + ENABLED=1: reintenta pending cada N ms. ML_QUESTIONS_IA_AUTO_POLL_LIMIT=40",
           estado_ia_auto_prueba:
             "GET /preguntas-ia-auto-status?k=ADMIN_SECRET — JSON: modo manual/automático, hora local, env efectivo, checks (IA on, ML_WEBHOOK_FETCH_RESOURCE), texto prueba",
         },
@@ -2167,7 +2161,7 @@ const server = http.createServer(async (req, res) => {
   <p class="lead">Tabla <code>${tabla === "answered" ? "ml_questions_answered" : "ml_questions_pending"}</code> · ${rows.length} fila(s). JSON: <code>?format=json</code> · <code>?tabla=pending</code> o <code>?tabla=answered</code></p>
   ${
     tabla === "pending"
-      ? `<p class="lead"><strong>Cómo funciona (3 pasos):</strong> (1) webhook <code>questions</code> + GET del recurso. (2) Si UNANSWERED → ver hora/ventana e intentar respuesta automática o dejar en pending. (3) Si la pregunta queda respondida en ML → fila en <code>ml_questions_answered</code> y se borra de pending. Con <code>ML_WEBHOOK_FETCH_RESOURCE=1</code>, si toca automático se intenta <code>POST /answers</code> <strong>sin</strong> guardar pending antes; solo si falla el envío o no toca ventana aparece fila aquí. La columna <code>ia_auto_route_detail</code> documenta por qué sigue en pending.</p>
+      ? `<p class="lead"><strong>Cómo funciona (3 pasos):</strong> (1) webhook <code>questions</code> + GET del recurso. (2) Si UNANSWERED y <code>ML_QUESTIONS_IA_AUTO_ENABLED=1</code> → intento inmediato <code>POST /answers</code> (plantilla aleatoria); si no o si falla el envío → pending. (3) Si la pregunta queda respondida en ML → fila en <code>ml_questions_answered</code> y se borra de pending. Con <code>ML_WEBHOOK_FETCH_RESOURCE=1</code> y automático activo se intenta <code>POST /answers</code> sin depender de horario. La columna <code>ia_auto_route_detail</code> documenta por qué sigue en pending.</p>
   <p class="lead">Para <strong>borrar todas las filas pending</strong> en esta base (solo copia local; las preguntas siguen en ML): <code>DELETE /admin/ml-questions-pending</code> con cabecera <code>X-Admin-Secret</code> (mismo valor que variable de entorno).</p>
   <p class="lead">Si en Mercado Libre ya está <strong>respondida</strong> y aquí sigue en pending: la BD está desactualizada. <a href="${escapeAttr(preguntasMlSyncPendingUrl())}">Sincronizar pending con la API</a> (JSON; recargá esta página después).</p>
   <p class="lead">Si <strong>no</strong> responde automático: en el servidor (p. ej. Render) tenés que definir las mismas variables que <code>ML_QUESTIONS_IA_AUTO_*</code> y <code>ML_WEBHOOK_FETCH_RESOURCE=1</code> que en tu <code>oauth-env.json</code> local. <a href="${escapeAttr(preguntasMlIaStatusUrl())}">Estado IA (modo / prueba)</a> · <a href="${escapeAttr(preguntasMlIaRetryUrl())}">Reintentar POST /answers sobre pending</a> · <a href="${escapeAttr(preguntasMlIaLogUrl())}">Log (errores API / excepciones)</a>. Las reglas IA son <strong>globales</strong> para todo el servidor; cada fila usa el <code>user_id</code> del <strong>vendedor</strong> de esa notificación (multicuenta). Cada vendedor debe tener token en <code>ml_accounts</code>; si el número no coincide o falta la cuenta, el POST falla para esa pregunta.</p>`
@@ -2186,7 +2180,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /** Log: respuesta IA automática omitida (p. ej. fuera de ventana). Tabla ml_questions_ia_auto_log. */
+  /** Log: respuesta IA automática omitida o error. Tabla ml_questions_ia_auto_log. */
   if (req.method === "GET" && isPreguntasIaAutoLogPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
     const k = url.searchParams.get("k") || url.searchParams.get("secret");

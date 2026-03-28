@@ -174,6 +174,22 @@ async function runSchemaAndSeed() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user ON ml_rating_request_sent(ml_user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user_buyer_sent ON ml_rating_request_sent(ml_user_id, buyer_id, sent_at)`,
+    `CREATE TABLE IF NOT EXISTS ml_rating_request_log (
+      id BIGSERIAL PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      ml_user_id BIGINT NOT NULL,
+      order_id BIGINT NOT NULL,
+      buyer_id BIGINT,
+      outcome TEXT NOT NULL,
+      skip_reason TEXT,
+      http_status INTEGER,
+      request_path TEXT,
+      response_body TEXT,
+      error_message TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_created ON ml_rating_request_log(created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_user ON ml_rating_request_log(ml_user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_order ON ml_rating_request_log(order_id)`,
     `CREATE TABLE IF NOT EXISTS ml_questions_pending (
       id SERIAL PRIMARY KEY,
       ml_question_id BIGINT NOT NULL UNIQUE,
@@ -1822,6 +1838,7 @@ async function insertMlRatingRequestSent(row) {
 
 /**
  * ¿Ya se envió hoy (rango UTC [dayStartIso, dayEndIso)) un recordatorio a este comprador desde esta cuenta?
+ * Garantiza el tope de un mensaje diario por (ml_user_id, buyer_id) para recordatorios de calificación.
  */
 async function wasRatingRequestSentToBuyerToday(mlUserId, buyerId, dayStartIso, dayEndIso) {
   await ensureSchema();
@@ -1849,8 +1866,9 @@ async function wasRatingRequestSentToBuyerToday(mlUserId, buyerId, dayStartIso, 
  * @param {string} sinceIso - límite inferior de date_created (orden creada en ventana)
  * @param {string} [dayStartIso] - inicio del día UTC (incl.) para no repetir comprador
  * @param {string} [dayEndIso] - fin del día UTC (excl.)
+ * @param {string|null} [orderStatus] - si se pasa (ej. "confirmed"), solo órdenes con ese status en ml_orders (comparación case-insensitive)
  */
-async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, dayEndIso) {
+async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, dayEndIso, orderStatus) {
   await ensureSchema();
   const mlUid = Number(mlUserId);
   if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
@@ -1860,6 +1878,12 @@ async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStart
   const ds = dayStartIso != null ? String(dayStartIso).trim() : "";
   const de = dayEndIso != null ? String(dayEndIso).trim() : "";
   const filterBuyerDay = ds !== "" && de !== "";
+  const stRaw = orderStatus != null ? String(orderStatus).trim() : "";
+  const st = stRaw || null;
+
+  const statusClause = filterBuyerDay
+    ? ` AND ($5::text IS NULL OR LOWER(TRIM(COALESCE(o.status, ''))) = LOWER(TRIM($5::text)))`
+    : ` AND ($3::text IS NULL OR LOWER(TRIM(COALESCE(o.status, ''))) = LOWER(TRIM($3::text)))`;
 
   const sql = filterBuyerDay
     ? `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
@@ -1897,7 +1921,7 @@ async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStart
          o.feedback_purchase IS NULL
          OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
          OR LOWER(TRIM(o.feedback_purchase)) = 'pending'
-       )
+       )${statusClause}
      ORDER BY o.date_created DESC NULLS LAST, o.id DESC`
     : `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
      FROM ml_orders o
@@ -1927,11 +1951,67 @@ async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStart
          o.feedback_purchase IS NULL
          OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
          OR LOWER(TRIM(o.feedback_purchase)) = 'pending'
-       )
+       )${statusClause}
      ORDER BY o.date_created DESC NULLS LAST, o.id DESC`;
 
-  const params = filterBuyerDay ? [mlUid, since, ds, de] : [mlUid, since];
+  const params = filterBuyerDay ? [mlUid, since, ds, de, st] : [mlUid, since, st];
   const { rows } = await pool.query(sql, params);
+  return rows;
+}
+
+/**
+ * Log de intentos de envío de recordatorio de calificación (POST mensajería ML).
+ * outcome: success | api_error
+ */
+async function insertMlRatingRequestLog(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return null;
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  if (!Number.isFinite(oid) || oid <= 0) return null;
+  const oc = row.outcome != null ? String(row.outcome).trim().toLowerCase() : "";
+  if (oc !== "success" && oc !== "api_error") return null;
+  const createdAt = row.created_at != null ? String(row.created_at) : new Date().toISOString();
+  const { rows } = await pool.query(
+    `INSERT INTO ml_rating_request_log (
+       created_at, ml_user_id, order_id, buyer_id, outcome, skip_reason,
+       http_status, request_path, response_body, error_message
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+    [
+      createdAt,
+      mlUid,
+      oid,
+      row.buyer_id != null ? Number(row.buyer_id) : null,
+      oc,
+      row.skip_reason != null ? String(row.skip_reason).slice(0, 2000) : null,
+      row.http_status != null ? Number(row.http_status) : null,
+      row.request_path != null ? String(row.request_path).slice(0, 2000) : null,
+      row.response_body != null ? String(row.response_body).slice(0, 8000) : null,
+      row.error_message != null ? String(row.error_message).slice(0, 4000) : null,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+/** @param {{ outcome?: string }} [options] outcome: all | success | api_error */
+async function listMlRatingRequestLog(limit, maxAllowed, options = {}) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  const mode = String(options.outcome || "all").toLowerCase();
+  let extra = "";
+  if (mode === "success") extra = " AND l.outcome = 'success'";
+  else if (mode === "api_error") extra = " AND l.outcome = 'api_error'";
+  const { rows } = await pool.query(
+    `SELECT l.id, l.created_at, l.ml_user_id, l.order_id, l.buyer_id, l.outcome, l.skip_reason,
+            l.http_status, l.request_path, l.response_body, l.error_message,
+            o.feedback_purchase AS purchase_feedback_now
+     FROM ml_rating_request_log l
+     LEFT JOIN ml_orders o ON o.ml_user_id = l.ml_user_id AND o.order_id = l.order_id
+     WHERE 1=1${extra}
+     ORDER BY l.id DESC LIMIT $1`,
+    [n]
+  );
   return rows;
 }
 
@@ -2321,6 +2401,8 @@ module.exports = {
   insertMlRatingRequestSent,
   wasRatingRequestSentToBuyerToday,
   listMlOrdersEligibleForRatingRequest,
+  insertMlRatingRequestLog,
+  listMlRatingRequestLog,
   /** Cierra el pool (tests). */
   _poolEnd: () => pool.end(),
 };

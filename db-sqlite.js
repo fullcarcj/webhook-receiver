@@ -89,6 +89,23 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user ON ml_rating_request_sent(ml_user_id);
   CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user_buyer_sent ON ml_rating_request_sent(ml_user_id, buyer_id, sent_at);
 
+  CREATE TABLE IF NOT EXISTS ml_rating_request_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    ml_user_id INTEGER NOT NULL,
+    order_id INTEGER NOT NULL,
+    buyer_id INTEGER,
+    outcome TEXT NOT NULL,
+    skip_reason TEXT,
+    http_status INTEGER,
+    request_path TEXT,
+    response_body TEXT,
+    error_message TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_created ON ml_rating_request_log(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_user ON ml_rating_request_log(ml_user_id);
+  CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_order ON ml_rating_request_log(order_id);
+
   CREATE TABLE IF NOT EXISTS ml_post_sale_auto_send_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
@@ -1842,6 +1859,7 @@ function insertMlRatingRequestSent(row) {
   return oid;
 }
 
+/** Un mensaje diario por (ml_user_id, buyer_id) en UTC para recordatorios de calificación. */
 function wasRatingRequestSentToBuyerToday(mlUserId, buyerId, dayStartIso, dayEndIso) {
   const mlUid = Number(mlUserId);
   const bid = buyerId != null ? Number(buyerId) : NaN;
@@ -1861,7 +1879,7 @@ function wasRatingRequestSentToBuyerToday(mlUserId, buyerId, dayStartIso, dayEnd
   return Boolean(r);
 }
 
-function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, dayEndIso) {
+function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, dayEndIso, orderStatus) {
   const mlUid = Number(mlUserId);
   if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
   const since = sinceIso != null ? String(sinceIso).trim() : "";
@@ -1869,8 +1887,14 @@ function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, d
   const ds = dayStartIso != null ? String(dayStartIso).trim() : "";
   const de = dayEndIso != null ? String(dayEndIso).trim() : "";
   const filterBuyerDay = ds !== "" && de !== "";
+  const stRaw = orderStatus != null ? String(orderStatus).trim() : "";
+  const st = stRaw || null;
+  const statusSql = st
+    ? ` AND LOWER(TRIM(COALESCE(o.status, ''))) = LOWER(?)`
+    : "";
 
   if (filterBuyerDay) {
+    const params = st ? [mlUid, since, ds, de, st] : [mlUid, since, ds, de];
     return db
       .prepare(
         `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
@@ -1908,12 +1932,13 @@ function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, d
              o.feedback_purchase IS NULL
              OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
              OR LOWER(TRIM(o.feedback_purchase)) = 'pending'
-           )
+           )${statusSql}
          ORDER BY o.date_created DESC, o.id DESC`
       )
-      .all(mlUid, since, ds, de);
+      .all(...params);
   }
 
+  const paramsSimple = st ? [mlUid, since, st] : [mlUid, since];
   return db
     .prepare(
       `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
@@ -1944,10 +1969,61 @@ function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, d
            o.feedback_purchase IS NULL
            OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
            OR LOWER(TRIM(o.feedback_purchase)) = 'pending'
-         )
+         )${statusSql}
        ORDER BY o.date_created DESC, o.id DESC`
     )
-    .all(mlUid, since);
+    .all(...paramsSimple);
+}
+
+function insertMlRatingRequestLog(row) {
+  const mlUid = Number(row.ml_user_id);
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  const oc = row.outcome != null ? String(row.outcome).trim().toLowerCase() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) {
+    return null;
+  }
+  if (oc !== "success" && oc !== "api_error") return null;
+  const createdAt = row.created_at != null ? String(row.created_at) : new Date().toISOString();
+  const r = db
+    .prepare(
+      `INSERT INTO ml_rating_request_log (
+         created_at, ml_user_id, order_id, buyer_id, outcome, skip_reason,
+         http_status, request_path, response_body, error_message
+       ) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id`
+    )
+    .get(
+      createdAt,
+      mlUid,
+      oid,
+      row.buyer_id != null ? Number(row.buyer_id) : null,
+      oc,
+      row.skip_reason != null ? String(row.skip_reason).slice(0, 2000) : null,
+      row.http_status != null ? Number(row.http_status) : null,
+      row.request_path != null ? String(row.request_path).slice(0, 2000) : null,
+      row.response_body != null ? String(row.response_body).slice(0, 8000) : null,
+      row.error_message != null ? String(row.error_message).slice(0, 4000) : null
+    );
+  return r && r.id != null ? Number(r.id) : null;
+}
+
+function listMlRatingRequestLog(limit, maxAllowed, options = {}) {
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  const mode = String(options.outcome || "all").toLowerCase();
+  let extra = "";
+  if (mode === "success") extra = " AND l.outcome = 'success'";
+  else if (mode === "api_error") extra = " AND l.outcome = 'api_error'";
+  return db
+    .prepare(
+      `SELECT l.id, l.created_at, l.ml_user_id, l.order_id, l.buyer_id, l.outcome, l.skip_reason,
+              l.http_status, l.request_path, l.response_body, l.error_message,
+              o.feedback_purchase AS purchase_feedback_now
+       FROM ml_rating_request_log l
+       LEFT JOIN ml_orders o ON o.ml_user_id = l.ml_user_id AND o.order_id = l.order_id
+       WHERE 1=1${extra}
+       ORDER BY l.id DESC LIMIT ?`
+    )
+    .all(n);
 }
 
 function insertMlListingChangeAck(row) {
@@ -2275,4 +2351,6 @@ module.exports = {
   insertMlRatingRequestSent,
   wasRatingRequestSentToBuyerToday,
   listMlOrdersEligibleForRatingRequest,
+  insertMlRatingRequestLog,
+  listMlRatingRequestLog,
 };

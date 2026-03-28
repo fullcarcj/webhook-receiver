@@ -19,7 +19,8 @@
     "sync-order-feedback": "node ml-order-feedback-sync.js",
     "sync-order-feedback-all": "node ml-order-feedback-sync.js --all",
     "rating-request-daily": "node ml-rating-request-daily.js",
-    "rating-request-daily-all": "node ml-rating-request-daily.js --all"
+    "rating-request-daily-all": "node ml-rating-request-daily.js --all",
+    "rating-request-print-message": "node ml-rating-request-daily.js --print-message"
   },
   "engines": {
     "node": ">=18"

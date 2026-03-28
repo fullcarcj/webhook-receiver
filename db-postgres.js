@@ -281,6 +281,28 @@ async function runSchemaAndSeed() {
     `CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_user ON ml_listing_change_ack(ml_user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_created ON ml_listing_change_ack(created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_item ON ml_listing_change_ack(ml_user_id, item_id)`,
+    `CREATE TABLE IF NOT EXISTS ml_orders (
+      id BIGSERIAL PRIMARY KEY,
+      ml_user_id BIGINT NOT NULL,
+      order_id BIGINT NOT NULL,
+      status TEXT,
+      date_created TEXT,
+      total_amount NUMERIC(20, 4),
+      currency_id TEXT,
+      buyer_id BIGINT,
+      buyer_phone_registered BOOLEAN,
+      feedback_sale TEXT,
+      feedback_purchase TEXT,
+      raw_json TEXT NOT NULL,
+      http_status INTEGER,
+      sync_error TEXT,
+      fetched_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CONSTRAINT uq_ml_orders_account_order UNIQUE (ml_user_id, order_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_orders_user_status ON ml_orders(ml_user_id, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_orders_user_created ON ml_orders(ml_user_id, date_created DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_orders_order_id ON ml_orders(order_id)`,
   ];
   for (const sql of stmts) {
     await pool.query(sql);
@@ -305,6 +327,38 @@ async function runSchemaAndSeed() {
   await migrateMlAccountsCookiesNetscape();
   await migrateMlQuestionsAnsweredResponseTimeSec();
   await migrateMlQuestionsDateCreated();
+  await migrateMlOrdersExtraColumns();
+}
+
+async function migrateMlOrdersExtraColumns() {
+  try {
+    const { rows: c1 } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_orders' AND column_name = 'buyer_phone_registered'`
+    );
+    if (c1.length === 0) {
+      await pool.query(`ALTER TABLE ml_orders ADD COLUMN buyer_phone_registered BOOLEAN`);
+      console.log("[db] ml_orders: columna buyer_phone_registered añadida (migración)");
+    }
+    const { rows: c2 } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_orders' AND column_name = 'feedback_sale'`
+    );
+    if (c2.length === 0) {
+      await pool.query(`ALTER TABLE ml_orders ADD COLUMN feedback_sale TEXT`);
+      console.log("[db] ml_orders: columna feedback_sale añadida (migración)");
+    }
+    const { rows: c3 } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_orders' AND column_name = 'feedback_purchase'`
+    );
+    if (c3.length === 0) {
+      await pool.query(`ALTER TABLE ml_orders ADD COLUMN feedback_purchase TEXT`);
+      console.log("[db] ml_orders: columna feedback_purchase añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_orders extra columns:", e.message);
+  }
 }
 
 async function migrateMlQuestionsAnsweredResponseTimeSec() {
@@ -1359,6 +1413,144 @@ async function listMlListingChangeAck(limit, maxAllowed, options = {}) {
   return rows;
 }
 
+async function upsertMlOrder(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const fetchedAt = row.fetched_at != null ? String(row.fetched_at) : now;
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  const rawJson = row.raw_json != null ? String(row.raw_json) : "{}";
+  const totalVal =
+    row.total_amount != null && String(row.total_amount).trim() !== "" ? row.total_amount : null;
+
+  const fbSale = row.feedback_sale != null ? String(row.feedback_sale).slice(0, 200) : null;
+  const fbPurchase = row.feedback_purchase != null ? String(row.feedback_purchase).slice(0, 200) : null;
+
+  let buyerPhoneRegistered = false;
+  const bid = row.buyer_id != null ? Number(row.buyer_id) : null;
+  if (bid != null && Number.isFinite(bid) && bid > 0) {
+    const buyer = await getMlBuyer(bid);
+    buyerPhoneRegistered = Boolean(
+      buyer && buyer.phone_1 != null && String(buyer.phone_1).trim() !== ""
+    );
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO ml_orders (
+       ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+       buyer_phone_registered, feedback_sale, feedback_purchase,
+       raw_json, http_status, sync_error, fetched_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+     ON CONFLICT (ml_user_id, order_id) DO UPDATE SET
+       status = EXCLUDED.status,
+       date_created = EXCLUDED.date_created,
+       total_amount = EXCLUDED.total_amount,
+       currency_id = EXCLUDED.currency_id,
+       buyer_id = EXCLUDED.buyer_id,
+       buyer_phone_registered = EXCLUDED.buyer_phone_registered,
+       feedback_sale = EXCLUDED.feedback_sale,
+       feedback_purchase = EXCLUDED.feedback_purchase,
+       raw_json = EXCLUDED.raw_json,
+       http_status = EXCLUDED.http_status,
+       sync_error = EXCLUDED.sync_error,
+       fetched_at = EXCLUDED.fetched_at,
+       updated_at = EXCLUDED.updated_at
+     RETURNING id`,
+    [
+      mlUid,
+      oid,
+      row.status != null ? String(row.status) : null,
+      row.date_created != null ? String(row.date_created) : null,
+      totalVal != null ? totalVal : null,
+      row.currency_id != null ? String(row.currency_id) : null,
+      row.buyer_id != null ? Number(row.buyer_id) : null,
+      buyerPhoneRegistered,
+      fbSale,
+      fbPurchase,
+      rawJson,
+      row.http_status != null ? Number(row.http_status) : null,
+      row.sync_error != null ? String(row.sync_error).slice(0, 4000) : null,
+      fetchedAt,
+      updatedAt,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+async function listMlOrdersByUser(mlUserId, limit, maxAllowed, options = {}) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const cap = maxAllowed != null ? maxAllowed : 10000;
+  const n = Math.min(Math.max(Number(limit) || 200, 1), cap);
+  const st =
+    options.status != null && String(options.status).trim() !== ""
+      ? String(options.status).trim()
+      : null;
+  const sql = st
+    ? `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+              buyer_phone_registered, feedback_sale, feedback_purchase,
+              raw_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_orders WHERE ml_user_id = $1
+         AND LOWER(TRIM(COALESCE(status, ''))) = LOWER($3)
+       ORDER BY date_created DESC NULLS LAST, id DESC LIMIT $2`
+    : `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+              buyer_phone_registered, feedback_sale, feedback_purchase,
+              raw_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_orders WHERE ml_user_id = $1
+       ORDER BY date_created DESC NULLS LAST, id DESC LIMIT $2`;
+  const params = st ? [mlUid, n, st] : [mlUid, n];
+  const { rows } = await pool.query(sql, params);
+  return rows;
+}
+
+async function listMlOrdersAll(limit, maxAllowed, options = {}) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 20000;
+  const n = Math.min(Math.max(Number(limit) || 500, 1), cap);
+  const st =
+    options.status != null && String(options.status).trim() !== ""
+      ? String(options.status).trim()
+      : null;
+  const sql = st
+    ? `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+              buyer_phone_registered, feedback_sale, feedback_purchase,
+              raw_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_orders
+       WHERE LOWER(TRIM(COALESCE(status, ''))) = LOWER($2)
+       ORDER BY ml_user_id ASC, date_created DESC NULLS LAST, id DESC LIMIT $1`
+    : `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+              buyer_phone_registered, feedback_sale, feedback_purchase,
+              raw_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_orders ORDER BY ml_user_id ASC, date_created DESC NULLS LAST, id DESC LIMIT $1`;
+  const params = st ? [n, st] : [n];
+  const { rows } = await pool.query(sql, params);
+  return rows;
+}
+
+async function listMlOrderCountsByUserStatus() {
+  await ensureSchema();
+  const { rows } = await pool.query(
+    `SELECT ml_user_id, status, COUNT(*)::int AS total
+     FROM ml_orders GROUP BY ml_user_id, status
+     ORDER BY ml_user_id ASC, status ASC NULLS LAST`
+  );
+  return rows;
+}
+
+/** Total de órdenes por cuenta (resumen UI, como listMlListingCountsByUser). */
+async function listMlOrderCountsByUser() {
+  await ensureSchema();
+  const { rows } = await pool.query(
+    `SELECT ml_user_id, COUNT(*)::int AS total FROM ml_orders GROUP BY ml_user_id ORDER BY ml_user_id ASC`
+  );
+  return rows;
+}
+
 async function upsertMlListing(row) {
   await ensureSchema();
   const mlUid = Number(row.ml_user_id);
@@ -1733,6 +1925,11 @@ module.exports = {
   ML_LISTING_CHANGE_ACK_ACTIONS,
   insertMlListingChangeAck,
   listMlListingChangeAck,
+  upsertMlOrder,
+  listMlOrdersByUser,
+  listMlOrdersAll,
+  listMlOrderCountsByUserStatus,
+  listMlOrderCountsByUser,
   /** Cierra el pool (tests). */
   _poolEnd: () => pool.end(),
 };

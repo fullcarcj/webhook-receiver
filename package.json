@@ -12,7 +12,10 @@
     "test-ml-cookies": "node test-ml-netscape-cookies.js",
     "registrar-cuenta": "node registrar-cuenta-ml.js",
     "ver-token": "node ver-token.js",
-    "sync-listings": "node ml-listings-sync.js"
+    "sync-listings": "node ml-listings-sync.js",
+    "sync-listings-all": "node ml-listings-sync.js --all",
+    "sync-orders": "node ml-orders-sync.js",
+    "sync-orders-all": "node ml-orders-sync.js --all"
   },
   "engines": {
     "node": ">=18"

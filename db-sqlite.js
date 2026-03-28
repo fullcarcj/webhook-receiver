@@ -238,6 +238,29 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_user ON ml_listing_change_ack(ml_user_id);
   CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_created ON ml_listing_change_ack(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_ml_listing_change_ack_item ON ml_listing_change_ack(ml_user_id, item_id);
+
+  CREATE TABLE IF NOT EXISTS ml_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ml_user_id INTEGER NOT NULL,
+    order_id INTEGER NOT NULL,
+    status TEXT,
+    date_created TEXT,
+    total_amount REAL,
+    currency_id TEXT,
+    buyer_id INTEGER,
+    buyer_phone_registered INTEGER,
+    feedback_sale TEXT,
+    feedback_purchase TEXT,
+    raw_json TEXT NOT NULL,
+    http_status INTEGER,
+    sync_error TEXT,
+    fetched_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(ml_user_id, order_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_orders_user_status ON ml_orders(ml_user_id, status);
+  CREATE INDEX IF NOT EXISTS idx_ml_orders_user_created ON ml_orders(ml_user_id, date_created);
+  CREATE INDEX IF NOT EXISTS idx_ml_orders_order_id ON ml_orders(order_id);
 `);
 
 (function migratePostSalePackIdToOrderId() {
@@ -554,6 +577,27 @@ const FETCH_PROCESS_STATUS_POST_SALE_FAILED = "Fallo post-venta";
     }
   } catch (e) {
     console.error("[db] migrate ml_questions date_created:", e.message);
+  }
+})();
+
+(function migrateMlOrdersExtraColumns() {
+  try {
+    const t = db.prepare("PRAGMA table_info(ml_orders)").all();
+    const names = new Set(t.map((c) => c.name));
+    if (!names.has("buyer_phone_registered")) {
+      db.exec("ALTER TABLE ml_orders ADD COLUMN buyer_phone_registered INTEGER");
+      console.log("[db] ml_orders: columna buyer_phone_registered añadida (migración)");
+    }
+    if (!names.has("feedback_sale")) {
+      db.exec("ALTER TABLE ml_orders ADD COLUMN feedback_sale TEXT");
+      console.log("[db] ml_orders: columna feedback_sale añadida (migración)");
+    }
+    if (!names.has("feedback_purchase")) {
+      db.exec("ALTER TABLE ml_orders ADD COLUMN feedback_purchase TEXT");
+      console.log("[db] ml_orders: columna feedback_purchase añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_orders extra columns:", e.message);
   }
 })();
 
@@ -1384,6 +1428,150 @@ function listMlListingWebhookLog(limit, maxAllowed) {
     .all(n);
 }
 
+function upsertMlOrder(row) {
+  const mlUid = Number(row.ml_user_id);
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const fetchedAt = row.fetched_at != null ? String(row.fetched_at) : now;
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  const rawJson = row.raw_json != null ? String(row.raw_json) : "{}";
+  const totalVal =
+    row.total_amount != null && String(row.total_amount).trim() !== ""
+      ? Number(row.total_amount)
+      : null;
+  const fbSale = row.feedback_sale != null ? String(row.feedback_sale).slice(0, 200) : null;
+  const fbPurchase = row.feedback_purchase != null ? String(row.feedback_purchase).slice(0, 200) : null;
+
+  let buyerPhoneRegistered = 0;
+  const bid = row.buyer_id != null ? Number(row.buyer_id) : null;
+  if (bid != null && Number.isFinite(bid) && bid > 0) {
+    const buyer = getMlBuyer(bid);
+    buyerPhoneRegistered =
+      buyer && buyer.phone_1 != null && String(buyer.phone_1).trim() !== "" ? 1 : 0;
+  }
+
+  db.prepare(
+    `INSERT INTO ml_orders (
+       ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+       buyer_phone_registered, feedback_sale, feedback_purchase,
+       raw_json, http_status, sync_error, fetched_at, updated_at
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(ml_user_id, order_id) DO UPDATE SET
+       status = excluded.status,
+       date_created = excluded.date_created,
+       total_amount = excluded.total_amount,
+       currency_id = excluded.currency_id,
+       buyer_id = excluded.buyer_id,
+       buyer_phone_registered = excluded.buyer_phone_registered,
+       feedback_sale = excluded.feedback_sale,
+       feedback_purchase = excluded.feedback_purchase,
+       raw_json = excluded.raw_json,
+       http_status = excluded.http_status,
+       sync_error = excluded.sync_error,
+       fetched_at = excluded.fetched_at,
+       updated_at = excluded.updated_at`
+  ).run(
+    mlUid,
+    oid,
+    row.status != null ? String(row.status) : null,
+    row.date_created != null ? String(row.date_created) : null,
+    totalVal != null && Number.isFinite(totalVal) ? totalVal : null,
+    row.currency_id != null ? String(row.currency_id) : null,
+    row.buyer_id != null ? Number(row.buyer_id) : null,
+    buyerPhoneRegistered,
+    fbSale,
+    fbPurchase,
+    rawJson,
+    row.http_status != null ? Number(row.http_status) : null,
+    row.sync_error != null ? String(row.sync_error).slice(0, 4000) : null,
+    fetchedAt,
+    updatedAt
+  );
+  const r = db.prepare("SELECT id FROM ml_orders WHERE ml_user_id = ? AND order_id = ?").get(mlUid, oid);
+  return r && r.id != null ? Number(r.id) : null;
+}
+
+function listMlOrdersByUser(mlUserId, limit, maxAllowed, options = {}) {
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const cap = maxAllowed != null ? maxAllowed : 10000;
+  const n = Math.min(Math.max(Number(limit) || 200, 1), cap);
+  const st =
+    options.status != null && String(options.status).trim() !== ""
+      ? String(options.status).trim()
+      : null;
+  if (st) {
+    return db
+      .prepare(
+        `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+                raw_json, http_status, sync_error, fetched_at, updated_at
+         FROM ml_orders WHERE ml_user_id = ?
+           AND LOWER(TRIM(COALESCE(status, ''))) = LOWER(?)
+         ORDER BY date_created DESC, id DESC LIMIT ?`
+      )
+      .all(mlUid, st, n);
+  }
+  return db
+    .prepare(
+      `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+              buyer_phone_registered, feedback_sale, feedback_purchase,
+              raw_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_orders WHERE ml_user_id = ?
+       ORDER BY date_created DESC, id DESC LIMIT ?`
+    )
+    .all(mlUid, n);
+}
+
+function listMlOrdersAll(limit, maxAllowed, options = {}) {
+  const cap = maxAllowed != null ? maxAllowed : 20000;
+  const n = Math.min(Math.max(Number(limit) || 500, 1), cap);
+  const st =
+    options.status != null && String(options.status).trim() !== ""
+      ? String(options.status).trim()
+      : null;
+  if (st) {
+    return db
+      .prepare(
+        `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+                buyer_phone_registered, feedback_sale, feedback_purchase,
+                raw_json, http_status, sync_error, fetched_at, updated_at
+         FROM ml_orders
+         WHERE LOWER(TRIM(COALESCE(status, ''))) = LOWER(?)
+         ORDER BY ml_user_id ASC, date_created DESC, id DESC LIMIT ?`
+      )
+      .all(st, n);
+  }
+  return db
+    .prepare(
+      `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
+              buyer_phone_registered, feedback_sale, feedback_purchase,
+              raw_json, http_status, sync_error, fetched_at, updated_at
+       FROM ml_orders ORDER BY ml_user_id ASC, date_created DESC, id DESC LIMIT ?`
+    )
+    .all(n);
+}
+
+function listMlOrderCountsByUserStatus() {
+  return db
+    .prepare(
+      `SELECT ml_user_id, status, COUNT(*) AS total
+       FROM ml_orders GROUP BY ml_user_id, status
+       ORDER BY ml_user_id ASC, status ASC`
+    )
+    .all();
+}
+
+function listMlOrderCountsByUser() {
+  return db
+    .prepare(
+      `SELECT ml_user_id, COUNT(*) AS total FROM ml_orders GROUP BY ml_user_id ORDER BY ml_user_id ASC`
+    )
+    .all();
+}
+
 function upsertMlListing(row) {
   const mlUid = Number(row.ml_user_id);
   const itemId = row.item_id != null ? String(row.item_id).trim() : "";
@@ -1620,4 +1808,9 @@ module.exports = {
   ML_LISTING_CHANGE_ACK_ACTIONS,
   insertMlListingChangeAck,
   listMlListingChangeAck,
+  upsertMlOrder,
+  listMlOrdersByUser,
+  listMlOrdersAll,
+  listMlOrderCountsByUserStatus,
+  listMlOrderCountsByUser,
 };

@@ -55,6 +55,7 @@ const {
   exchangeAuthorizationCode,
 } = require("./oauth-token");
 const { listingRowFromMlItemApi } = require("./ml-listing-map");
+const { ML_ORDER_STATUSES_KNOWN } = require("./ml-order-statuses");
 const {
   insertWebhook,
   listWebhooks,
@@ -102,6 +103,10 @@ const {
   ML_LISTING_CHANGE_ACK_ACTIONS,
   insertMlListingChangeAck,
   listMlListingChangeAck,
+  listMlOrdersByUser,
+  listMlOrdersAll,
+  listMlOrderCountsByUserStatus,
+  listMlOrderCountsByUser,
   dbPath,
 } = require("./db");
 
@@ -157,6 +162,10 @@ function isPublicacionesMlPath(pathname) {
 
 function isListingChangeAckPath(pathname) {
   return pathname === "/listing-change-ack" || pathname === "/listing-change-ack/";
+}
+
+function isOrdenesMlPath(pathname) {
+  return pathname === "/ordenes-ml" || pathname === "/ordenes-ml/";
 }
 
 function rejectIngestSecret(req, res) {
@@ -847,6 +856,9 @@ const server = http.createServer(async (req, res) => {
           "Con ML_WEBHOOK_FETCH_RESOURCE=1, topic items (o resource /items/…) → GET /items/{id}?api_version=4 y upsert en ml_listings; auditoría en ml_listing_webhook_log",
         listing_change_ack:
           "GET|POST /listing-change-ack?k=ADMIN_SECRET — tabla ml_listing_change_ack: marcar ítem procesado (action: activate|add_stock|pause|delete|dismiss). POST JSON { ml_user_id, item_id, action, note?, webhook_log_id? }",
+        ordenes_ml:
+          "GET /ordenes-ml?k=ADMIN_SECRET — ml_orders (descarga: npm run sync-orders | npm run sync-orders-all); ?cuenta= ?status= ?format=json; status ML típicos en raíz JSON bajo ordenes_estados_ml",
+        ordenes_estados_ml: ML_ORDER_STATUSES_KNOWN,
       })
     );
     return;
@@ -2352,6 +2364,242 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Órdenes ML descargadas (ml_orders; npm run sync-orders). */
+  if (req.method === "GET" && isOrdenesMlPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Órdenes ML</title><p>Define <code>ADMIN_SECRET</code> y reinicia.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Órdenes ML</title><p>Acceso denegado. <code>/ordenes-ml?k=…</code></p>"
+      );
+      return;
+    }
+    const limRaw = url.searchParams.get("limit");
+    const limNum = Math.min(10000, Math.max(1, Number(limRaw) || 500));
+    const cuentaRaw = url.searchParams.get("cuenta");
+    const cuentaFilter =
+      cuentaRaw != null && String(cuentaRaw).trim() !== ""
+        ? Number(String(cuentaRaw).trim())
+        : null;
+    const useCuenta =
+      cuentaFilter != null && Number.isFinite(cuentaFilter) && cuentaFilter > 0
+        ? cuentaFilter
+        : null;
+    const statusRaw = url.searchParams.get("status");
+    const statusFilter =
+      statusRaw != null && String(statusRaw).trim() !== ""
+        ? String(statusRaw).trim()
+        : null;
+    const listOpts = statusFilter ? { status: statusFilter } : {};
+
+    let accounts;
+    let countRows;
+    let orderCountsByUser;
+    let orders;
+    try {
+      accounts = await listMlAccounts();
+      countRows = await listMlOrderCountsByUserStatus();
+      orderCountsByUser = await listMlOrderCountsByUser();
+      orders = useCuenta
+        ? await listMlOrdersByUser(useCuenta, limNum, 10000, listOpts)
+        : await listMlOrdersAll(limNum, 10000, listOpts);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+
+    const nickByUser = new Map(
+      accounts.map((a) => [Number(a.ml_user_id), a.nickname != null ? String(a.nickname) : ""])
+    );
+
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          cuenta_filter: useCuenta,
+          status_filter: statusFilter,
+          limit: limNum,
+          accounts,
+          counts_by_user: orderCountsByUser,
+          counts_by_user_status: countRows,
+          orders_count: orders.length,
+          orders,
+        })
+      );
+      return;
+    }
+
+    function ordQuery(overrides = {}) {
+      const p = new URLSearchParams();
+      p.set("k", k);
+      p.set("limit", String(limNum));
+      const cuenta =
+        overrides.cuenta !== undefined ? overrides.cuenta : useCuenta;
+      if (cuenta != null && Number.isFinite(Number(cuenta)) && Number(cuenta) > 0) {
+        p.set("cuenta", String(cuenta));
+      }
+      const st =
+        overrides.status !== undefined ? overrides.status : statusFilter;
+      if (st != null && String(st).trim() !== "") {
+        p.set("status", String(st).trim());
+      }
+      return `/ordenes-ml?${p.toString()}`;
+    }
+
+    const orderCountMap = new Map(
+      orderCountsByUser.map((c) => [Number(c.ml_user_id), Number(c.total)])
+    );
+
+    const accountSummaryRows = accounts
+      .map((a) => {
+        const uid = Number(a.ml_user_id);
+        const n = orderCountMap.get(uid) ?? 0;
+        const nick = nickByUser.get(uid) || "—";
+        const active = useCuenta === uid ? "active" : "";
+        const link = ordQuery({ cuenta: uid });
+        return `<tr>
+  <td>${escapeHtml(uid)}</td>
+  <td class="muted">${escapeHtml(nick)}</td>
+  <td>${escapeHtml(n)}</td>
+  <td><a href="${escapeAttr(link)}" class="${active}">Ver solo esta cuenta</a></td>
+</tr>`;
+      })
+      .join("");
+
+    const statusBreakdownRows = countRows
+      .map((r) => {
+        const uid = Number(r.ml_user_id);
+        const nick = nickByUser.get(uid) || "—";
+        return `<tr>
+  <td>${escapeHtml(uid)}</td>
+  <td class="muted">${escapeHtml(nick)}</td>
+  <td>${escapeHtml(r.status || "—")}</td>
+  <td>${escapeHtml(r.total)}</td>
+</tr>`;
+      })
+      .join("");
+
+    const orderRows =
+      orders.length === 0
+        ? `<tr><td colspan="11">Sin órdenes en <code>ml_orders</code>. Ejecuta <code>npm run sync-orders</code> o <code>npm run sync-orders-all</code> (todas las cuentas; en PowerShell a veces <code>-- --all</code> no llega al script).</td></tr>`
+        : orders
+            .map((o) => {
+              const nick = nickByUser.get(Number(o.ml_user_id)) || "—";
+              const amt =
+                o.total_amount != null && String(o.total_amount).trim() !== ""
+                  ? escapeHtml(String(o.total_amount))
+                  : "—";
+              const vTel = o.buyer_phone_registered;
+              const telReg =
+                vTel === true || vTel === 1
+                  ? "sí"
+                  : vTel === false || vTel === 0
+                    ? "no"
+                    : "—";
+              const fbSale = o.feedback_sale != null && String(o.feedback_sale).trim() !== ""
+                ? escapeHtml(String(o.feedback_sale))
+                : "—";
+              const fbPur = o.feedback_purchase != null && String(o.feedback_purchase).trim() !== ""
+                ? escapeHtml(String(o.feedback_purchase))
+                : "—";
+              return `<tr>
+  <td>${escapeHtml(o.ml_user_id)}</td>
+  <td class="muted">${nick}</td>
+  <td>${escapeHtml(o.order_id)}</td>
+  <td>${escapeHtml(o.status || "—")}</td>
+  <td>${amt}</td>
+  <td>${escapeHtml(o.currency_id || "—")}</td>
+  <td class="muted">${escapeHtml(o.date_created || "—")}</td>
+  <td class="muted">${escapeHtml(o.buyer_id != null ? o.buyer_id : "—")}</td>
+  <td title="phone_1 en ml_buyers">${escapeHtml(telReg)}</td>
+  <td title="Nuestra calificación al comprador (feedback.sale)">${fbSale}</td>
+  <td title="Calificación del comprador hacia nosotros (feedback.purchase)">${fbPur}</td>
+</tr>`;
+            })
+            .join("");
+
+    const filterNote = [
+      useCuenta
+        ? `Cuenta: <strong>${escapeHtml(useCuenta)}</strong> · <a href="${escapeAttr(
+            ordQuery({ cuenta: null })
+          )}">Ver todas las cuentas</a>`
+        : "Todas las cuentas (orden: <code>ml_user_id</code>, luego <code>date_created</code> desc.).",
+      statusFilter
+        ? `Estado ML: <strong>${escapeHtml(statusFilter)}</strong> · <a href="${escapeAttr(
+            ordQuery({ status: null })
+          )}">Quitar filtro</a>`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Órdenes ML</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #15202b; color: #e7e9ea; margin: 1rem; }
+    .lead { color: #8b98a5; font-size: 0.95rem; }
+    code { background: #1e2732; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    a { color: #1d9bf0; }
+    a.active { font-weight: 600; text-decoration: underline; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; font-size: 0.85rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    .muted { color: #8b98a5; }
+    h2 { font-size: 1.1rem; margin-top: 1.25rem; }
+  </style>
+</head>
+<body>
+  <h1>Órdenes Mercado Libre</h1>
+  <p class="lead">Tabla <code>ml_orders</code>: <code>npm run sync-orders</code> · todas las cuentas: <code>npm run sync-orders-all</code> (o <code>ML_ORDERS_SYNC_ALL=1</code>). JSON: <code>?format=json</code> · <code>?limit=</code> · <code>?cuenta=</code> · <code>?status=</code></p>
+  <p class="lead">${filterNote}</p>
+  <p class="lead">Filtros rápidos: <a href="${escapeAttr(ordQuery({ status: "confirmed" }))}">confirmed</a> · <a href="${escapeAttr(
+    ordQuery({ status: "paid" })
+  )}">paid</a> · <a href="${escapeAttr(ordQuery({ status: "payment_required" }))}">payment_required</a> · <a href="${escapeAttr(
+    ordQuery({ status: "payment_in_process" })
+  )}">payment_in_process</a> · <a href="${escapeAttr(
+    ordQuery({ status: "cancelled" })
+  )}">cancelled</a> · <a href="${escapeAttr(ordQuery({ status: "invalid" }))}">invalid</a> · <a href="${escapeAttr(
+    ordQuery({ status: null })
+  )}">todos</a></p>
+
+  <h2>Resumen por cuenta (ml_accounts)</h2>
+  <table>
+    <thead><tr><th>ml_user_id</th><th>nickname</th><th>órdenes en BD</th><th></th></tr></thead>
+    <tbody>${accounts.length === 0 ? `<tr><td colspan="4">No hay cuentas en <code>ml_accounts</code>.</td></tr>` : accountSummaryRows}</tbody>
+  </table>
+
+  <h2>Desglose por estado (ml_orders)</h2>
+  <table>
+    <thead><tr><th>ml_user_id</th><th>nickname</th><th>status (ML)</th><th>cantidad</th></tr></thead>
+    <tbody>${countRows.length === 0 ? `<tr><td colspan="4">Sin datos. Ejecuta <code>npm run sync-orders-all</code> o <code>npm run sync-orders</code>.</td></tr>` : statusBreakdownRows}</tbody>
+  </table>
+
+  <h2>Órdenes (${orders.length} fila(s))</h2>
+  <table>
+    <thead><tr><th>cuenta</th><th>nickname</th><th>order_id</th><th>status</th><th>total</th><th>moneda</th><th>date_created</th><th>buyer_id</th><th>tel comprador</th><th>feedback venta→comprador</th><th>feedback compra→nosotros</th></tr></thead>
+    <tbody>${orderRows}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
   /** Historial de intentos de envío automático post-venta (ml_post_sale_auto_send_log). */
   if (req.method === "GET" && isPostSaleEnviosPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
@@ -3054,6 +3302,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Preguntas ML (pending/answered): http://localhost:${PORT}/preguntas-ml?k=TU_ADMIN_SECRET`);
     console.log(`Publicaciones ML (listings por cuenta): http://localhost:${PORT}/publicaciones-ml?k=TU_ADMIN_SECRET`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
+    console.log(`Órdenes ML (sync-orders): http://localhost:${PORT}/ordenes-ml?k=TU_ADMIN_SECRET`);
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(

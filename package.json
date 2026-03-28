@@ -21,7 +21,10 @@
     "sync-order-feedback-confirmed": "node ml-order-feedback-sync.js --all --status=confirmed",
     "rating-request-daily": "node ml-rating-request-daily.js",
     "rating-request-daily-all": "node ml-rating-request-daily.js --all",
-    "rating-request-print-message": "node ml-rating-request-daily.js --print-message"
+    "rating-request-print-message": "node ml-rating-request-daily.js --print-message",
+    "retiro-broadcast-morning": "node ml-retiro-broadcast.js --slot=morning",
+    "retiro-broadcast-afternoon": "node ml-retiro-broadcast.js --slot=afternoon",
+    "retiro-broadcast-print-templates": "node ml-retiro-broadcast.js --print-templates"
   },
   "engines": {
     "node": ">=18"

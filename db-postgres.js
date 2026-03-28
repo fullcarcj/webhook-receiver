@@ -191,6 +191,60 @@ async function runSchemaAndSeed() {
     `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_created ON ml_rating_request_log(created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_user ON ml_rating_request_log(ml_user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_order ON ml_rating_request_log(order_id)`,
+    `CREATE TABLE IF NOT EXISTS ml_retiro_broadcast_sent (
+      id BIGSERIAL PRIMARY KEY,
+      ml_user_id BIGINT NOT NULL,
+      buyer_id BIGINT NOT NULL,
+      order_id BIGINT NOT NULL,
+      slot TEXT NOT NULL,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      http_status INTEGER,
+      template_index SMALLINT,
+      error_message TEXT,
+      CONSTRAINT chk_ml_retiro_slot CHECK (slot IN ('morning', 'afternoon'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_retiro_sent_user_buyer ON ml_retiro_broadcast_sent(ml_user_id, buyer_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_retiro_sent_user_slot ON ml_retiro_broadcast_sent(ml_user_id, slot, sent_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS ml_retiro_broadcast_log (
+      id BIGSERIAL PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ml_user_id BIGINT NOT NULL,
+      order_id BIGINT NOT NULL,
+      buyer_id BIGINT,
+      slot TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      template_index SMALLINT,
+      http_status INTEGER,
+      request_path TEXT,
+      response_body TEXT,
+      error_message TEXT,
+      CONSTRAINT chk_ml_retiro_log_slot CHECK (slot IN ('morning', 'afternoon')),
+      CONSTRAINT chk_ml_retiro_log_outcome CHECK (outcome IN ('success', 'api_error'))
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_retiro_log_created ON ml_retiro_broadcast_log(created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_retiro_log_user ON ml_retiro_broadcast_log(ml_user_id)`,
+    `CREATE TABLE IF NOT EXISTS ml_questions_ia_auto_sent (
+      ml_question_id BIGINT PRIMARY KEY,
+      ml_user_id BIGINT NOT NULL,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      http_status INTEGER,
+      template_index SMALLINT,
+      answer_preview TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_questions_ia_auto_user ON ml_questions_ia_auto_sent(ml_user_id, sent_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS ml_questions_ia_auto_log (
+      id BIGSERIAL PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ml_user_id BIGINT NOT NULL,
+      ml_question_id BIGINT,
+      item_id TEXT,
+      buyer_id BIGINT,
+      outcome TEXT NOT NULL,
+      reason_detail TEXT,
+      notification_id TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_questions_ia_auto_log_created ON ml_questions_ia_auto_log(created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_questions_ia_auto_log_user ON ml_questions_ia_auto_log(ml_user_id)`,
     `CREATE TABLE IF NOT EXISTS ml_questions_pending (
       id SERIAL PRIMARY KEY,
       ml_question_id BIGINT NOT NULL UNIQUE,
@@ -1382,6 +1436,81 @@ async function listMlQuestionsAnswered(limit, maxAllowed) {
   return rows;
 }
 
+async function wasMlQuestionsIaAutoSent(mlQuestionId) {
+  await ensureSchema();
+  const qid = Number(mlQuestionId);
+  if (!Number.isFinite(qid) || qid <= 0) return false;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM ml_questions_ia_auto_sent WHERE ml_question_id = $1 LIMIT 1`,
+    [qid]
+  );
+  return rows.length > 0;
+}
+
+async function insertMlQuestionsIaAutoSent(row) {
+  await ensureSchema();
+  const qid = Number(row.ml_question_id);
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(qid) || qid <= 0 || !Number.isFinite(mlUid) || mlUid <= 0) return null;
+  const sentAt = row.sent_at != null ? String(row.sent_at) : new Date().toISOString();
+  const { rows } = await pool.query(
+    `INSERT INTO ml_questions_ia_auto_sent (ml_question_id, ml_user_id, sent_at, http_status, template_index, answer_preview)
+     VALUES ($1,$2,$3::timestamptz,$4,$5,$6)
+     ON CONFLICT (ml_question_id) DO NOTHING
+     RETURNING ml_question_id`,
+    [
+      qid,
+      mlUid,
+      sentAt,
+      row.http_status != null ? Number(row.http_status) : null,
+      row.template_index != null ? Number(row.template_index) : null,
+      row.answer_preview != null ? String(row.answer_preview).slice(0, 2000) : null,
+    ]
+  );
+  return rows[0] ? Number(rows[0].ml_question_id) : null;
+}
+
+/**
+ * Log de intentos de respuesta IA (p. ej. fuera de ventana, error API).
+ * outcome: skip_disabled | skip_no_config | bad_window_parse | skip_day | skip_window | until_expired | skip_already | api_error | …
+ */
+async function insertMlQuestionsIaAutoLog(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return null;
+  const oc = row.outcome != null ? String(row.outcome).trim().slice(0, 64) : "";
+  if (!oc) return null;
+  const createdAt = row.created_at != null ? String(row.created_at) : new Date().toISOString();
+  const { rows } = await pool.query(
+    `INSERT INTO ml_questions_ia_auto_log (
+       created_at, ml_user_id, ml_question_id, item_id, buyer_id, outcome, reason_detail, notification_id
+     ) VALUES ($1::timestamptz,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+    [
+      createdAt,
+      mlUid,
+      row.ml_question_id != null ? Number(row.ml_question_id) : null,
+      row.item_id != null ? String(row.item_id).slice(0, 128) : null,
+      row.buyer_id != null ? Number(row.buyer_id) : null,
+      oc,
+      row.reason_detail != null ? String(row.reason_detail).slice(0, 8000) : null,
+      row.notification_id != null ? String(row.notification_id).slice(0, 128) : null,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+async function listMlQuestionsIaAutoLog(limit, maxAllowed) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 200, 1), cap);
+  const { rows } = await pool.query(
+    `SELECT id, created_at, ml_user_id, ml_question_id, item_id, buyer_id, outcome, reason_detail, notification_id
+     FROM ml_questions_ia_auto_log ORDER BY id DESC LIMIT $1`,
+    [n]
+  );
+  return rows;
+}
+
 /**
  * Acciones permitidas al marcar un cambio de publicación como “procesado” (solo registro; no llama a la API ML).
  */
@@ -2080,6 +2209,188 @@ async function listMlRatingRequestLog(limit, maxAllowed, options = {}) {
   return rows;
 }
 
+/**
+ * Órdenes recientes elegibles para mensajes de retiro/despacho (mensajería post-venta).
+ * Solo si **aún no hay calificación** ni del vendedor al comprador (sale) ni del comprador al vendedor (purchase),
+ * alineado a feedback pendiente en ml_orders / ml_order_feedback (misma idea que recordatorio calificación en compra).
+ * Excluye compradores que ya recibieron un envío en el mismo slot (mañana o tarde) el día civil en `tz`.
+ * @param {string} slot - 'morning' | 'afternoon'
+ * @param {string} tz - p. ej. America/Caracas
+ */
+async function listMlOrdersEligibleForRetiroBroadcast(mlUserId, sinceIso, orderStatus, slot, tz) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const since = sinceIso != null ? String(sinceIso).trim() : "";
+  if (!since) return [];
+  const sl = slot != null ? String(slot).trim().toLowerCase() : "";
+  if (sl !== "morning" && sl !== "afternoon") return [];
+  const zone = tz != null && String(tz).trim() !== "" ? String(tz).trim() : "America/Caracas";
+  const stRaw = orderStatus != null ? String(orderStatus).trim() : "";
+  const st = stRaw || null;
+
+  const { rows } = await pool.query(
+    `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
+     FROM ml_orders o
+     WHERE o.ml_user_id = $1
+       AND o.date_created >= $2
+       AND o.buyer_id IS NOT NULL
+       AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
+       AND ($3::text IS NULL OR LOWER(TRIM(COALESCE(o.status, ''))) = LOWER(TRIM($3::text)))
+       AND NOT EXISTS (
+         SELECT 1 FROM ml_order_feedback f
+         WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+           AND f.side = 'sale' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+       )
+       AND (
+         o.feedback_sale IS NULL
+         OR TRIM(COALESCE(o.feedback_sale, '')) = ''
+         OR LOWER(TRIM(o.feedback_sale)) = 'pending'
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM ml_order_feedback f
+         WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+           AND f.side = 'purchase' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+       )
+       AND o.feedback_purchase_value IS NULL
+       AND (
+         o.feedback_purchase IS NULL
+         OR TRIM(COALESCE(o.feedback_purchase, '')) = ''
+         OR LOWER(TRIM(o.feedback_purchase)) = 'pending'
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM ml_retiro_broadcast_sent r
+         WHERE r.ml_user_id = o.ml_user_id
+           AND r.buyer_id = o.buyer_id
+           AND r.slot = $4
+           AND DATE(timezone($5::text, r.sent_at)) = DATE(timezone($5::text, CURRENT_TIMESTAMP))
+       )
+     ORDER BY o.date_created DESC NULLS LAST, o.id DESC`,
+    [mlUid, since, st, sl, zone]
+  );
+  return rows;
+}
+
+async function wasRetiroBroadcastSentToBuyerTodaySlot(mlUserId, buyerId, slot, tz) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const bid = buyerId != null ? Number(buyerId) : NaN;
+  const sl = slot != null ? String(slot).trim().toLowerCase() : "";
+  const zone = tz != null && String(tz).trim() !== "" ? String(tz).trim() : "America/Caracas";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(bid) || bid <= 0) {
+    return false;
+  }
+  if (sl !== "morning" && sl !== "afternoon") return false;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM ml_retiro_broadcast_sent
+     WHERE ml_user_id = $1 AND buyer_id = $2 AND slot = $3
+       AND DATE(timezone($4::text, sent_at)) = DATE(timezone($4::text, CURRENT_TIMESTAMP))
+     LIMIT 1`,
+    [mlUid, bid, sl, zone]
+  );
+  return rows.length > 0;
+}
+
+async function insertMlRetiroBroadcastSent(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  const bid = row.buyer_id != null ? Number(row.buyer_id) : NaN;
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(bid) || bid <= 0) return null;
+  if (!Number.isFinite(oid) || oid <= 0) return null;
+  const sl = row.slot != null ? String(row.slot).trim().toLowerCase() : "";
+  if (sl !== "morning" && sl !== "afternoon") return null;
+  const sentAt = row.sent_at != null ? String(row.sent_at) : new Date().toISOString();
+  const { rows } = await pool.query(
+    `INSERT INTO ml_retiro_broadcast_sent (
+       ml_user_id, buyer_id, order_id, slot, sent_at, http_status, template_index, error_message
+     ) VALUES ($1,$2,$3,$4,$5::timestamptz,$6,$7,$8) RETURNING id`,
+    [
+      mlUid,
+      bid,
+      oid,
+      sl,
+      sentAt,
+      row.http_status != null ? Number(row.http_status) : null,
+      row.template_index != null ? Number(row.template_index) : null,
+      row.error_message != null ? String(row.error_message).slice(0, 2000) : null,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+/**
+ * Mensajes automáticos enviados hoy al comprador (día civil en `tz`): post-venta (cada paso),
+ * recordatorio calificación y retiro/despacho. Para aplicar ML_AUTO_MESSAGE_MAX por día.
+ */
+async function countMlAutoMessagesForBuyerToday(mlUserId, buyerId, tz) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const bid = buyerId != null ? Number(buyerId) : NaN;
+  const zone =
+    tz != null && String(tz).trim() !== "" ? String(tz).trim() : "America/Caracas";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(bid) || bid <= 0) return 0;
+  const { rows } = await pool.query(
+    `SELECT (
+       COALESCE((
+         SELECT COUNT(*)::bigint FROM ml_post_sale_steps_sent s
+         INNER JOIN ml_orders o ON o.order_id = s.order_id AND o.ml_user_id = $1
+         WHERE o.buyer_id = $2
+           AND DATE(timezone($3::text, (s.sent_at)::timestamptz))
+             = DATE(timezone($3::text, CURRENT_TIMESTAMP))
+       ), 0)
+       + COALESCE((
+         SELECT COUNT(*)::bigint FROM ml_rating_request_sent r
+         WHERE r.ml_user_id = $1 AND r.buyer_id = $2
+           AND DATE(timezone($3::text, (r.sent_at)::timestamptz))
+             = DATE(timezone($3::text, CURRENT_TIMESTAMP))
+       ), 0)
+       + COALESCE((
+         SELECT COUNT(*)::bigint FROM ml_retiro_broadcast_sent t
+         WHERE t.ml_user_id = $1 AND t.buyer_id = $2
+           AND DATE(timezone($3::text, t.sent_at))
+             = DATE(timezone($3::text, CURRENT_TIMESTAMP))
+       ), 0)
+     )::int AS c`,
+    [mlUid, bid, zone]
+  );
+  const n = rows[0] && rows[0].c != null ? Number(rows[0].c) : 0;
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+async function insertMlRetiroBroadcastLog(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return null;
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  if (!Number.isFinite(oid) || oid <= 0) return null;
+  const oc = row.outcome != null ? String(row.outcome).trim().toLowerCase() : "";
+  if (oc !== "success" && oc !== "api_error") return null;
+  const sl = row.slot != null ? String(row.slot).trim().toLowerCase() : "";
+  if (sl !== "morning" && sl !== "afternoon") return null;
+  const createdAt = row.created_at != null ? String(row.created_at) : new Date().toISOString();
+  const { rows } = await pool.query(
+    `INSERT INTO ml_retiro_broadcast_log (
+       created_at, ml_user_id, order_id, buyer_id, slot, outcome, template_index,
+       http_status, request_path, response_body, error_message
+     ) VALUES ($1::timestamptz,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+    [
+      createdAt,
+      mlUid,
+      oid,
+      row.buyer_id != null ? Number(row.buyer_id) : null,
+      sl,
+      oc,
+      row.template_index != null ? Number(row.template_index) : null,
+      row.http_status != null ? Number(row.http_status) : null,
+      row.request_path != null ? String(row.request_path).slice(0, 2000) : null,
+      row.response_body != null ? String(row.response_body).slice(0, 8000) : null,
+      row.error_message != null ? String(row.error_message).slice(0, 4000) : null,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
 async function upsertMlListing(row) {
   await ensureSchema();
   const mlUid = Number(row.ml_user_id);
@@ -2441,6 +2752,10 @@ module.exports = {
   upsertMlQuestionAnswered,
   listMlQuestionsPending,
   listMlQuestionsAnswered,
+  wasMlQuestionsIaAutoSent,
+  insertMlQuestionsIaAutoSent,
+  insertMlQuestionsIaAutoLog,
+  listMlQuestionsIaAutoLog,
   upsertMlListing,
   listMlListingsByUser,
   getMlListingByItemId,
@@ -2469,6 +2784,11 @@ module.exports = {
   listMlOrdersEligibleForRatingRequest,
   insertMlRatingRequestLog,
   listMlRatingRequestLog,
+  listMlOrdersEligibleForRetiroBroadcast,
+  wasRetiroBroadcastSentToBuyerTodaySlot,
+  insertMlRetiroBroadcastSent,
+  insertMlRetiroBroadcastLog,
+  countMlAutoMessagesForBuyerToday,
   /** Cierra el pool (tests). */
   _poolEnd: () => pool.end(),
 };

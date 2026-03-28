@@ -49,6 +49,7 @@ const {
   wasRatingRequestSentToBuyerToday,
   insertMlRatingRequestLog,
 } = require("./db");
+const { getAutoMessageBudgetForBuyerToday } = require("./ml-auto-message-cap");
 
 /**
  * Diez mensajes equivalentes (pedir calificación tras la compra), redacción distinta.
@@ -234,6 +235,7 @@ async function runRatingRequestDailyForUser(mlUserId, options = {}) {
   let sent = 0;
   let failed = 0;
   let skippedBuyerDay = 0;
+  let skippedAutoCapDay = 0;
   /** Evita dos envíos al mismo comprador en una misma ejecución (varias órdenes elegibles). */
   const buyersMessagedThisRun = new Set();
   /** Último índice del pool usado en esta corrida (evita dos mensajes idénticos seguidos). */
@@ -285,6 +287,11 @@ async function runRatingRequestDailyForUser(mlUserId, options = {}) {
     // Límite 1 comprador/día (UTC): re-chequeo por si otra instancia del job envió entre medias.
     if (await wasRatingRequestSentToBuyerToday(mlUid, buyerId, dayStartIso, dayEndIso)) {
       skippedBuyerDay++;
+      continue;
+    }
+
+    if ((await getAutoMessageBudgetForBuyerToday(mlUid, buyerId)) <= 0) {
+      skippedAutoCapDay++;
       continue;
     }
 
@@ -343,6 +350,7 @@ async function runRatingRequestDailyForUser(mlUserId, options = {}) {
     sent,
     failed,
     skipped_buyer_day: skippedBuyerDay,
+    skipped_auto_cap_day: skippedAutoCapDay,
     order_status_filter: orderStatusRaw,
   };
 }
@@ -452,11 +460,12 @@ async function main() {
     const r = await runRatingRequestDailyForUser(uid, { orderStatus });
     results.push({ ml_user_id: uid, ...r });
     console.log(
-      "[rating-request] ml_user_id=%s eligible=%s sent=%s skipped_mismo_comprador_hoy=%s failed=%s err=%s",
+      "[rating-request] ml_user_id=%s eligible=%s sent=%s skipped_mismo_comprador_hoy=%s skipped_tope_3_dia=%s failed=%s err=%s",
       uid,
       r.eligible,
       r.sent,
       r.skipped_buyer_day ?? 0,
+      r.skipped_auto_cap_day ?? 0,
       r.failed,
       r.error || "—"
     );

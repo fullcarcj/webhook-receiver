@@ -15,6 +15,7 @@ const { feedbackDetailRowsFromOrder, feedbackSummaryFromOrder } = require("./ml-
 const {
   listMlAccounts,
   listMlOrdersByUser,
+  upsertMlOrder,
   upsertMlOrderFeedback,
   updateMlOrderFeedbackSummary,
 } = require("./db");
@@ -73,9 +74,45 @@ async function upsertOrderFeedbackFromApiResponse(
   }
 
   const summary = feedbackSummaryFromOrder({ feedback: feedbackRoot });
-  await updateMlOrderFeedbackSummary(uid, oid, summary.feedback_sale, summary.feedback_purchase);
+  let orderRowsUpdated = await updateMlOrderFeedbackSummary(
+    uid,
+    oid,
+    summary.feedback_sale,
+    summary.feedback_purchase
+  );
+  /** Si la orden aún no estaba en `ml_orders` (sync pendiente), crear/actualizar fila mínima con la calificación del comprador. */
+  if (orderRowsUpdated === 0) {
+    const now = new Date().toISOString();
+    let rawJson;
+    try {
+      rawJson = JSON.stringify({
+        order_id: oid,
+        feedback: feedbackRoot,
+        _source: "orders_feedback_api",
+      });
+    } catch {
+      rawJson = "{}";
+    }
+    await upsertMlOrder({
+      ml_user_id: uid,
+      order_id: oid,
+      status: null,
+      date_created: null,
+      total_amount: null,
+      currency_id: null,
+      buyer_id: null,
+      feedback_sale: summary.feedback_sale,
+      feedback_purchase: summary.feedback_purchase,
+      raw_json: rawJson,
+      http_status: null,
+      sync_error: null,
+      fetched_at: fetchedAt,
+      updated_at: now,
+    });
+    orderRowsUpdated = 1;
+  }
 
-  return { ok: true, upserted };
+  return { ok: true, upserted, orderRowsUpdated };
 }
 
 /**

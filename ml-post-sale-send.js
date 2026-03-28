@@ -22,6 +22,7 @@ const {
   isPostSaleStepSent,
   insertPostSaleAutoSendLog,
 } = require("./db");
+const { getAutoMessageBudgetForBuyerToday } = require("./ml-auto-message-cap");
 
 const MAX_OTHER = Number(process.env.ML_POST_SALE_MAX_CHARS || 350);
 
@@ -245,6 +246,17 @@ async function trySendDefaultPostSaleMessage(args) {
     return { skipped: true, reason: "already_sent", order_id: orderId };
   }
 
+  let remainingAuto = await getAutoMessageBudgetForBuyerToday(args.mlUserId, buyerId);
+  if (remainingAuto <= 0) {
+    await logAutoSend({
+      ...base,
+      order_id: orderId,
+      outcome: "skipped",
+      skip_reason: "auto_message_cap_day",
+    });
+    return { skipped: true, reason: "auto_message_cap_day", order_id: orderId };
+  }
+
   const optionId = (process.env.ML_POST_SALE_OPTION_ID || "OTHER").trim();
   if (optionId !== "OTHER" && optionId !== "SEND_INVOICE_LINK") {
     console.error(
@@ -272,8 +284,13 @@ async function trySendDefaultPostSaleMessage(args) {
   const ctx = { orderId, buyerId, sellerId: args.mlUserId };
 
   let lastResult = { ok: false, status: 0, order_id: orderId, data: null };
+  let stoppedByAutoCap = false;
 
   for (let step = 0; step < totalSteps; step++) {
+    if (remainingAuto <= 0) {
+      stoppedByAutoCap = true;
+      break;
+    }
     if (!disableDedup && (await isPostSaleStepSent(orderId, step))) {
       continue;
     }
@@ -303,6 +320,7 @@ async function trySendDefaultPostSaleMessage(args) {
       if (!disableDedup) {
         await markPostSaleStepSent(orderId, step);
       }
+      remainingAuto--;
       console.log("[post-sale] enviado order_id=%s step=%s option=%s", orderId, step, optionId);
       const resp =
         result.data != null
@@ -353,7 +371,7 @@ async function trySendDefaultPostSaleMessage(args) {
     }
   }
 
-  if (!disableDedup) {
+  if (!disableDedup && !stoppedByAutoCap) {
     await markPostSaleSent(orderId);
   }
   return lastResult;

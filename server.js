@@ -23,7 +23,11 @@ if (process.env.ML_VENTAS_DETALLE_LOG_FILE === "1" || process.env.ML_VENTAS_DETA
 const http = require("http");
 const pkg = require("./package.json");
 const { extractSkuTitleFromMlResponse } = require("./ml-payload-extract");
-const { extractOrderIdFromOrder, extractOrderIdFromResource } = require("./ml-pack-extract");
+const {
+  extractOrderIdFromOrder,
+  extractOrderIdFromResource,
+  extractOrderIdFromFeedbackPayload,
+} = require("./ml-pack-extract");
 const { upsertOrderFeedbackFromApiResponse } = require("./ml-order-feedback-sync");
 const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
 const { upsertBuyerFromOrdersV2Webhook } = require("./ml-buyer-order-sync");
@@ -41,6 +45,7 @@ const {
   isQuestionUnansweredStatus,
   isQuestionAnsweredOrClosedStatus,
 } = require("./ml-question-sync");
+const { tryQuestionIaAutoAnswer } = require("./ml-questions-ia-auto");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
@@ -94,6 +99,7 @@ const {
   upsertMlQuestionAnswered,
   listMlQuestionsPending,
   listMlQuestionsAnswered,
+  listMlQuestionsIaAutoLog,
   listMlListingsAll,
   listMlListingsByUser,
   listMlListingSyncStatesAll,
@@ -165,6 +171,10 @@ function isVentasDetalleWebPath(pathname) {
 
 function isPreguntasMlPath(pathname) {
   return pathname === "/preguntas-ml" || pathname === "/preguntas-ml/";
+}
+
+function isPreguntasIaAutoLogPath(pathname) {
+  return pathname === "/preguntas-ia-auto-log" || pathname === "/preguntas-ia-auto-log/";
 }
 
 function isPublicacionesMlPath(pathname) {
@@ -594,7 +604,9 @@ function scheduleTopicFetchFromWebhook(body) {
             }
             if (result.ok && parsed && topic === "orders_feedback") {
               try {
-                const oidFb = extractOrderIdFromResource(resourceStr);
+                const oidFb =
+                  extractOrderIdFromResource(resourceStr) ||
+                  extractOrderIdFromFeedbackPayload(parsed);
                 if (oidFb) {
                   const rFb = await upsertOrderFeedbackFromApiResponse(
                     mlUserId,
@@ -604,11 +616,16 @@ function scheduleTopicFetchFromWebhook(body) {
                     "orders_feedback_webhook"
                   );
                   console.log(
-                    "[orders_feedback webhook] ml_user_id=%s order_id=%s filas_feedback=%s ok=%s",
+                    "[orders_feedback webhook] ml_user_id=%s order_id=%s filas_feedback=%s filas_ml_orders=%s ok=%s",
                     mlUserId,
                     oidFb,
                     rFb.upserted,
+                    rFb.orderRowsUpdated ?? "—",
                     rFb.ok
+                  );
+                } else {
+                  console.warn(
+                    "[orders_feedback webhook] no se pudo resolver order_id (resource ni body.order_id)"
                   );
                 }
               } catch (eFb) {
@@ -636,6 +653,16 @@ function scheduleTopicFetchFromWebhook(body) {
                     }
                   } else if (isQuestionUnansweredStatus(row.ml_status)) {
                     await upsertMlQuestionPending(row);
+                    try {
+                      await tryQuestionIaAutoAnswer({
+                        mlUserId,
+                        pendingRow: row,
+                        parsed,
+                        notifId,
+                      });
+                    } catch (eIa) {
+                      console.error("[questions ia-auto]", eIa.message || eIa);
+                    }
                   } else {
                     /** Otros estados (p. ej. UNDER_REVIEW): no mantener en pending. */
                     await deleteMlQuestionPending(row.ml_question_id);
@@ -902,6 +929,10 @@ const server = http.createServer(async (req, res) => {
             "Por responder: GET /preguntas-ml?k=ADMIN_SECRET&tabla=pending · Relleno automático con webhook topic questions + ML_WEBHOOK_FETCH_RESOURCE=1 (GET /questions/{id})",
           ml_questions_answered:
             "Respondidas: GET /preguntas-ml?k=ADMIN_SECRET&tabla=answered · Tras GET /questions/{id} con status respondido/cerrado",
+          respuesta_automatica_ia:
+            "Ventana diaria (prioridad): ML_QUESTIONS_IA_AUTO_WINDOW_START=HH:MM y ML_QUESTIONS_IA_AUTO_WINDOW_END=HH:MM en ML_QUESTIONS_IA_AUTO_TIMEZONE (ej. America/Caracas); ML_QUESTIONS_IA_AUTO_DAYS=0,1,2,3,4,5,6 (0=dom…6=sáb, vacío=todos). Cruce medianoche si START>END. Alternativa: ML_QUESTIONS_IA_AUTO_UNTIL=ISO8601 (un solo corte). POST /answers, ml_questions_ia_auto_sent.",
+          log_ia_auto_omitidos:
+            "GET /preguntas-ia-auto-log?k=ADMIN_SECRET — ml_questions_ia_auto_log (intentos sin POST /answers: fuera de ventana, día no permitido, etc.; ?format=json&limit=)",
         },
         publicaciones_ml:
           "GET /publicaciones-ml?k=ADMIN_SECRET — publicaciones en ml_listings por cuenta; ?cuenta=ml_user_id y ?status= (ej. active, paused, closed) filtran; ?format=json; estado sync en ml_listing_sync_state (cuando exista job de descarga)",
@@ -1949,6 +1980,94 @@ const server = http.createServer(async (req, res) => {
      · <a href="${escapeAttr(preguntasMlQuery("answered"))}" class="${navAnswered}">Respondidas (answered)</a></p>
   <table>
     ${tableHead}
+    <tbody>${tableRows}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
+  /** Log: respuesta IA automática omitida (p. ej. fuera de ventana). Tabla ml_questions_ia_auto_log. */
+  if (req.method === "GET" && isPreguntasIaAutoLogPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Log IA auto preguntas</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Log IA auto preguntas</title><p>Acceso denegado. Usa <code>/preguntas-ia-auto-log?k=TU_CLAVE</code>.</p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    let rows;
+    try {
+      rows = await listMlQuestionsIaAutoLog(lim, 2000);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, count: rows.length, items: rows }));
+      return;
+    }
+    const tableRows =
+      rows.length === 0
+        ? '<tr><td colspan="9">Sin registros.</td></tr>'
+        : rows
+            .map((r) => {
+              const rd =
+                r.reason_detail != null && String(r.reason_detail).length > 160
+                  ? `${escapeHtml(String(r.reason_detail).slice(0, 160))}…`
+                  : escapeHtml(r.reason_detail);
+              const rdTitle =
+                r.reason_detail != null && String(r.reason_detail).length > 160
+                  ? escapeAttr(String(r.reason_detail))
+                  : "";
+              return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td class="muted">${escapeHtml(r.created_at)}</td>
+  <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.ml_question_id)}</td>
+  <td>${escapeHtml(r.item_id)}</td>
+  <td>${escapeHtml(r.buyer_id)}</td>
+  <td>${escapeHtml(r.outcome)}</td>
+  <td class="muted" title="${rdTitle}">${rd}</td>
+  <td class="muted">${escapeHtml(r.notification_id)}</td>
+</tr>`;
+            })
+            .join("");
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Log IA auto (preguntas)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #15202b; color: #e7e9ea; margin: 1rem; }
+    .lead { color: #8b98a5; font-size: 0.95rem; }
+    a { color: #1d9bf0; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; font-size: 0.85rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    .muted { color: #8b98a5; max-width: 36rem; }
+  </style>
+</head>
+<body>
+  <h1>Log respuestas IA automáticas (omitidas)</h1>
+  <p class="lead">Tabla <code>ml_questions_ia_auto_log</code> · ${rows.length} fila(s). JSON: <code>?format=json</code> · <code>?limit=200</code></p>
+  <table>
+    <thead><tr><th>id</th><th>created_at</th><th>ml_user_id</th><th>ml_question_id</th><th>item_id</th><th>buyer_id</th><th>outcome</th><th>reason_detail</th><th>notification_id</th></tr></thead>
     <tbody>${tableRows}</tbody>
   </table>
 </body>
@@ -3497,13 +3616,14 @@ server.listen(PORT, "0.0.0.0", () => {
       `Log recordatorios calificación: http://localhost:${PORT}/recordatorios-calificacion?k=TU_ADMIN_SECRET (alias: /recordatorios?k=…)`
     );
     console.log(`Preguntas ML (pending/answered): http://localhost:${PORT}/preguntas-ml?k=TU_ADMIN_SECRET`);
+    console.log(`Log IA auto preguntas (omitidas): http://localhost:${PORT}/preguntas-ia-auto-log?k=TU_ADMIN_SECRET`);
     console.log(`Publicaciones ML (listings por cuenta): http://localhost:${PORT}/publicaciones-ml?k=TU_ADMIN_SECRET`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
     console.log(`Órdenes ML (sync-orders): http://localhost:${PORT}/ordenes-ml?k=TU_ADMIN_SECRET`);
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /recordatorios-calificacion /preguntas-ml /publicaciones-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /recordatorios-calificacion /preguntas-ml /preguntas-ia-auto-log /publicaciones-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

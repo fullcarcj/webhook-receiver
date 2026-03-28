@@ -40,8 +40,19 @@ function extractOrderIdFromResource(resourceStr) {
   return m ? toPositiveInt(m[1]) : null;
 }
 
+/**
+ * GET /orders/{id}/feedback: a veces ML incluye `order_id` en el cuerpo (respaldo si el resource no trae /orders/…).
+ * No usar `id` en la raíz (puede ser otro identificador).
+ */
+function extractOrderIdFromFeedbackPayload(data) {
+  if (!data || typeof data !== "object") return null;
+  if (data.order_id != null) return toPositiveInt(data.order_id);
+  return null;
+}
+
 module.exports = {
   extractOrderIdFromOrder,
   extractOrderIdFromMessage,
   extractOrderIdFromResource,
+  extractOrderIdFromFeedbackPayload,
 };

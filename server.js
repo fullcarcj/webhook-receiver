@@ -53,6 +53,7 @@ const {
   getQuestionsIaAutoWindowEvaluation,
   getQuestionsIaAutoWindowArithmeticBreakdown,
   serializeIaAutoPendingRouteDetail,
+  isQuestionsIaAutoForceRequired,
   startQuestionsIaAutoPoll,
 } = require("./ml-questions-ia-auto");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
@@ -686,6 +687,7 @@ function scheduleTopicFetchFromWebhook(body) {
                     const win = getQuestionsIaAutoWindowEvaluation(evalAt);
                     const arithmetic = getQuestionsIaAutoWindowArithmeticBreakdown(evalAt);
                     const iaOn = process.env.ML_QUESTIONS_IA_AUTO_ENABLED === "1";
+                    const forceRequired = isQuestionsIaAutoForceRequired();
                     const buildIaRouteDetail = (route, extra) =>
                       serializeIaAutoPendingRouteDetail({
                         route,
@@ -699,7 +701,7 @@ function scheduleTopicFetchFromWebhook(body) {
                         arithmetic_breakdown: arithmetic,
                         ...extra,
                       });
-                    if (iaOn && win.active) {
+                    if (iaOn && (win.active || forceRequired)) {
                       try {
                         const r = await tryQuestionIaAutoAnswer({
                           mlUserId,
@@ -741,10 +743,12 @@ function scheduleTopicFetchFromWebhook(body) {
                       await upsertMlQuestionPending({
                         ...row,
                         ia_auto_route_detail: buildIaRouteDetail("pending_no_auto_attempt", {
-                          why: !iaOn ? "ML_QUESTIONS_IA_AUTO_ENABLED distinto de 1" : "ventana IA inactiva (ver evaluation.outcome)",
+                          why: !iaOn
+                            ? "ML_QUESTIONS_IA_AUTO_ENABLED distinto de 1"
+                            : "ventana IA inactiva y ML_QUESTIONS_IA_AUTO_FORCE distinto de 1 (ver evaluation.outcome)",
                           human: !iaOn
                             ? "IA automática deshabilitada: solo se guarda pending."
-                            : "Fuera de ventana automática o modo UNTIL/parse: solo pending (manual o retry/poll).",
+                            : "Fuera de ventana y sin FORCE=1: solo pending (manual o retry/poll). Con ENABLED=1 y FORCE=1 siempre se intenta POST.",
                         }),
                       });
                     }

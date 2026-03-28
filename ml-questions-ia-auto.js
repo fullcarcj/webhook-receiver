@@ -42,9 +42,10 @@
  * Sin límite de horario (solo si IA habilitada):
  *   ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1  — ignora START/END/DAYS; intenta POST /answers siempre.
  *
- * Respuesta automática “obligada” (sin mirar franja; solo si IA habilitada):
- *   ML_QUESTIONS_IA_AUTO_FORCE=1  — equivalente operativo a IGNORE_WINDOW para decidir si intentar POST;
- *   si es 0 o no está definida, se aplica la ventana START/END/DAYS/UNTIL como siempre.
+ * Modo obligatorio (sin “opción” de ventana para el intento):
+ *   ML_QUESTIONS_IA_AUTO_ENABLED=1 y ML_QUESTIONS_IA_AUTO_FORCE=1  — siempre se intenta POST /answers
+ *   (no aplica corte por franja dentro de tryQuestionIaAutoAnswer). IGNORE_WINDOW sigue siendo alternativa
+ *   que también desactiva el filtro horario en la evaluación; FORCE además acopla webhook + bypass interno.
  *
  * Polling (pending antiguos o sin webhook reciente):
  *   ML_QUESTIONS_IA_AUTO_POLL_MS=300000  — cada 5 min (mín. 60000) intenta POST /answers sobre pending si la ventana IA está activa (o IGNORE_WINDOW).
@@ -243,6 +244,17 @@ function getQuestionsIaAutoWindowEvaluation(atDate) {
     return { active: false, outcome: "until_expired", reason_detail: new Date(end).toISOString() };
   }
   return { active: true, outcome: "ok", reason_detail: null };
+}
+
+/**
+ * Modo obligatorio: con ENABLED=1 y FORCE=1 se intenta POST /answers sin aplicar franja horaria ni días
+ * (en tryQuestionIaAutoAnswer no aplica el corte por ventana).
+ */
+function isQuestionsIaAutoForceRequired() {
+  return (
+    process.env.ML_QUESTIONS_IA_AUTO_ENABLED === "1" &&
+    process.env.ML_QUESTIONS_IA_AUTO_FORCE === "1"
+  );
 }
 
 /** Máx. caracteres guardados en ml_questions_pending.ia_auto_route_detail */
@@ -483,6 +495,7 @@ function getQuestionsIaAutoDiagnostics() {
       ia_enabled: process.env.ML_QUESTIONS_IA_AUTO_ENABLED === "1",
       ignore_window: process.env.ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW === "1",
       force: process.env.ML_QUESTIONS_IA_AUTO_FORCE === "1",
+      force_required: isQuestionsIaAutoForceRequired(),
       poll_ms:
         Number(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS || 0) >= 60000
           ? Number(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS)
@@ -526,8 +539,9 @@ async function tryQuestionIaAutoAnswer(args) {
 
   const evalAt =
     args.evalAt instanceof Date && !Number.isNaN(args.evalAt.getTime()) ? args.evalAt : new Date();
+  const forceBypass = isQuestionsIaAutoForceRequired();
   const win = getQuestionsIaAutoWindowEvaluation(evalAt);
-  if (!win.active) {
+  if (!forceBypass && !win.active) {
     try {
       await insertMlQuestionsIaAutoLog({
         ml_user_id: mlUid,
@@ -806,6 +820,7 @@ module.exports = {
   retryPendingQuestionsIaAuto,
   startQuestionsIaAutoPoll,
   isQuestionsIaAutoWindowActive,
+  isQuestionsIaAutoForceRequired,
   getQuestionsIaAutoWindowEvaluation,
   getQuestionsIaAutoWindowArithmeticBreakdown,
   serializeIaAutoPendingRouteDetail,

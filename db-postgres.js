@@ -2285,8 +2285,9 @@ async function listMlRatingRequestLog(limit, maxAllowed, options = {}) {
 
 /**
  * Órdenes recientes elegibles para mensajes de retiro/despacho (mensajería post-venta).
- * Solo si **aún no hay calificación** ni del vendedor al comprador (sale) ni del comprador al vendedor (purchase),
- * alineado a feedback pendiente en ml_orders / ml_order_feedback (misma idea que recordatorio calificación en compra).
+ * Condición: calificación **pendiente en ambos lados** (vendedor→comprador `sale` y comprador→vendedor `purchase`).
+ * En `ml_order_feedback`, solo cuenta como ya calificado `rating` positive|neutral|negative (no `pending` ni vacío).
+ * Resumen en `ml_orders` alineado: feedback_sale / feedback_purchase sin valor concreto y feedback_purchase_value NULL.
  * Excluye compradores que ya recibieron un envío en el mismo slot (mañana o tarde) el día civil en `tz`.
  * @param {string} slot - 'morning' | 'afternoon'
  * @param {string} tz - p. ej. America/Caracas
@@ -2314,7 +2315,9 @@ async function listMlOrdersEligibleForRetiroBroadcast(mlUserId, sinceIso, orderS
        AND NOT EXISTS (
          SELECT 1 FROM ml_order_feedback f
          WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
-           AND f.side = 'sale' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+           AND f.side = 'sale'
+           AND f.rating IS NOT NULL
+           AND LOWER(TRIM(f.rating)) IN ('positive', 'neutral', 'negative')
        )
        AND (
          o.feedback_sale IS NULL
@@ -2324,7 +2327,9 @@ async function listMlOrdersEligibleForRetiroBroadcast(mlUserId, sinceIso, orderS
        AND NOT EXISTS (
          SELECT 1 FROM ml_order_feedback f
          WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
-           AND f.side = 'purchase' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
+           AND f.side = 'purchase'
+           AND f.rating IS NOT NULL
+           AND LOWER(TRIM(f.rating)) IN ('positive', 'neutral', 'negative')
        )
        AND o.feedback_purchase_value IS NULL
        AND (

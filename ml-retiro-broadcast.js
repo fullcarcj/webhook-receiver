@@ -3,9 +3,10 @@
  * En cada envío se elige una plantilla al azar entre 10 (pool mañana o pool tarde).
  *
  * Elegibilidad (órdenes en ml_orders):
- *   - Solo si **no** calificamos al comprador (lado sale) **ni** el comprador nos calificó (lado purchase):
- *     feedback pendiente en ambos sentidos (misma lógica que en BD: ml_order_feedback sin rating y resumen en ml_orders).
- *   - No se envía si cualquiera de los dos lados ya tiene calificación registrada.
+ *   - Calificación **pendiente del vendedor al comprador (sale)** y **pendiente del comprador al vendedor (purchase)** a la vez.
+ *   - En `ml_order_feedback`, “ya calificado” = rating positive|neutral|negative (el texto `pending` no cuenta como calificación).
+ *   - Resumen en `ml_orders`: sin positive/neutral/negative en sale/purchase y `feedback_purchase_value` NULL.
+ *   - No se envía si cualquier lado ya tiene calificación concreta.
  *
  * Límite por franja: como máximo **un** recordatorio por comprador y cuenta en la **mañana** y **otro** en la **tarde**
  * (día civil según ML_RETIRO_TIMEZONE).

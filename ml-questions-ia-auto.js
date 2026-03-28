@@ -1,18 +1,19 @@
 /**
  * Respuestas automáticas a preguntas ML (POST /answers) con plantillas tipo tienda.
  *
- * Única variable que activa el modo automático: ML_QUESTIONS_IA_AUTO_ENABLED=1
- *   · Sin franja horaria ni días: al recibir UNANSWERED se intenta de inmediato POST /answers.
- *   · El texto es una plantilla elegida al azar entre QUESTION_IA_BODIES (10 textos).
- *   · Si ML responde OK: upsert ml_questions_answered y delete ml_questions_pending.
- *   · Si falla el POST o excepción: puede quedar pending para reintento / manual.
+ * Activación: ML_QUESTIONS_IA_AUTO_ENABLED=1 (cualquier otro valor = apagado).
  *
- * Sigue haciendo falta: ML_WEBHOOK_FETCH_RESOURCE=1 para webhook→GET pregunta, token del vendedor en
- * ml_accounts, y que la API de ML acepte el POST.
+ * Ventana (opcional): si están definidos **ambos** ML_QUESTIONS_IA_AUTO_WINDOW_START y
+ * ML_QUESTIONS_IA_AUTO_WINDOW_END (HH:mm en ML_QUESTIONS_IA_AUTO_TIMEZONE), solo se intenta POST
+ * dentro de esa franja. Si inicio > fin, cruza medianoche (ej. 17:20–07:00).
+ * ML_QUESTIONS_IA_AUTO_DAYS=0,1,…,6 (dom–sáb) restringe días; vacío = todos.
+ * ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 o ML_QUESTIONS_IA_AUTO_FORCE=1 ignora la franja horaria.
+ * ML_QUESTIONS_IA_AUTO_UNTIL=ISO UTC: tras esa fecha/hora no se envía.
  *
- * Polling (respaldo): si ML_QUESTIONS_IA_AUTO_POLL_MS no está definido o está vacío → 60000 (1 min).
- *   Explícito 0 = poll desactivado. Valor ≥60000 = intervalo en ms. ML_QUESTIONS_IA_AUTO_POLL_LIMIT.
- * ML_QUESTIONS_IA_MAX_CHARS=2000 (máx. cuerpo de respuesta).
+ * Polling: ML_QUESTIONS_IA_AUTO_POLL_MS vacío → 60000; 0 = sin poll. Respeta la misma ventana.
+ *
+ * Importante en producción: las variables deben estar en el **servidor** (p. ej. Render). `oauth-env.json`
+ * solo aplica en local si el archivo existe; no sustituye env del panel si allí sigue ENABLED=1.
  */
 const { mercadoLibrePostJsonForUser } = require("./oauth-token");
 const {
@@ -102,19 +103,112 @@ function getLocalMinutesAndWeekdayInTz(date, tz) {
   return { minutes: h * 60 + m, weekday };
 }
 
+/** @param {string|null|undefined} s - "17:20", "7:00" */
+function parseQuestionsIaWindowHHMM(s) {
+  if (s == null || String(s).trim() === "") return null;
+  const m = String(s).trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
 /**
- * @param {Date} [_atDate] reservado (ya no hay ventana horaria).
+ * @param {Date} [atDate]
  * @returns {{ active: boolean, outcome: string, reason_detail: string|null }}
  */
-function getQuestionsIaAutoWindowEvaluation(_atDate) {
+function getQuestionsIaAutoWindowEvaluation(atDate) {
+  const ref =
+    atDate instanceof Date && !Number.isNaN(atDate.getTime()) ? atDate : new Date();
+
   if (process.env.ML_QUESTIONS_IA_AUTO_ENABLED !== "1") {
     return { active: false, outcome: "skip_disabled", reason_detail: null };
   }
+
+  const untilRaw = process.env.ML_QUESTIONS_IA_AUTO_UNTIL;
+  if (untilRaw != null && String(untilRaw).trim() !== "") {
+    const u = new Date(String(untilRaw).trim());
+    if (!Number.isNaN(u.getTime()) && ref.getTime() > u.getTime()) {
+      return {
+        active: false,
+        outcome: "expired_until",
+        reason_detail: `ML_QUESTIONS_IA_AUTO_UNTIL ya pasó (${String(untilRaw).trim()})`,
+      };
+    }
+  }
+
+  const ignoreWindow =
+    process.env.ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW === "1" ||
+    process.env.ML_QUESTIONS_IA_AUTO_FORCE === "1";
+
+  const tz = getQuestionsIaTimezone();
+  const { minutes: nowMin, weekday } = getLocalMinutesAndWeekdayInTz(ref, tz);
+  if (weekday == null) {
+    return {
+      active: false,
+      outcome: "timezone_error",
+      reason_detail: `No se pudo resolver día/hora en ${tz}`,
+    };
+  }
+
+  const daysRaw = process.env.ML_QUESTIONS_IA_AUTO_DAYS;
+  if (daysRaw != null && String(daysRaw).trim() !== "") {
+    const allowed = new Set(
+      String(daysRaw)
+        .split(",")
+        .map((x) => parseInt(String(x).trim(), 10))
+        .filter((n) => Number.isFinite(n) && n >= 0 && n <= 6)
+    );
+    if (allowed.size > 0 && !allowed.has(weekday)) {
+      return {
+        active: false,
+        outcome: "wrong_weekday",
+        reason_detail: `Día local ${weekday} no está en ML_QUESTIONS_IA_AUTO_DAYS`,
+      };
+    }
+  }
+
+  const startRaw = process.env.ML_QUESTIONS_IA_AUTO_WINDOW_START;
+  const endRaw = process.env.ML_QUESTIONS_IA_AUTO_WINDOW_END;
+  const hasStart = startRaw != null && String(startRaw).trim() !== "";
+  const hasEnd = endRaw != null && String(endRaw).trim() !== "";
+
+  if (!ignoreWindow && hasStart && hasEnd) {
+    const startMin = parseQuestionsIaWindowHHMM(startRaw);
+    const endMin = parseQuestionsIaWindowHHMM(endRaw);
+    if (startMin == null || endMin == null) {
+      return {
+        active: false,
+        outcome: "bad_window_config",
+        reason_detail: "ML_QUESTIONS_IA_AUTO_WINDOW_START/END deben ser HH:mm (ej. 17:20)",
+      };
+    }
+    let inWindow = false;
+    if (startMin < endMin) {
+      inWindow = nowMin >= startMin && nowMin < endMin;
+    } else if (startMin > endMin) {
+      inWindow = nowMin >= startMin || nowMin < endMin;
+    } else {
+      inWindow = false;
+    }
+    if (!inWindow) {
+      return {
+        active: false,
+        outcome: "outside_window",
+        reason_detail: `Hora local fuera de ventana ${String(startRaw).trim()}–${String(endRaw).trim()} (${tz})`,
+      };
+    }
+  }
+
   return {
     active: true,
     outcome: "ok",
-    reason_detail:
-      "ML_QUESTIONS_IA_AUTO_ENABLED=1 (intento inmediato POST /answers; plantilla aleatoria entre QUESTION_IA_BODIES)",
+    reason_detail: ignoreWindow
+      ? "IGNORE_WINDOW o FORCE: sin filtro horario"
+      : hasStart && hasEnd
+        ? "Dentro de ventana configurada"
+        : "Sin ventana START/END: permitido 24h (solo ENABLED + días/UNTIL)",
   };
 }
 
@@ -122,7 +216,7 @@ function getQuestionsIaAutoWindowEvaluation(_atDate) {
 const IA_AUTO_ROUTE_DETAIL_MAX = 12000;
 
 /**
- * Diagnóstico para pending (referencia horaria local; sin franja que bloquee el intento si ENABLED=1).
+ * Diagnóstico para pending (hora local + resultado de getQuestionsIaAutoWindowEvaluation).
  * @param {Date} [atDate]
  * @returns {Record<string, unknown>}
  */
@@ -134,6 +228,7 @@ function getQuestionsIaAutoWindowArithmeticBreakdown(atDate) {
   const hh = Math.floor(nowMin / 60);
   const mm = nowMin % 60;
   const localHhmm = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  const ev = getQuestionsIaAutoWindowEvaluation(ref);
   const base = {
     reference_utc: ref.toISOString(),
     timezone: tz,
@@ -142,19 +237,20 @@ function getQuestionsIaAutoWindowArithmeticBreakdown(atDate) {
     weekday_0_6: weekday,
     ia_enabled: process.env.ML_QUESTIONS_IA_AUTO_ENABLED === "1",
     plantillas_disponibles: QUESTION_IA_BODIES.length,
+    evaluation: ev,
   };
 
   if (!base.ia_enabled) {
     return {
       ...base,
-      summary:
-        "ML_QUESTIONS_IA_AUTO_ENABLED distinto de 1: no hay respuesta automática.",
+      summary: "ML_QUESTIONS_IA_AUTO_ENABLED distinto de 1: no hay respuesta automática.",
     };
   }
   return {
     ...base,
-    summary:
-      "ML_QUESTIONS_IA_AUTO_ENABLED=1: intento inmediato POST /answers; texto aleatorio entre las plantillas QUESTION_IA_BODIES (sin horario).",
+    summary: ev.active
+      ? `IA automática permitida ahora: ${ev.reason_detail || ev.outcome}`
+      : `IA bloqueada ahora: ${ev.outcome}${ev.reason_detail ? ` — ${ev.reason_detail}` : ""}`,
   };
 }
 
@@ -223,6 +319,12 @@ function getQuestionsIaAutoDiagnostics() {
     env: {
       ML_QUESTIONS_IA_AUTO_ENABLED: process.env.ML_QUESTIONS_IA_AUTO_ENABLED || "",
       ML_QUESTIONS_IA_AUTO_TIMEZONE: process.env.ML_QUESTIONS_IA_AUTO_TIMEZONE || "",
+      ML_QUESTIONS_IA_AUTO_WINDOW_START: process.env.ML_QUESTIONS_IA_AUTO_WINDOW_START || "",
+      ML_QUESTIONS_IA_AUTO_WINDOW_END: process.env.ML_QUESTIONS_IA_AUTO_WINDOW_END || "",
+      ML_QUESTIONS_IA_AUTO_DAYS: process.env.ML_QUESTIONS_IA_AUTO_DAYS || "",
+      ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW: process.env.ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW || "",
+      ML_QUESTIONS_IA_AUTO_FORCE: process.env.ML_QUESTIONS_IA_AUTO_FORCE || "",
+      ML_QUESTIONS_IA_AUTO_UNTIL: process.env.ML_QUESTIONS_IA_AUTO_UNTIL || "",
       ML_QUESTIONS_IA_AUTO_POLL_MS:
         process.env.ML_QUESTIONS_IA_AUTO_POLL_MS != null && String(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS).trim() !== ""
           ? process.env.ML_QUESTIONS_IA_AUTO_POLL_MS
@@ -291,7 +393,8 @@ async function tryQuestionIaAutoAnswer(args) {
     } catch (e) {
       console.error("[questions ia-auto] ml_questions_ia_auto_log:", e.message || e);
     }
-    return { ok: true, skip: "window_off", ia_outcome: win.outcome };
+    const skip = win.outcome === "skip_disabled" ? "disabled" : "window_off";
+    return { ok: true, skip, ia_outcome: win.outcome };
   }
 
   const qid = Number(pendingRow.ml_question_id);

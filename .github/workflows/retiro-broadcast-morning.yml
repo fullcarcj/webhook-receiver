@@ -1,5 +1,7 @@
-# Recordatorio mañana (Venezuela 7:30): retiro pendientes. UTC 11:30 (America/Caracas UTC-4).
+# Recordatorio mañana (Venezuela 7:30): retiro + feedback pendiente en ambos lados.
+# UTC 11:30 (America/Caracas UTC-4). Manual: workflow_dispatch.
 # Requiere secret DATABASE_URL. ML_RETIRO_ENABLED=1 en el job.
+# Sin ML_RETIRO_ORDER_STATUS: incluye órdenes ML status pending y confirmed (no cancelled/invalid).
 
 name: Retiro ML — mañana
 
@@ -33,6 +35,5 @@ jobs:
           ML_RETIRO_ENABLED: "1"
           ML_RETIRO_SLOT: "morning"
           ML_RETIRO_LOOKBACK_DAYS: "14"
-          ML_RETIRO_ORDER_STATUS: "confirmed"
           ML_RETIRO_TIMEZONE: "America/Caracas"
         run: node ml-retiro-broadcast.js --all --slot=morning

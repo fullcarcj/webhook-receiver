@@ -159,6 +159,7 @@ db.exec(`
     date_created TEXT,
     raw_json TEXT,
     notification_id TEXT,
+    ia_auto_route_detail TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -642,6 +643,10 @@ const FETCH_PROCESS_STATUS_POST_SALE_FAILED = "Fallo post-venta";
     if (!an.has("date_created")) {
       db.exec("ALTER TABLE ml_questions_answered ADD COLUMN date_created TEXT");
       console.log("[db] ml_questions_answered: columna date_created añadida (migración)");
+    }
+    if (!pn.has("ia_auto_route_detail")) {
+      db.exec("ALTER TABLE ml_questions_pending ADD COLUMN ia_auto_route_detail TEXT");
+      console.log("[db] ml_questions_pending: columna ia_auto_route_detail añadida (migración)");
     }
   } catch (e) {
     console.error("[db] migrate ml_questions date_created:", e.message);
@@ -1320,8 +1325,8 @@ function deleteAllMlVentasDetalleWeb() {
 
 const upsertMlQuestionPendingStmt = db.prepare(
   `INSERT INTO ml_questions_pending (
-     ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, created_at, updated_at
-   ) VALUES (@ml_question_id, @ml_user_id, @item_id, @buyer_id, @question_text, @ml_status, @date_created, @raw_json, @notification_id, @created_at, @updated_at)
+     ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, ia_auto_route_detail, created_at, updated_at
+   ) VALUES (@ml_question_id, @ml_user_id, @item_id, @buyer_id, @question_text, @ml_status, @date_created, @raw_json, @notification_id, @ia_auto_route_detail, @created_at, @updated_at)
    ON CONFLICT(ml_question_id) DO UPDATE SET
      ml_user_id = excluded.ml_user_id,
      item_id = excluded.item_id,
@@ -1331,8 +1336,23 @@ const upsertMlQuestionPendingStmt = db.prepare(
      date_created = excluded.date_created,
      raw_json = excluded.raw_json,
      notification_id = excluded.notification_id,
+     ia_auto_route_detail = COALESCE(excluded.ia_auto_route_detail, ia_auto_route_detail),
      updated_at = excluded.updated_at`
 );
+
+function resolveIaAutoRouteDetailForUpsert(row) {
+  if (Object.prototype.hasOwnProperty.call(row, "ia_auto_route_detail")) {
+    const v = row.ia_auto_route_detail;
+    if (v != null && String(v).trim() !== "") return String(v);
+    return null;
+  }
+  return JSON.stringify({
+    route: "pending_detail_not_provided",
+    evaluated_at_utc: new Date().toISOString(),
+    human:
+      "El upsert no incluyó ia_auto_route_detail (despliegue antiguo o llamada sin el campo). Volvé a desplegar el servidor o ejecutá sync GET /questions/{id} para rellenar.",
+  });
+}
 
 function upsertMlQuestionPending(row) {
   const qid = Number(row.ml_question_id);
@@ -1341,6 +1361,7 @@ function upsertMlQuestionPending(row) {
     return null;
   }
   const now = new Date().toISOString();
+  const iaRouteDetail = resolveIaAutoRouteDetailForUpsert(row);
   upsertMlQuestionPendingStmt.run({
     ml_question_id: qid,
     ml_user_id: mlUid,
@@ -1351,6 +1372,7 @@ function upsertMlQuestionPending(row) {
     date_created: row.date_created != null ? String(row.date_created) : null,
     raw_json: row.raw_json != null ? String(row.raw_json) : null,
     notification_id: row.notification_id != null ? String(row.notification_id) : null,
+    ia_auto_route_detail: iaRouteDetail,
     created_at: now,
     updated_at: now,
   });
@@ -1364,7 +1386,7 @@ function getMlQuestionPendingByQuestionId(mlQuestionId) {
   return (
     db
       .prepare(
-        `SELECT id, ml_question_id, ml_user_id, date_created, raw_json
+        `SELECT id, ml_question_id, ml_user_id, date_created, raw_json, ia_auto_route_detail
          FROM ml_questions_pending WHERE ml_question_id = ?`
       )
       .get(qid) || null
@@ -1441,7 +1463,7 @@ function listMlQuestionsPending(limit, maxAllowed) {
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   return db
     .prepare(
-      `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, created_at, updated_at
+      `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, ia_auto_route_detail, created_at, updated_at
        FROM ml_questions_pending ORDER BY id DESC LIMIT ?`
     )
     .all(n);

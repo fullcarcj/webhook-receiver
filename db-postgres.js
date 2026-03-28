@@ -256,6 +256,7 @@ async function runSchemaAndSeed() {
       date_created TEXT,
       raw_json TEXT,
       notification_id TEXT,
+      ia_auto_route_detail TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`,
@@ -448,6 +449,7 @@ async function runSchemaAndSeed() {
   await migrateMlAccountsCookiesNetscape();
   await migrateMlQuestionsAnsweredResponseTimeSec();
   await migrateMlQuestionsDateCreated();
+  await migrateMlQuestionsIaAutoRouteDetail();
   await migrateMlOrdersExtraColumns();
   await migrateMlOrdersFeedbackPurchaseValue();
   await migrateMlRatingRequestSentBuyerId();
@@ -564,6 +566,23 @@ async function migrateMlQuestionsDateCreated() {
     }
   } catch (e) {
     console.error("[db] migrate ml_questions date_created:", e.message);
+  }
+}
+
+async function migrateMlQuestionsIaAutoRouteDetail() {
+  try {
+    const { rows: p } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_questions_pending' AND column_name = 'ia_auto_route_detail'`
+    );
+    if (p.length === 0) {
+      await pool.query(
+        `ALTER TABLE ml_questions_pending ADD COLUMN ia_auto_route_detail TEXT`
+      );
+      console.log("[db] ml_questions_pending: columna ia_auto_route_detail añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_questions ia_auto_route_detail:", e.message);
   }
 }
 
@@ -1285,6 +1304,26 @@ async function insertPostSaleAutoSendLog(row) {
 }
 
 /**
+ * Si el caller no envía `ia_auto_route_detail` (undefined), guardamos un JSON mínimo para no dejar la columna vacía.
+ * Si envía `null` o "" explícitos, pasamos null y COALESCE conserva el valor anterior en UPDATE.
+ * @param {object} row
+ * @returns {string|null}
+ */
+function resolveIaAutoRouteDetailForUpsert(row) {
+  if (Object.prototype.hasOwnProperty.call(row, "ia_auto_route_detail")) {
+    const v = row.ia_auto_route_detail;
+    if (v != null && String(v).trim() !== "") return String(v);
+    return null;
+  }
+  return JSON.stringify({
+    route: "pending_detail_not_provided",
+    evaluated_at_utc: new Date().toISOString(),
+    human:
+      "El upsert no incluyó ia_auto_route_detail (despliegue antiguo o llamada sin el campo). Volvé a desplegar el servidor o ejecutá sync GET /questions/{id} para rellenar.",
+  });
+}
+
+/**
  * Inserta o actualiza una pregunta pendiente (respuesta GET /questions/{id}).
  * @param {object} row
  */
@@ -1296,10 +1335,11 @@ async function upsertMlQuestionPending(row) {
     return null;
   }
   const now = new Date().toISOString();
+  const iaRouteDetail = resolveIaAutoRouteDetailForUpsert(row);
   const { rows } = await pool.query(
     `INSERT INTO ml_questions_pending (
-       ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, created_at, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, ia_auto_route_detail, created_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      ON CONFLICT (ml_question_id) DO UPDATE SET
        ml_user_id = EXCLUDED.ml_user_id,
        item_id = EXCLUDED.item_id,
@@ -1309,6 +1349,7 @@ async function upsertMlQuestionPending(row) {
        date_created = EXCLUDED.date_created,
        raw_json = EXCLUDED.raw_json,
        notification_id = EXCLUDED.notification_id,
+       ia_auto_route_detail = COALESCE(EXCLUDED.ia_auto_route_detail, ml_questions_pending.ia_auto_route_detail),
        updated_at = EXCLUDED.updated_at
      RETURNING id`,
     [
@@ -1321,6 +1362,7 @@ async function upsertMlQuestionPending(row) {
       row.date_created != null ? String(row.date_created) : null,
       row.raw_json != null ? String(row.raw_json) : null,
       row.notification_id != null ? String(row.notification_id) : null,
+      iaRouteDetail,
       now,
       now,
     ]
@@ -1338,7 +1380,7 @@ async function getMlQuestionPendingByQuestionId(mlQuestionId) {
   const qid = Number(mlQuestionId);
   if (!Number.isFinite(qid) || qid <= 0) return null;
   const { rows } = await pool.query(
-    `SELECT id, ml_question_id, ml_user_id, date_created, raw_json
+    `SELECT id, ml_question_id, ml_user_id, date_created, raw_json, ia_auto_route_detail
      FROM ml_questions_pending WHERE ml_question_id = $1`,
     [qid]
   );
@@ -1350,6 +1392,13 @@ async function deleteMlQuestionPending(mlQuestionId) {
   const qid = Number(mlQuestionId);
   if (!Number.isFinite(qid) || qid <= 0) return 0;
   const { rowCount } = await pool.query(`DELETE FROM ml_questions_pending WHERE ml_question_id = $1`, [qid]);
+  return rowCount || 0;
+}
+
+/** Vacía toda la tabla (solo cola local; no borra preguntas en Mercado Libre). */
+async function deleteAllMlQuestionsPending() {
+  await ensureSchema();
+  const { rowCount } = await pool.query(`DELETE FROM ml_questions_pending`);
   return rowCount || 0;
 }
 
@@ -1417,11 +1466,36 @@ async function listMlQuestionsPending(limit, maxAllowed) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   const { rows } = await pool.query(
-    `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, created_at, updated_at
+    `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, ia_auto_route_detail, created_at, updated_at
      FROM ml_questions_pending ORDER BY id DESC LIMIT $1`,
     [n]
   );
   return rows;
+}
+
+/** Una consulta barata para el poll IA (evita listar pending si la tabla está vacía). */
+async function hasMlQuestionsPending() {
+  await ensureSchema();
+  const { rows } = await pool.query(`SELECT 1 FROM ml_questions_pending LIMIT 1`);
+  return rows.length > 0;
+}
+
+/**
+ * Cuáles de estos ml_question_id ya tienen fila en ml_questions_ia_auto_sent (una query).
+ * @param {(number|string)[]} mlQuestionIds
+ * @returns {Promise<Set<number>>}
+ */
+async function getMlQuestionsIaAutoSentIdSet(mlQuestionIds) {
+  await ensureSchema();
+  const ids = (mlQuestionIds || [])
+    .map((x) => Number(x))
+    .filter((x) => Number.isFinite(x) && x > 0);
+  if (ids.length === 0) return new Set();
+  const { rows } = await pool.query(
+    `SELECT ml_question_id FROM ml_questions_ia_auto_sent WHERE ml_question_id = ANY($1::bigint[])`,
+    [ids]
+  );
+  return new Set(rows.map((r) => Number(r.ml_question_id)));
 }
 
 async function listMlQuestionsAnswered(limit, maxAllowed) {
@@ -2749,8 +2823,11 @@ module.exports = {
   upsertMlQuestionPending,
   getMlQuestionPendingByQuestionId,
   deleteMlQuestionPending,
+  deleteAllMlQuestionsPending,
   upsertMlQuestionAnswered,
   listMlQuestionsPending,
+  hasMlQuestionsPending,
+  getMlQuestionsIaAutoSentIdSet,
   listMlQuestionsAnswered,
   wasMlQuestionsIaAutoSent,
   insertMlQuestionsIaAutoSent,

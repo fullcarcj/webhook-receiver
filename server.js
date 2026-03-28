@@ -45,7 +45,16 @@ const {
   isQuestionUnansweredStatus,
   isQuestionAnsweredOrClosedStatus,
 } = require("./ml-question-sync");
-const { tryQuestionIaAutoAnswer } = require("./ml-questions-ia-auto");
+const { refreshMlQuestionFromApi, syncAllPendingQuestionsFromApi } = require("./ml-question-refresh");
+const {
+  tryQuestionIaAutoAnswer,
+  retryPendingQuestionsIaAuto,
+  getQuestionsIaAutoDiagnostics,
+  getQuestionsIaAutoWindowEvaluation,
+  getQuestionsIaAutoWindowArithmeticBreakdown,
+  serializeIaAutoPendingRouteDetail,
+  startQuestionsIaAutoPoll,
+} = require("./ml-questions-ia-auto");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
@@ -173,8 +182,24 @@ function isPreguntasMlPath(pathname) {
   return pathname === "/preguntas-ml" || pathname === "/preguntas-ml/";
 }
 
+function isPreguntasMlRefreshPath(pathname) {
+  return pathname === "/preguntas-ml-refresh" || pathname === "/preguntas-ml-refresh/";
+}
+
+function isPreguntasMlSyncPendingPath(pathname) {
+  return pathname === "/preguntas-ml-sync-pending" || pathname === "/preguntas-ml-sync-pending/";
+}
+
 function isPreguntasIaAutoLogPath(pathname) {
   return pathname === "/preguntas-ia-auto-log" || pathname === "/preguntas-ia-auto-log/";
+}
+
+function isPreguntasIaAutoRetryPath(pathname) {
+  return pathname === "/preguntas-ia-auto-retry" || pathname === "/preguntas-ia-auto-retry/";
+}
+
+function isPreguntasIaAutoStatusPath(pathname) {
+  return pathname === "/preguntas-ia-auto-status" || pathname === "/preguntas-ia-auto-status/";
 }
 
 function isPublicacionesMlPath(pathname) {
@@ -652,16 +677,76 @@ function scheduleTopicFetchFromWebhook(body) {
                       }
                     }
                   } else if (isQuestionUnansweredStatus(row.ml_status)) {
-                    await upsertMlQuestionPending(row);
-                    try {
-                      await tryQuestionIaAutoAnswer({
-                        mlUserId,
-                        pendingRow: row,
-                        parsed,
-                        notifId,
+                    /**
+                     * Tres pasos lógicos: (1) hook ya recibido + GET → fila `row`. (2) Mirar hora/ventana;
+                     * si IA+ventana activa → POST /answers; si no → pending. (3) Si auto OK, tryQuestionIaAutoAnswer
+                     * hace answered + delete pending; aquí solo pending si no hubo respuesta automática completa.
+                     */
+                    const evalAt = new Date();
+                    const win = getQuestionsIaAutoWindowEvaluation(evalAt);
+                    const arithmetic = getQuestionsIaAutoWindowArithmeticBreakdown(evalAt);
+                    const iaOn = process.env.ML_QUESTIONS_IA_AUTO_ENABLED === "1";
+                    const buildIaRouteDetail = (route, extra) =>
+                      serializeIaAutoPendingRouteDetail({
+                        route,
+                        evaluated_at_utc: evalAt.toISOString(),
+                        question_date_created_ml: row.date_created || null,
+                        evaluation: {
+                          active: win.active,
+                          outcome: win.outcome,
+                          reason_detail: win.reason_detail,
+                        },
+                        arithmetic_breakdown: arithmetic,
+                        ...extra,
                       });
-                    } catch (eIa) {
-                      console.error("[questions ia-auto]", eIa.message || eIa);
+                    if (iaOn && win.active) {
+                      try {
+                        const r = await tryQuestionIaAutoAnswer({
+                          mlUserId,
+                          pendingRow: row,
+                          parsed,
+                          notifId,
+                          evalAt,
+                        });
+                        const resueltaAuto =
+                          r &&
+                          r.ok === true &&
+                          (r.question_id != null || r.skip === "already_sent");
+                        if (!resueltaAuto) {
+                          await upsertMlQuestionPending({
+                            ...row,
+                            ia_auto_route_detail: buildIaRouteDetail("pending_after_auto_attempt", {
+                              why_not_auto: {
+                                ok: r && r.ok,
+                                skip: r && r.skip,
+                                http_status: r && r.status,
+                                error: r && r.error != null ? String(r.error).slice(0, 4000) : null,
+                              },
+                              human:
+                                "Ventana IA activa pero el POST automático no completó (revisar skip, api_error o exception en why_not_auto).",
+                            }),
+                          });
+                        }
+                      } catch (eIa) {
+                        console.error("[questions ia-auto]", eIa.message || eIa);
+                        await upsertMlQuestionPending({
+                          ...row,
+                          ia_auto_route_detail: buildIaRouteDetail("pending_auto_exception", {
+                            exception: String(eIa.message || eIa).slice(0, 4000),
+                            human: "Excepción al intentar respuesta automática; queda pending para reintento o manual.",
+                          }),
+                        });
+                      }
+                    } else {
+                      await upsertMlQuestionPending({
+                        ...row,
+                        ia_auto_route_detail: buildIaRouteDetail("pending_no_auto_attempt", {
+                          why: !iaOn ? "ML_QUESTIONS_IA_AUTO_ENABLED distinto de 1" : "ventana IA inactiva (ver evaluation.outcome)",
+                          human: !iaOn
+                            ? "IA automática deshabilitada: solo se guarda pending."
+                            : "Fuera de ventana automática o modo UNTIL/parse: solo pending (manual o retry/poll).",
+                        }),
+                      });
                     }
                   } else {
                     /** Otros estados (p. ej. UNDER_REVIEW): no mantener en pending. */
@@ -926,13 +1011,25 @@ const server = http.createServer(async (req, res) => {
           "ml_ventas_detalle_web.raw = HTML; GET /ventas-detalle-web?k= & format=json&include_raw=1 — POST retry JSON write_log:true o ML_VENTAS_DETALLE_LOG_FILE=1 → log.txt (ML_VENTAS_DETALLE_LOG_PATH opcional) — DELETE /admin/ventas-detalle-web vacía la tabla",
         preguntas_ml: {
           ml_questions_pending:
-            "Por responder: GET /preguntas-ml?k=ADMIN_SECRET&tabla=pending · Relleno automático con webhook topic questions + ML_WEBHOOK_FETCH_RESOURCE=1 (GET /questions/{id})",
+            "Por responder: GET /preguntas-ml?k=ADMIN_SECRET&tabla=pending · Webhook questions + ML_WEBHOOK_FETCH_RESOURCE=1 → GET /questions/{id}; al recibir UNANSWERED se evalúa hora/ventana y se intenta POST /answers o se deja para manual",
           ml_questions_answered:
             "Respondidas: GET /preguntas-ml?k=ADMIN_SECRET&tabla=answered · Tras GET /questions/{id} con status respondido/cerrado",
+          ml_questions_refresh:
+            "GET /preguntas-ml-refresh?k=ADMIN_SECRET&ml_question_id=ID — sincroniza una pregunta con la API ML (respuesta manual en la app sin webhook); opcional ml_user_id= vendedor si pending tiene user_id erróneo",
+          ml_questions_sync_pending:
+            "GET /preguntas-ml-sync-pending?k=ADMIN_SECRET&limit=50 — recorre pending y alinea con ML (las ya answered pasan a answered y salen de pending)",
+          delete_all_ml_questions_pending:
+            "DELETE /admin/ml-questions-pending (cabecera X-Admin-Secret) vacía ml_questions_pending (solo BD local; no afecta preguntas en ML)",
           respuesta_automatica_ia:
-            "Ventana diaria (prioridad): ML_QUESTIONS_IA_AUTO_WINDOW_START=HH:MM y ML_QUESTIONS_IA_AUTO_WINDOW_END=HH:MM en ML_QUESTIONS_IA_AUTO_TIMEZONE (ej. America/Caracas); ML_QUESTIONS_IA_AUTO_DAYS=0,1,2,3,4,5,6 (0=dom…6=sáb, vacío=todos). Cruce medianoche si START>END. Alternativa: ML_QUESTIONS_IA_AUTO_UNTIL=ISO8601 (un solo corte). POST /answers, ml_questions_ia_auto_sent.",
+            "Ventana diaria (prioridad): ML_QUESTIONS_IA_AUTO_WINDOW_START=HH:MM y ML_QUESTIONS_IA_AUTO_WINDOW_END=HH:MM en ML_QUESTIONS_IA_AUTO_TIMEZONE (ej. America/Caracas); ML_QUESTIONS_IA_AUTO_DAYS=0,1,2,3,4,5,6 (0=dom…6=sáb, vacío=todos). Cruce medianoche si START>END. ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 ignora horario y días (respuesta automática 24h si IA enabled). Alternativa: ML_QUESTIONS_IA_AUTO_UNTIL=ISO8601 (un solo corte). POST /answers, ml_questions_ia_auto_sent.",
           log_ia_auto_omitidos:
             "GET /preguntas-ia-auto-log?k=ADMIN_SECRET — ml_questions_ia_auto_log (intentos sin POST /answers: fuera de ventana, día no permitido, etc.; ?format=json&limit=)",
+          retry_ia_auto_pending:
+            "GET /preguntas-ia-auto-retry?k=ADMIN_SECRET — reintenta respuesta IA para filas en ml_questions_pending (útil si el webhook llegó fuera de ventana; ejecutar en cron dentro de la ventana; ?limit=50)",
+          poll_ia_auto_pending:
+            "ML_QUESTIONS_IA_AUTO_POLL_MS=300000 (≥60000) + ENABLED=1: el proceso reintenta pending cada N ms mientras la ventana IA esté activa (o IGNORE_WINDOW). ML_QUESTIONS_IA_AUTO_POLL_LIMIT=40",
+          estado_ia_auto_prueba:
+            "GET /preguntas-ia-auto-status?k=ADMIN_SECRET — JSON: modo manual/automático, hora local, env efectivo, checks (IA on, ML_WEBHOOK_FETCH_RESOURCE), texto prueba",
         },
         publicaciones_ml:
           "GET /publicaciones-ml?k=ADMIN_SECRET — publicaciones en ml_listings por cuenta; ?cuenta=ml_user_id y ?status= (ej. active, paused, closed) filtran; ?format=json; estado sync en ml_listing_sync_state (cuando exista job de descarga)",
@@ -1844,6 +1941,63 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Sincronizar una pregunta con GET /questions/{id} (p. ej. ya respondida en ML y pending obsoleto). */
+  if (req.method === "GET" && isPreguntasMlRefreshPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+      return;
+    }
+    const mq = url.searchParams.get("ml_question_id") || url.searchParams.get("question_id");
+    const mu = url.searchParams.get("ml_user_id") || url.searchParams.get("user_id");
+    try {
+      const out = await refreshMlQuestionFromApi({
+        mlQuestionId: mq,
+        mlUserId: mu != null && String(mu).trim() !== "" ? mu : null,
+      });
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(out));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+    }
+    return;
+  }
+
+  /** Sincronizar todas las filas pending con la API (answered en ML → salen de pending). */
+  if (req.method === "GET" && isPreguntasMlSyncPendingPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+      return;
+    }
+    const limRaw = url.searchParams.get("limit");
+    const limNum = limRaw != null && String(limRaw).trim() !== "" ? Number(limRaw) : 50;
+    try {
+      const out = await syncAllPendingQuestionsFromApi({ limit: limNum });
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(out));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+    }
+    return;
+  }
+
   /** Preguntas ML: tablas ml_questions_pending y ml_questions_answered. */
   if (req.method === "GET" && isPreguntasMlPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
@@ -1885,6 +2039,30 @@ const server = http.createServer(async (req, res) => {
       if (tablaKey !== "pending") p.set("tabla", tablaKey);
       return `/preguntas-ml?${p.toString()}`;
     }
+    function preguntasMlSyncPendingUrl() {
+      const p = new URLSearchParams();
+      p.set("k", kForLinks);
+      p.set("limit", limForLinks || "100");
+      return `/preguntas-ml-sync-pending?${p.toString()}`;
+    }
+    function preguntasMlIaRetryUrl() {
+      const p = new URLSearchParams();
+      p.set("k", kForLinks);
+      p.set("limit", "50");
+      return `/preguntas-ia-auto-retry?${p.toString()}`;
+    }
+    function preguntasMlIaStatusUrl() {
+      const p = new URLSearchParams();
+      p.set("k", kForLinks);
+      return `/preguntas-ia-auto-status?${p.toString()}`;
+    }
+    function preguntasMlIaLogUrl() {
+      const p = new URLSearchParams();
+      p.set("k", kForLinks);
+      p.set("format", "json");
+      p.set("limit", "80");
+      return `/preguntas-ia-auto-log?${p.toString()}`;
+    }
     if (url.searchParams.get("format") === "json") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, tabla, count: rows.length, items: rows }));
@@ -1895,10 +2073,10 @@ const server = http.createServer(async (req, res) => {
     const tableHead =
       tabla === "answered"
         ? "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>respuesta</th><th>status</th><th>date_created</th><th>Δs</th><th>answered_at</th></tr></thead>"
-        : "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>status</th><th>date_created</th><th>updated_at</th></tr></thead>";
+        : "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>status</th><th>date_created</th><th>updated_at</th><th>ia_auto_route_detail</th></tr></thead>";
     const tableRows =
       rows.length === 0
-        ? `<tr><td colspan="${tabla === "answered" ? 11 : 9}">Sin registros.</td></tr>`
+        ? `<tr><td colspan="${tabla === "answered" ? 11 : 10}">Sin registros.</td></tr>`
         : tabla === "answered"
           ? rows
               .map((r) => {
@@ -1943,6 +2121,11 @@ const server = http.createServer(async (req, res) => {
                   r.date_created != null && String(r.date_created).trim() !== ""
                     ? escapeHtml(String(r.date_created))
                     : "—";
+                const rawIa = r.ia_auto_route_detail != null ? String(r.ia_auto_route_detail) : "";
+                const iaPreview =
+                  rawIa.trim() !== ""
+                    ? `${escapeHtml(rawIa.length > 140 ? `${rawIa.slice(0, 140)}…` : rawIa)}`
+                    : "—";
                 return `<tr>
   <td>${escapeHtml(r.id)}</td>
   <td>${escapeHtml(r.ml_question_id)}</td>
@@ -1953,6 +2136,7 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.ml_status)}</td>
   <td class="muted" title="date_created de la pregunta (API ML)">${qdcP}</td>
   <td class="muted">${escapeHtml(r.updated_at)}</td>
+  <td class="muted mono" title="${escapeAttr(rawIa)}">${iaPreview}</td>
 </tr>`;
               })
               .join("");
@@ -1971,11 +2155,20 @@ const server = http.createServer(async (req, res) => {
     th, td { border: 1px solid #38444d; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
     th { background: #1e2732; }
     .muted { color: #8b98a5; max-width: 28rem; }
+    .mono { font-family: ui-monospace, monospace; font-size: 0.75rem; max-width: 36rem; word-break: break-word; }
   </style>
 </head>
 <body>
   <h1>Preguntas Mercado Libre</h1>
   <p class="lead">Tabla <code>${tabla === "answered" ? "ml_questions_answered" : "ml_questions_pending"}</code> · ${rows.length} fila(s). JSON: <code>?format=json</code> · <code>?tabla=pending</code> o <code>?tabla=answered</code></p>
+  ${
+    tabla === "pending"
+      ? `<p class="lead"><strong>Cómo funciona (3 pasos):</strong> (1) webhook <code>questions</code> + GET del recurso. (2) Si UNANSWERED → ver hora/ventana e intentar respuesta automática o dejar en pending. (3) Si la pregunta queda respondida en ML → fila en <code>ml_questions_answered</code> y se borra de pending. Con <code>ML_WEBHOOK_FETCH_RESOURCE=1</code>, si toca automático se intenta <code>POST /answers</code> <strong>sin</strong> guardar pending antes; solo si falla el envío o no toca ventana aparece fila aquí. La columna <code>ia_auto_route_detail</code> documenta por qué sigue en pending.</p>
+  <p class="lead">Para <strong>borrar todas las filas pending</strong> en esta base (solo copia local; las preguntas siguen en ML): <code>DELETE /admin/ml-questions-pending</code> con cabecera <code>X-Admin-Secret</code> (mismo valor que variable de entorno).</p>
+  <p class="lead">Si en Mercado Libre ya está <strong>respondida</strong> y aquí sigue en pending: la BD está desactualizada. <a href="${escapeAttr(preguntasMlSyncPendingUrl())}">Sincronizar pending con la API</a> (JSON; recargá esta página después).</p>
+  <p class="lead">Si <strong>no</strong> responde automático: en el servidor (p. ej. Render) tenés que definir las mismas variables que <code>ML_QUESTIONS_IA_AUTO_*</code> y <code>ML_WEBHOOK_FETCH_RESOURCE=1</code> que en tu <code>oauth-env.json</code> local. <a href="${escapeAttr(preguntasMlIaStatusUrl())}">Estado IA (modo / prueba)</a> · <a href="${escapeAttr(preguntasMlIaRetryUrl())}">Reintentar POST /answers sobre pending</a> · <a href="${escapeAttr(preguntasMlIaLogUrl())}">Log (errores API / excepciones)</a>. La columna <code>user_id</code> debe ser el <strong>vendedor</strong> con cuenta registrada (token en <code>ml_accounts</code>); si es otro número, el POST falla.</p>`
+      : ""
+  }
   <p><a href="${escapeAttr(preguntasMlQuery("pending"))}" class="${navPending}">Por responder (pending)</a>
      · <a href="${escapeAttr(preguntasMlQuery("answered"))}" class="${navAnswered}">Respondidas (answered)</a></p>
   <table>
@@ -2074,6 +2267,69 @@ const server = http.createServer(async (req, res) => {
 </html>`;
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(html);
+    return;
+  }
+
+  /** Estado IA preguntas: modo manual/automático, hora local, env y texto para prueba. */
+  if (req.method === "GET" && isPreguntasIaAutoStatusPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+      return;
+    }
+    try {
+      const body = getQuestionsIaAutoDiagnostics();
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(body));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+    }
+    return;
+  }
+
+  /** Reintenta respuesta IA para pending (cron dentro de la ventana). */
+  if (req.method === "GET" && isPreguntasIaAutoRetryPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+      return;
+    }
+    const limRaw = url.searchParams.get("limit");
+    const limNum = limRaw != null && String(limRaw).trim() !== "" ? Number(limRaw) : 50;
+    try {
+      const out = await retryPendingQuestionsIaAuto({ limit: limNum });
+      const diag = getQuestionsIaAutoDiagnostics();
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ...out,
+          al_momento: {
+            modo: diag.modo,
+            modo_confirmacion: diag.modo_confirmacion,
+            prueba: diag.prueba,
+            evaluation: diag.evaluation,
+          },
+        })
+      );
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+    }
     return;
   }
 
@@ -3207,6 +3463,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Vacía ml_questions_pending (solo base local; las preguntas siguen en Mercado Libre). */
+  if (url.pathname === "/admin/ml-questions-pending" || url.pathname === "/admin/ml-questions-pending/") {
+    if (req.method === "DELETE") {
+      if (rejectAdminSecret(req, res)) return;
+      try {
+        const deleted = await deleteAllMlQuestionsPending();
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, deleted }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "usa DELETE" }));
+    return;
+  }
+
   /**
    * Intercambia el `code` de la URL de autorización ML por tokens y guarda en ml_accounts.
    * - GET: redirect de ML (?code= / ?error=) — mismo path que Redirect URI registrada; sin X-Admin-Secret.
@@ -3599,10 +3874,28 @@ server.listen(PORT, "0.0.0.0", () => {
       `[post-sale] envío automático ON (ML_AUTO_SEND_TOPICS=${process.env.ML_AUTO_SEND_TOPICS || "orders_v2"})`
     );
   }
+  if (process.env.ML_QUESTIONS_IA_AUTO_ENABLED === "1") {
+    try {
+      const d = getQuestionsIaAutoDiagnostics();
+      console.log(
+        "[questions ia-auto] Arranque — modo=%s · hora local %s · ML_WEBHOOK_FETCH_RESOURCE=%s",
+        d.modo_confirmacion,
+        d.hora_local,
+        d.checks.webhook_fetch_resource ? "OK" : "OFF (poner 1)"
+      );
+      console.log("[questions ia-auto] Prueba:", d.prueba);
+    } catch (e) {
+      console.error("[questions ia-auto] diagnóstico arranque:", e.message || e);
+    }
+    startQuestionsIaAutoPoll();
+  }
   if (process.env.ADMIN_SECRET) {
     console.log(`Vaciar fetches ML: DELETE http://localhost:${PORT}/admin/topic-fetches (cabecera X-Admin-Secret)`);
     console.log(
       `Vaciar detalle ventas .ve: DELETE http://localhost:${PORT}/admin/ventas-detalle-web (cabecera X-Admin-Secret)`
+    );
+    console.log(
+      `Vaciar preguntas pending (solo BD): DELETE http://localhost:${PORT}/admin/ml-questions-pending (cabecera X-Admin-Secret)`
     );
     console.log(`Cuentas ML: GET|POST|DELETE http://localhost:${PORT}/admin/ml-accounts (cabecera X-Admin-Secret)`);
     console.log(`OAuth code→cuenta: POST http://localhost:${PORT}/admin/oauth-exchange (JSON code + X-Admin-Secret)`);
@@ -3616,14 +3909,18 @@ server.listen(PORT, "0.0.0.0", () => {
       `Log recordatorios calificación: http://localhost:${PORT}/recordatorios-calificacion?k=TU_ADMIN_SECRET (alias: /recordatorios?k=…)`
     );
     console.log(`Preguntas ML (pending/answered): http://localhost:${PORT}/preguntas-ml?k=TU_ADMIN_SECRET`);
+    console.log(`Sync pregunta ML→BD: http://localhost:${PORT}/preguntas-ml-refresh?k=TU_ADMIN_SECRET&ml_question_id=ID`);
+    console.log(`Sync todo pending: http://localhost:${PORT}/preguntas-ml-sync-pending?k=TU_ADMIN_SECRET&limit=100`);
     console.log(`Log IA auto preguntas (omitidas): http://localhost:${PORT}/preguntas-ia-auto-log?k=TU_ADMIN_SECRET`);
+    console.log(`Estado IA prueba (modo/hora): http://localhost:${PORT}/preguntas-ia-auto-status?k=TU_ADMIN_SECRET`);
+    console.log(`Reintentar IA sobre pending (JSON): http://localhost:${PORT}/preguntas-ia-auto-retry?k=TU_ADMIN_SECRET`);
     console.log(`Publicaciones ML (listings por cuenta): http://localhost:${PORT}/publicaciones-ml?k=TU_ADMIN_SECRET`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
     console.log(`Órdenes ML (sync-orders): http://localhost:${PORT}/ordenes-ml?k=TU_ADMIN_SECRET`);
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /recordatorios-calificacion /preguntas-ml /preguntas-ia-auto-log /publicaciones-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

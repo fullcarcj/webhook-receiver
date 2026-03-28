@@ -9,6 +9,7 @@ const {
   normalizeNombreApellido,
   resolvePrefEntregaForUpsert,
 } = require("./ml-buyer-pref");
+const { feedbackPurchaseRatingValue } = require("./ml-order-map");
 
 const POST_SALE_MESSAGE_BODY_MAX = 350;
 
@@ -319,6 +320,7 @@ async function runSchemaAndSeed() {
       buyer_phone_registered BOOLEAN,
       feedback_sale TEXT,
       feedback_purchase TEXT,
+      feedback_purchase_value SMALLINT,
       raw_json TEXT NOT NULL,
       http_status INTEGER,
       sync_error TEXT,
@@ -393,7 +395,29 @@ async function runSchemaAndSeed() {
   await migrateMlQuestionsAnsweredResponseTimeSec();
   await migrateMlQuestionsDateCreated();
   await migrateMlOrdersExtraColumns();
+  await migrateMlOrdersFeedbackPurchaseValue();
   await migrateMlRatingRequestSentBuyerId();
+}
+
+async function migrateMlOrdersFeedbackPurchaseValue() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_orders' AND column_name = 'feedback_purchase_value'`
+    );
+    if (rows.length > 0) return;
+    await pool.query(`ALTER TABLE ml_orders ADD COLUMN feedback_purchase_value SMALLINT`);
+    console.log("[db] ml_orders: columna feedback_purchase_value añadida (migración)");
+    await pool.query(`
+      UPDATE ml_orders SET feedback_purchase_value = CASE
+        WHEN LOWER(TRIM(COALESCE(feedback_purchase,''))) = 'positive' THEN 1
+        WHEN LOWER(TRIM(COALESCE(feedback_purchase,''))) = 'neutral' THEN 0
+        WHEN LOWER(TRIM(COALESCE(feedback_purchase,''))) = 'negative' THEN -1
+        ELSE NULL
+      END`);
+  } catch (e) {
+    console.error("[db] migrate ml_orders feedback_purchase_value:", e.message);
+  }
 }
 
 async function migrateMlRatingRequestSentBuyerId() {
@@ -1519,6 +1543,7 @@ async function upsertMlOrder(row) {
 
   const fbSale = row.feedback_sale != null ? String(row.feedback_sale).slice(0, 200) : null;
   const fbPurchase = row.feedback_purchase != null ? String(row.feedback_purchase).slice(0, 200) : null;
+  const fbPurchaseVal = feedbackPurchaseRatingValue(fbPurchase);
 
   let buyerPhoneRegistered = false;
   const bid = row.buyer_id != null ? Number(row.buyer_id) : null;
@@ -1532,9 +1557,9 @@ async function upsertMlOrder(row) {
   const { rows } = await pool.query(
     `INSERT INTO ml_orders (
        ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
-       buyer_phone_registered, feedback_sale, feedback_purchase,
+       buyer_phone_registered, feedback_sale, feedback_purchase, feedback_purchase_value,
        raw_json, http_status, sync_error, fetched_at, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
      ON CONFLICT (ml_user_id, order_id) DO UPDATE SET
        status = EXCLUDED.status,
        date_created = EXCLUDED.date_created,
@@ -1544,6 +1569,7 @@ async function upsertMlOrder(row) {
        buyer_phone_registered = EXCLUDED.buyer_phone_registered,
        feedback_sale = EXCLUDED.feedback_sale,
        feedback_purchase = EXCLUDED.feedback_purchase,
+       feedback_purchase_value = EXCLUDED.feedback_purchase_value,
        raw_json = EXCLUDED.raw_json,
        http_status = EXCLUDED.http_status,
        sync_error = EXCLUDED.sync_error,
@@ -1561,6 +1587,7 @@ async function upsertMlOrder(row) {
       buyerPhoneRegistered,
       fbSale,
       fbPurchase,
+      Number.isFinite(fbPurchaseVal) ? fbPurchaseVal : null,
       rawJson,
       row.http_status != null ? Number(row.http_status) : null,
       row.sync_error != null ? String(row.sync_error).slice(0, 4000) : null,
@@ -1583,13 +1610,13 @@ async function listMlOrdersByUser(mlUserId, limit, maxAllowed, options = {}) {
       : null;
   const sql = st
     ? `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
-              buyer_phone_registered, feedback_sale, feedback_purchase,
+              buyer_phone_registered, feedback_sale, feedback_purchase, feedback_purchase_value,
               raw_json, http_status, sync_error, fetched_at, updated_at
        FROM ml_orders WHERE ml_user_id = $1
          AND LOWER(TRIM(COALESCE(status, ''))) = LOWER($3)
        ORDER BY date_created DESC NULLS LAST, id DESC LIMIT $2`
     : `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
-              buyer_phone_registered, feedback_sale, feedback_purchase,
+              buyer_phone_registered, feedback_sale, feedback_purchase, feedback_purchase_value,
               raw_json, http_status, sync_error, fetched_at, updated_at
        FROM ml_orders WHERE ml_user_id = $1
        ORDER BY date_created DESC NULLS LAST, id DESC LIMIT $2`;
@@ -1608,13 +1635,13 @@ async function listMlOrdersAll(limit, maxAllowed, options = {}) {
       : null;
   const sql = st
     ? `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
-              buyer_phone_registered, feedback_sale, feedback_purchase,
+              buyer_phone_registered, feedback_sale, feedback_purchase, feedback_purchase_value,
               raw_json, http_status, sync_error, fetched_at, updated_at
        FROM ml_orders
        WHERE LOWER(TRIM(COALESCE(status, ''))) = LOWER($2)
        ORDER BY ml_user_id ASC, date_created DESC NULLS LAST, id DESC LIMIT $1`
     : `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
-              buyer_phone_registered, feedback_sale, feedback_purchase,
+              buyer_phone_registered, feedback_sale, feedback_purchase, feedback_purchase_value,
               raw_json, http_status, sync_error, fetched_at, updated_at
        FROM ml_orders ORDER BY ml_user_id ASC, date_created DESC NULLS LAST, id DESC LIMIT $1`;
   const params = st ? [n, st] : [n];
@@ -1623,7 +1650,7 @@ async function listMlOrdersAll(limit, maxAllowed, options = {}) {
 }
 
 /**
- * Actualiza solo `feedback_sale` y `feedback_purchase` en `ml_orders` (resumen como en order_search).
+ * Actualiza `feedback_sale`, `feedback_purchase` y `feedback_purchase_value` en `ml_orders` (resumen como en order_search).
  * Usado tras GET /orders/{id}/feedback para alinear la fila de la orden con el job de recordatorios.
  * @returns {number} filas afectadas (0 si no existía la orden)
  */
@@ -1633,17 +1660,21 @@ async function updateMlOrderFeedbackSummary(mlUserId, orderId, feedbackSale, fee
   const oid = orderId != null ? Number(orderId) : NaN;
   if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) return 0;
   const now = new Date().toISOString();
+  const fpStr = feedbackPurchase != null ? String(feedbackPurchase) : null;
+  const fpVal = feedbackPurchaseRatingValue(fpStr);
   const r = await pool.query(
     `UPDATE ml_orders SET
        feedback_sale = $3,
        feedback_purchase = $4,
-       updated_at = $5
+       feedback_purchase_value = $5,
+       updated_at = $6
      WHERE ml_user_id = $1 AND order_id = $2`,
     [
       mlUid,
       oid,
       feedbackSale != null ? String(feedbackSale) : null,
-      feedbackPurchase != null ? String(feedbackPurchase) : null,
+      fpStr,
+      Number.isFinite(fpVal) ? fpVal : null,
       now,
     ]
   );
@@ -2033,7 +2064,8 @@ async function listMlRatingRequestLog(limit, maxAllowed, options = {}) {
   const { rows } = await pool.query(
     `SELECT l.id, l.created_at, l.ml_user_id, l.order_id, l.buyer_id, l.outcome, l.skip_reason,
             l.http_status, l.request_path, l.response_body, l.error_message,
-            o.feedback_purchase AS purchase_feedback_now
+            o.feedback_purchase AS purchase_feedback_now,
+            o.feedback_purchase_value AS purchase_rating_value
      FROM ml_rating_request_log l
      LEFT JOIN ml_orders o ON o.ml_user_id = l.ml_user_id AND o.order_id = l.order_id
      WHERE 1=1${extra}

@@ -2512,7 +2512,7 @@ const server = http.createServer(async (req, res) => {
 
     const orderRows =
       orders.length === 0
-        ? `<tr><td colspan="11">Sin órdenes en <code>ml_orders</code>. Ejecuta <code>npm run sync-orders</code> o <code>npm run sync-orders-all</code> (todas las cuentas; en PowerShell a veces <code>-- --all</code> no llega al script).</td></tr>`
+        ? `<tr><td colspan="12">Sin órdenes en <code>ml_orders</code>. Ejecuta <code>npm run sync-orders</code> o <code>npm run sync-orders-all</code> (todas las cuentas; en PowerShell a veces <code>-- --all</code> no llega al script).</td></tr>`
         : orders
             .map((o) => {
               const nick = nickByUser.get(Number(o.ml_user_id)) || "—";
@@ -2533,6 +2533,11 @@ const server = http.createServer(async (req, res) => {
               const fbPur = o.feedback_purchase != null && String(o.feedback_purchase).trim() !== ""
                 ? escapeHtml(String(o.feedback_purchase))
                 : "—";
+              const fpv = o.feedback_purchase_value;
+              const fpvS =
+                fpv != null && fpv !== "" && Number.isFinite(Number(fpv))
+                  ? escapeHtml(String(fpv))
+                  : "—";
               return `<tr>
   <td>${escapeHtml(o.ml_user_id)}</td>
   <td class="muted">${nick}</td>
@@ -2544,7 +2549,8 @@ const server = http.createServer(async (req, res) => {
   <td class="muted">${escapeHtml(o.buyer_id != null ? o.buyer_id : "—")}</td>
   <td title="phone_1 en ml_buyers">${escapeHtml(telReg)}</td>
   <td title="Nuestra calificación al comprador (feedback.sale)">${fbSale}</td>
-  <td title="Calificación del comprador hacia nosotros (feedback.purchase)">${fbPur}</td>
+  <td title="Calificación del comprador hacia nosotros (feedback.purchase.rating)">${fbPur}</td>
+  <td title="Valor numérico: 1=positive, 0=neutral, -1=negative">${fpvS}</td>
 </tr>`;
             })
             .join("");
@@ -2611,7 +2617,7 @@ const server = http.createServer(async (req, res) => {
 
   <h2>Órdenes (${orders.length} fila(s))</h2>
   <table>
-    <thead><tr><th>cuenta</th><th>nickname</th><th>order_id</th><th>status</th><th>total</th><th>moneda</th><th>date_created</th><th>buyer_id</th><th>tel comprador</th><th>feedback venta→comprador</th><th>feedback compra→nosotros</th></tr></thead>
+    <thead><tr><th>cuenta</th><th>nickname</th><th>order_id</th><th>status</th><th>total</th><th>moneda</th><th>date_created</th><th>buyer_id</th><th>tel comprador</th><th>feedback venta→comprador</th><th>feedback compra→nosotros</th><th>valor compra→nosotros</th></tr></thead>
     <tbody>${orderRows}</tbody>
   </table>
 </body>
@@ -2822,6 +2828,11 @@ const server = http.createServer(async (req, res) => {
           fb != null && String(fb).trim() !== "" && String(fb).toLowerCase() !== "pending"
             ? escapeHtml(String(fb))
             : "—";
+        const pv = r.purchase_rating_value;
+        const pvS =
+          pv != null && pv !== "" && Number.isFinite(Number(pv))
+            ? escapeHtml(String(pv))
+            : "—";
         return `<tr>
   <td>${escapeHtml(r.id)}</td>
   <td class="muted">${escapeHtml(r.created_at)}</td>
@@ -2831,6 +2842,7 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.outcome)}</td>
   <td>${escapeHtml(r.http_status)}</td>
   <td>${fbS}</td>
+  <td title="feedback_purchase_value: 1=positive, 0=neutral, -1=negative">${pvS}</td>
   <td class="muted">${escapeHtml(r.request_path)}</td>
   <td>${escapeHtml(r.error_message)}</td>
   <td><pre class="payload">${prev || "—"}</pre></td>
@@ -2866,8 +2878,8 @@ const server = http.createServer(async (req, res) => {
     ${filtNav}
   </nav>
   <table>
-    <thead><tr><th>id</th><th>created_at</th><th>ml_user_id</th><th>order_id</th><th>buyer_id</th><th>outcome</th><th>http</th><th>feedback comprador (sync)</th><th>request_path</th><th>error</th><th>response (preview)</th></tr></thead>
-    <tbody>${tableRows || '<tr><td colspan="11">Sin registros.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>created_at</th><th>ml_user_id</th><th>order_id</th><th>buyer_id</th><th>outcome</th><th>http</th><th>feedback comprador (sync)</th><th>valor (1/0/-1)</th><th>request_path</th><th>error</th><th>response (preview)</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="12">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

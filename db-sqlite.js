@@ -12,6 +12,7 @@ const {
   normalizeNombreApellido,
   resolvePrefEntregaForUpsert,
 } = require("./ml-buyer-pref");
+const { feedbackPurchaseRatingValue } = require("./ml-order-map");
 
 // Por defecto ./data (incl. Render). Para disco persistente: DB_PATH=/var/data/webhooks.db y disco montado en /var/data.
 const dbPath =
@@ -279,6 +280,7 @@ db.exec(`
     buyer_phone_registered INTEGER,
     feedback_sale TEXT,
     feedback_purchase TEXT,
+    feedback_purchase_value INTEGER,
     raw_json TEXT NOT NULL,
     http_status INTEGER,
     sync_error TEXT,
@@ -661,6 +663,18 @@ const FETCH_PROCESS_STATUS_POST_SALE_FAILED = "Fallo post-venta";
     if (!names.has("feedback_purchase")) {
       db.exec("ALTER TABLE ml_orders ADD COLUMN feedback_purchase TEXT");
       console.log("[db] ml_orders: columna feedback_purchase añadida (migración)");
+    }
+    if (!names.has("feedback_purchase_value")) {
+      db.exec("ALTER TABLE ml_orders ADD COLUMN feedback_purchase_value INTEGER");
+      console.log("[db] ml_orders: columna feedback_purchase_value añadida (migración)");
+      db.exec(`
+        UPDATE ml_orders SET feedback_purchase_value = CASE
+          WHEN LOWER(TRIM(COALESCE(feedback_purchase,''))) = 'positive' THEN 1
+          WHEN LOWER(TRIM(COALESCE(feedback_purchase,''))) = 'neutral' THEN 0
+          WHEN LOWER(TRIM(COALESCE(feedback_purchase,''))) = 'negative' THEN -1
+          ELSE NULL
+        END
+      `);
     }
   } catch (e) {
     console.error("[db] migrate ml_orders extra columns:", e.message);
@@ -1531,6 +1545,7 @@ function upsertMlOrder(row) {
       : null;
   const fbSale = row.feedback_sale != null ? String(row.feedback_sale).slice(0, 200) : null;
   const fbPurchase = row.feedback_purchase != null ? String(row.feedback_purchase).slice(0, 200) : null;
+  const fbPurchaseVal = feedbackPurchaseRatingValue(fbPurchase);
 
   let buyerPhoneRegistered = 0;
   const bid = row.buyer_id != null ? Number(row.buyer_id) : null;
@@ -1543,9 +1558,9 @@ function upsertMlOrder(row) {
   db.prepare(
     `INSERT INTO ml_orders (
        ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
-       buyer_phone_registered, feedback_sale, feedback_purchase,
+       buyer_phone_registered, feedback_sale, feedback_purchase, feedback_purchase_value,
        raw_json, http_status, sync_error, fetched_at, updated_at
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(ml_user_id, order_id) DO UPDATE SET
        status = excluded.status,
        date_created = excluded.date_created,
@@ -1555,6 +1570,7 @@ function upsertMlOrder(row) {
        buyer_phone_registered = excluded.buyer_phone_registered,
        feedback_sale = excluded.feedback_sale,
        feedback_purchase = excluded.feedback_purchase,
+       feedback_purchase_value = excluded.feedback_purchase_value,
        raw_json = excluded.raw_json,
        http_status = excluded.http_status,
        sync_error = excluded.sync_error,
@@ -1571,6 +1587,7 @@ function upsertMlOrder(row) {
     buyerPhoneRegistered,
     fbSale,
     fbPurchase,
+    Number.isFinite(fbPurchaseVal) ? fbPurchaseVal : null,
     rawJson,
     row.http_status != null ? Number(row.http_status) : null,
     row.sync_error != null ? String(row.sync_error).slice(0, 4000) : null,
@@ -1594,7 +1611,7 @@ function listMlOrdersByUser(mlUserId, limit, maxAllowed, options = {}) {
     return db
       .prepare(
         `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
-                buyer_phone_registered, feedback_sale, feedback_purchase,
+                buyer_phone_registered, feedback_sale, feedback_purchase, feedback_purchase_value,
                 raw_json, http_status, sync_error, fetched_at, updated_at
          FROM ml_orders WHERE ml_user_id = ?
            AND LOWER(TRIM(COALESCE(status, ''))) = LOWER(?)
@@ -1605,7 +1622,7 @@ function listMlOrdersByUser(mlUserId, limit, maxAllowed, options = {}) {
   return db
     .prepare(
       `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
-              buyer_phone_registered, feedback_sale, feedback_purchase,
+              buyer_phone_registered, feedback_sale, feedback_purchase, feedback_purchase_value,
               raw_json, http_status, sync_error, fetched_at, updated_at
        FROM ml_orders WHERE ml_user_id = ?
        ORDER BY date_created DESC, id DESC LIMIT ?`
@@ -1624,7 +1641,7 @@ function listMlOrdersAll(limit, maxAllowed, options = {}) {
     return db
       .prepare(
         `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
-                buyer_phone_registered, feedback_sale, feedback_purchase,
+                buyer_phone_registered, feedback_sale, feedback_purchase, feedback_purchase_value,
                 raw_json, http_status, sync_error, fetched_at, updated_at
          FROM ml_orders
          WHERE LOWER(TRIM(COALESCE(status, ''))) = LOWER(?)
@@ -1635,7 +1652,7 @@ function listMlOrdersAll(limit, maxAllowed, options = {}) {
   return db
     .prepare(
       `SELECT id, ml_user_id, order_id, status, date_created, total_amount, currency_id, buyer_id,
-              buyer_phone_registered, feedback_sale, feedback_purchase,
+              buyer_phone_registered, feedback_sale, feedback_purchase, feedback_purchase_value,
               raw_json, http_status, sync_error, fetched_at, updated_at
        FROM ml_orders ORDER BY ml_user_id ASC, date_created DESC, id DESC LIMIT ?`
     )
@@ -1648,14 +1665,17 @@ function updateMlOrderFeedbackSummary(mlUserId, orderId, feedbackSale, feedbackP
   const oid = orderId != null ? Number(orderId) : NaN;
   if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) return 0;
   const now = new Date().toISOString();
+  const fpStr = feedbackPurchase != null ? String(feedbackPurchase) : null;
+  const fpVal = feedbackPurchaseRatingValue(fpStr);
   const r = db
     .prepare(
-      `UPDATE ml_orders SET feedback_sale = ?, feedback_purchase = ?, updated_at = ?
+      `UPDATE ml_orders SET feedback_sale = ?, feedback_purchase = ?, feedback_purchase_value = ?, updated_at = ?
        WHERE ml_user_id = ? AND order_id = ?`
     )
     .run(
       feedbackSale != null ? String(feedbackSale) : null,
-      feedbackPurchase != null ? String(feedbackPurchase) : null,
+      fpStr,
+      Number.isFinite(fpVal) ? fpVal : null,
       now,
       mlUid,
       oid
@@ -2038,7 +2058,8 @@ function listMlRatingRequestLog(limit, maxAllowed, options = {}) {
     .prepare(
       `SELECT l.id, l.created_at, l.ml_user_id, l.order_id, l.buyer_id, l.outcome, l.skip_reason,
               l.http_status, l.request_path, l.response_body, l.error_message,
-              o.feedback_purchase AS purchase_feedback_now
+              o.feedback_purchase AS purchase_feedback_now,
+              o.feedback_purchase_value AS purchase_rating_value
        FROM ml_rating_request_log l
        LEFT JOIN ml_orders o ON o.ml_user_id = l.ml_user_id AND o.order_id = l.order_id
        WHERE 1=1${extra}

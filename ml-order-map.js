@@ -3,14 +3,31 @@
  */
 
 /**
+ * Valor numérico derivado de feedback.purchase (comprador → nosotros), según `rating` ML.
+ * positive=1, neutral=0, negative=-1; pending u otros textos=null.
+ * @param {string|null|undefined} feedbackPurchaseSummary - resultado de `one(fb.purchase)` o texto tipo API
+ * @returns {1|0|-1|null}
+ */
+function feedbackPurchaseRatingValue(feedbackPurchaseSummary) {
+  if (feedbackPurchaseSummary == null) return null;
+  const s = String(feedbackPurchaseSummary).trim().toLowerCase();
+  if (s === "" || s === "pending") return null;
+  if (s === "positive") return 1;
+  if (s === "neutral") return 0;
+  if (s === "negative") return -1;
+  return null;
+}
+
+/**
  * `feedback.sale` = calificación del vendedor hacia el comprador (nosotros → comprador).
  * `feedback.purchase` = calificación del comprador hacia el vendedor (comprador → nosotros).
- * @returns {{ feedback_sale: string|null, feedback_purchase: string|null }}
+ * `feedback_purchase_value` = mapeo numérico de `feedback.purchase.rating` (1/0/-1) para consultas y métricas.
+ * @returns {{ feedback_sale: string|null, feedback_purchase: string|null, feedback_purchase_value: number|null }}
  */
 function feedbackSummaryFromOrder(order) {
   const fb = order && order.feedback;
   if (!fb || typeof fb !== "object") {
-    return { feedback_sale: null, feedback_purchase: null };
+    return { feedback_sale: null, feedback_purchase: null, feedback_purchase_value: null };
   }
   function one(side) {
     if (side == null) return "pending";
@@ -19,9 +36,11 @@ function feedbackSummaryFromOrder(order) {
     if (side.status != null) return String(side.status);
     return "pending";
   }
+  const fp = one(fb.purchase);
   return {
     feedback_sale: one(fb.sale),
-    feedback_purchase: one(fb.purchase),
+    feedback_purchase: fp,
+    feedback_purchase_value: feedbackPurchaseRatingValue(fp),
   };
 }
 
@@ -74,6 +93,7 @@ function orderRowFromMlApi(mlUserId, order, options = {}) {
     buyer_id: buyerId != null && Number.isFinite(buyerId) ? buyerId : null,
     feedback_sale: fb.feedback_sale,
     feedback_purchase: fb.feedback_purchase,
+    feedback_purchase_value: fb.feedback_purchase_value,
     raw_json: rawJson,
     http_status: options.http_status != null ? Number(options.http_status) : null,
     sync_error: options.sync_error != null ? String(options.sync_error) : null,
@@ -181,5 +201,6 @@ function feedbackDetailRowsFromOrder(mlUserId, orderId, feedbackRoot, options = 
 module.exports = {
   orderRowFromMlApi,
   feedbackSummaryFromOrder,
+  feedbackPurchaseRatingValue,
   feedbackDetailRowsFromOrder,
 };

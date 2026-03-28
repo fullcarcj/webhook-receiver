@@ -1,15 +1,23 @@
 /**
- * GET /orders/{ORDER_ID}/feedback por cada orden en BD y upsert en ml_order_feedback.
- * Complementa el sync de órdenes (order_search) con el detalle oficial de feedback.
+ * GET /orders/{ORDER_ID}/feedback por cada orden en BD: upsert en ml_order_feedback y
+ * actualización de feedback_sale / feedback_purchase en ml_orders (mismo criterio que order_search).
  *
- * Uso: node ml-order-feedback-sync.js [--user=ML_USER_ID] [--all] [--limit=500] [--delay-ms=350] [--status=paid]
+ * Para órdenes confirmadas (todas las cuentas):
+ *   node ml-order-feedback-sync.js --all --status=confirmed
+ *
+ * Uso: node ml-order-feedback-sync.js [--user=ML_USER_ID] [--all] [--limit=500] [--delay-ms=350] [--status=confirmed]
  * Env: ML_ORDER_FEEDBACK_SYNC_DELAY_MS  ML_ORDER_FEEDBACK_SYNC_LIMIT  DATABASE_URL
  */
 require("./load-env-local");
 
 const { mercadoLibreFetchForUser } = require("./oauth-token");
-const { feedbackDetailRowsFromOrder } = require("./ml-order-map");
-const { listMlAccounts, listMlOrdersByUser, upsertMlOrderFeedback } = require("./db");
+const { feedbackDetailRowsFromOrder, feedbackSummaryFromOrder } = require("./ml-order-map");
+const {
+  listMlAccounts,
+  listMlOrdersByUser,
+  upsertMlOrderFeedback,
+  updateMlOrderFeedbackSummary,
+} = require("./db");
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r));
@@ -51,7 +59,10 @@ async function fetchAndUpsertOrderFeedback(mlUserId, orderId, fetchedAt) {
     return { ok: false, upserted: 0, err: "respuesta sin JSON objeto" };
   }
 
-  const rows = feedbackDetailRowsFromOrder(uid, oid, data, {
+  const feedbackRoot =
+    data.feedback && typeof data.feedback === "object" ? data.feedback : data;
+
+  const rows = feedbackDetailRowsFromOrder(uid, oid, feedbackRoot, {
     fetched_at: fetchedAt,
     source: "orders_feedback_get",
   });
@@ -61,6 +72,9 @@ async function fetchAndUpsertOrderFeedback(mlUserId, orderId, fetchedAt) {
     await upsertMlOrderFeedback(row);
     upserted++;
   }
+
+  const summary = feedbackSummaryFromOrder({ feedback: feedbackRoot });
+  await updateMlOrderFeedbackSummary(uid, oid, summary.feedback_sale, summary.feedback_purchase);
 
   return { ok: true, upserted };
 }

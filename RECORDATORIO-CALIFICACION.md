@@ -2,6 +2,16 @@
 
 Este proyecto incluye el script `ml-rating-request-daily.js`, que envía mensajes post-venta pidiendo calificación cuando vos ya calificaste y el comprador aún no, dentro de una ventana de días y con **como máximo un mensaje por comprador por día (UTC)** por cuenta vendedora.
 
+### Sincronizar “nuestro” feedback (venta → comprador) en la base
+
+El job usa `ml_orders.feedback_sale` y/o `ml_order_feedback` (lado `sale`). Para **rellenar esos datos desde Mercado Libre** en todas las órdenes **confirmed** de todas las cuentas:
+
+```bash
+npm run sync-order-feedback-confirmed
+```
+
+Equivale a `node ml-order-feedback-sync.js --all --status=confirmed`. Ese script hace GET `/orders/{id}/feedback`, actualiza `ml_order_feedback` y las columnas **`feedback_sale`** / **`feedback_purchase`** en **`ml_orders`**. Corré también `npm run sync-orders-all` si las órdenes no están en la BD.
+
 ---
 
 ## Automático: todos los días a las 10:00 UTC

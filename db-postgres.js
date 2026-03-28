@@ -1622,6 +1622,34 @@ async function listMlOrdersAll(limit, maxAllowed, options = {}) {
   return rows;
 }
 
+/**
+ * Actualiza solo `feedback_sale` y `feedback_purchase` en `ml_orders` (resumen como en order_search).
+ * Usado tras GET /orders/{id}/feedback para alinear la fila de la orden con el job de recordatorios.
+ * @returns {number} filas afectadas (0 si no existía la orden)
+ */
+async function updateMlOrderFeedbackSummary(mlUserId, orderId, feedbackSale, feedbackPurchase) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) return 0;
+  const now = new Date().toISOString();
+  const r = await pool.query(
+    `UPDATE ml_orders SET
+       feedback_sale = $3,
+       feedback_purchase = $4,
+       updated_at = $5
+     WHERE ml_user_id = $1 AND order_id = $2`,
+    [
+      mlUid,
+      oid,
+      feedbackSale != null ? String(feedbackSale) : null,
+      feedbackPurchase != null ? String(feedbackPurchase) : null,
+      now,
+    ]
+  );
+  return r.rowCount ?? 0;
+}
+
 async function listMlOrderCountsByUserStatus() {
   await ensureSchema();
   const { rows } = await pool.query(
@@ -2392,6 +2420,7 @@ module.exports = {
   upsertMlOrder,
   listMlOrdersByUser,
   listMlOrdersAll,
+  updateMlOrderFeedbackSummary,
   listMlOrderCountsByUserStatus,
   listMlOrderCountsByUser,
   upsertMlOrderFeedback,

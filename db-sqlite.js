@@ -1642,6 +1642,27 @@ function listMlOrdersAll(limit, maxAllowed, options = {}) {
     .all(n);
 }
 
+/** Ver `updateMlOrderFeedbackSummary` en db-postgres.js */
+function updateMlOrderFeedbackSummary(mlUserId, orderId, feedbackSale, feedbackPurchase) {
+  const mlUid = Number(mlUserId);
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) return 0;
+  const now = new Date().toISOString();
+  const r = db
+    .prepare(
+      `UPDATE ml_orders SET feedback_sale = ?, feedback_purchase = ?, updated_at = ?
+       WHERE ml_user_id = ? AND order_id = ?`
+    )
+    .run(
+      feedbackSale != null ? String(feedbackSale) : null,
+      feedbackPurchase != null ? String(feedbackPurchase) : null,
+      now,
+      mlUid,
+      oid
+    );
+  return r.changes ?? 0;
+}
+
 function listMlOrderCountsByUserStatus() {
   return db
     .prepare(
@@ -2342,6 +2363,7 @@ module.exports = {
   upsertMlOrder,
   listMlOrdersByUser,
   listMlOrdersAll,
+  updateMlOrderFeedbackSummary,
   listMlOrderCountsByUserStatus,
   listMlOrderCountsByUser,
   upsertMlOrderFeedback,

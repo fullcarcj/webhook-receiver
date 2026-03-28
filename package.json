@@ -18,6 +18,7 @@
     "sync-orders-all": "node ml-orders-sync.js --all",
     "sync-order-feedback": "node ml-order-feedback-sync.js",
     "sync-order-feedback-all": "node ml-order-feedback-sync.js --all",
+    "sync-order-feedback-confirmed": "node ml-order-feedback-sync.js --all --status=confirmed",
     "rating-request-daily": "node ml-rating-request-daily.js",
     "rating-request-daily-all": "node ml-rating-request-daily.js --all",
     "rating-request-print-message": "node ml-rating-request-daily.js --print-message"

@@ -425,6 +425,25 @@ async function runSchemaAndSeed() {
     `CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_user_order ON ml_order_feedback(ml_user_id, order_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_user_rating ON ml_order_feedback(ml_user_id, rating)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_date ON ml_order_feedback(date_created DESC)`,
+    `CREATE TABLE IF NOT EXISTS ml_order_pack_messages (
+      id BIGSERIAL PRIMARY KEY,
+      ml_user_id BIGINT NOT NULL,
+      order_id BIGINT NOT NULL,
+      ml_message_id TEXT NOT NULL,
+      from_user_id BIGINT,
+      to_user_id BIGINT,
+      message_text TEXT,
+      date_created TEXT,
+      status TEXT,
+      moderation_status TEXT,
+      tag TEXT,
+      raw_json TEXT NOT NULL,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_ml_order_pack_msg UNIQUE (ml_user_id, order_id, ml_message_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_pack_msg_user_order ON ml_order_pack_messages(ml_user_id, order_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_pack_msg_user_fetched ON ml_order_pack_messages(ml_user_id, fetched_at DESC)`,
   ];
   for (const sql of stmts) {
     await pool.query(sql);
@@ -1957,6 +1976,85 @@ async function listMlOrderCountsByUser() {
   return rows;
 }
 
+/**
+ * Mensaje post-venta dentro del pack de una orden (GET /messages/packs/{id}/sellers/{seller_id}).
+ * @param {object} row
+ */
+async function upsertMlOrderPackMessage(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  const mid = row.ml_message_id != null ? String(row.ml_message_id).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0 || !mid) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  const fetchedAt = row.fetched_at != null ? String(row.fetched_at) : now;
+  const updatedAt = row.updated_at != null ? String(row.updated_at) : now;
+  const rawJson = row.raw_json != null ? String(row.raw_json) : "{}";
+  const { rows } = await pool.query(
+    `INSERT INTO ml_order_pack_messages (
+       ml_user_id, order_id, ml_message_id, from_user_id, to_user_id,
+       message_text, date_created, status, moderation_status, tag,
+       raw_json, fetched_at, updated_at
+     ) VALUES (
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::timestamptz,$13::timestamptz
+     )
+     ON CONFLICT (ml_user_id, order_id, ml_message_id) DO UPDATE SET
+       from_user_id = EXCLUDED.from_user_id,
+       to_user_id = EXCLUDED.to_user_id,
+       message_text = EXCLUDED.message_text,
+       date_created = EXCLUDED.date_created,
+       status = EXCLUDED.status,
+       moderation_status = EXCLUDED.moderation_status,
+       tag = EXCLUDED.tag,
+       raw_json = EXCLUDED.raw_json,
+       fetched_at = EXCLUDED.fetched_at,
+       updated_at = EXCLUDED.updated_at
+     RETURNING id`,
+    [
+      mlUid,
+      oid,
+      mid,
+      row.from_user_id != null && Number.isFinite(Number(row.from_user_id)) ? Number(row.from_user_id) : null,
+      row.to_user_id != null && Number.isFinite(Number(row.to_user_id)) ? Number(row.to_user_id) : null,
+      row.message_text != null ? String(row.message_text) : null,
+      row.date_created != null ? String(row.date_created) : null,
+      row.status != null ? String(row.status) : null,
+      row.moderation_status != null ? String(row.moderation_status) : null,
+      row.tag != null ? String(row.tag) : null,
+      rawJson,
+      fetchedAt,
+      updatedAt,
+    ]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+/**
+ * @param {number} mlUserId
+ * @param {number} orderId
+ * @param {number} [limit]
+ */
+async function listMlOrderPackMessagesByOrder(mlUserId, orderId, limit) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const oid = Number(orderId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) return [];
+  const n = Math.min(Math.max(Number(limit) || 500, 1), 5000);
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id, order_id, ml_message_id, from_user_id, to_user_id,
+            message_text, date_created, status, moderation_status, tag,
+            raw_json, fetched_at, updated_at
+     FROM ml_order_pack_messages
+     WHERE ml_user_id = $1 AND order_id = $2
+     ORDER BY date_created DESC NULLS LAST, id DESC
+     LIMIT $3`,
+    [mlUid, oid, n]
+  );
+  return rows;
+}
+
 async function upsertMlOrderFeedback(row) {
   await ensureSchema();
   const mlUid = Number(row.ml_user_id);
@@ -2914,6 +3012,8 @@ module.exports = {
   updateMlOrderFeedbackSummary,
   listMlOrderCountsByUserStatus,
   listMlOrderCountsByUser,
+  upsertMlOrderPackMessage,
+  listMlOrderPackMessagesByOrder,
   upsertMlOrderFeedback,
   listMlOrderFeedbackByOrder,
   listMlOrderFeedbackByUser,

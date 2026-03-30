@@ -1,0 +1,20 @@
+Sincronización de mensajería post-venta por orden (tabla ml_order_pack_messages)
+================================================================================
+
+Límite de API Mercado Libre
+---------------------------
+No existe un “sync sin límite”: la plataforma aplica un tope global del orden de ~18.000
+solicitudes por hora por aplicación (y límites adicionales por tipo de recurso).
+
+Cada orden que proceses puede requerir una o varias GET (paginación del pack). Para no
+acercarte al tope:
+
+  • ML_PACK_MESSAGES_SYNC_DELAY_MS — pausa entre cada GET (p. ej. 250 ms).
+  • ML_PACK_MESSAGES_SYNC_ORDER_LIMIT — máximo de órdenes por cuenta y ejecución.
+  • --since-days=N — solo órdenes recientes según date_created en ml_orders.
+  • Ejecutar por cuenta (--user) o en horas de menor carga.
+
+Comando: npm run sync-pack-messages-all   o   node ml-pack-messages-sync.js --user=ID
+
+Multicuenta: el script recorre ml_accounts (--all) o una cuenta con --user; cada fila
+usa su token (oauth-token) y seller_id = ml_user_id.

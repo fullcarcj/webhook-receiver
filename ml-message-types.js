@@ -12,8 +12,12 @@ const MESSAGE_TYPE_B = "tipo_b_recordatorio_tienda";
 /** Recordatorio para que el comprador califique. Tras calificar el vendedor al comprador; 1/día por comprador y hasta ML_RATING_REQUEST_MAX_DAYS (def. 8) envíos por orden mientras siga pendiente la calificación compra→vendedor. */
 const MESSAGE_TYPE_C = "tipo_c_recordatorio_calificacion";
 
+/** Respuestas automáticas a preguntas de publicaciones (POST /answers, `ml-questions-ia-auto.js`). */
+const MESSAGE_TYPE_D = "tipo_d_preguntas_auto";
+
 module.exports = {
   MESSAGE_TYPE_A,
   MESSAGE_TYPE_B,
   MESSAGE_TYPE_C,
+  MESSAGE_TYPE_D,
 };

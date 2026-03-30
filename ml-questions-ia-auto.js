@@ -1,13 +1,16 @@
 /**
- * Respuestas automáticas a preguntas ML (POST /answers) con plantillas tipo tienda.
+ * MENSAJE TIPO D (`MESSAGE_TYPE_D` en `ml-message-types.js`): respuestas automáticas a preguntas ML (POST /answers).
  *
  * Activación: ML_QUESTIONS_IA_AUTO_ENABLED=1 (cualquier otro valor = apagado).
  *
  * Ventana (opcional): si están definidos **ambos** ML_QUESTIONS_IA_AUTO_WINDOW_START y
  * ML_QUESTIONS_IA_AUTO_WINDOW_END (HH:mm en ML_QUESTIONS_IA_AUTO_TIMEZONE), solo se intenta POST
  * dentro de esa franja. Si inicio > fin, cruza medianoche (ej. 17:20–07:00).
- * ML_QUESTIONS_IA_AUTO_DAYS=0,1,…,6 (dom–sáb) restringe días; vacío = todos.
- * ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 o ML_QUESTIONS_IA_AUTO_FORCE=1 ignora la franja horaria.
+ * ML_QUESTIONS_IA_AUTO_DAYS=0,1,…,6 (0=dom … 6=sáb) restringe días; vacío = todos los días.
+ * **Domingo (0):** por defecto la franja START/END **no aplica** (tipo D permitido las 24 h ese día),
+ * siempre que el domingo esté permitido en ML_QUESTIONS_IA_AUTO_DAYS (o días vacío).
+ * Con `ML_QUESTIONS_IA_AUTO_SUNDAY_IGNORE_WINDOW=0` el domingo usa la misma franja que el resto.
+ * ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW=1 o ML_QUESTIONS_IA_AUTO_FORCE=1 ignora la franja horaria todos los días.
  * ML_QUESTIONS_IA_AUTO_UNTIL=ISO UTC: tras esa fecha/hora no se envía.
  *
  * Polling: ML_QUESTIONS_IA_AUTO_POLL_MS vacío → 60000; 0 = sin poll. Respeta la misma ventana.
@@ -174,7 +177,11 @@ function getQuestionsIaAutoWindowEvaluation(atDate) {
   const hasStart = startRaw != null && String(startRaw).trim() !== "";
   const hasEnd = endRaw != null && String(endRaw).trim() !== "";
 
-  if (!ignoreWindow && hasStart && hasEnd) {
+  const sundayBypassWindow =
+    weekday === 0 &&
+    process.env.ML_QUESTIONS_IA_AUTO_SUNDAY_IGNORE_WINDOW !== "0";
+
+  if (!ignoreWindow && hasStart && hasEnd && !sundayBypassWindow) {
     const startMin = parseQuestionsIaWindowHHMM(startRaw);
     const endMin = parseQuestionsIaWindowHHMM(endRaw);
     if (startMin == null || endMin == null) {
@@ -206,9 +213,11 @@ function getQuestionsIaAutoWindowEvaluation(atDate) {
     outcome: "ok",
     reason_detail: ignoreWindow
       ? "IGNORE_WINDOW o FORCE: sin filtro horario"
-      : hasStart && hasEnd
-        ? "Dentro de ventana configurada"
-        : "Sin ventana START/END: permitido 24h (solo ENABLED + días/UNTIL)",
+      : sundayBypassWindow && hasStart && hasEnd
+        ? "Domingo: tipo D permitido 24 h (franja START/END no aplica; ML_QUESTIONS_IA_AUTO_SUNDAY_IGNORE_WINDOW≠0)"
+        : hasStart && hasEnd
+          ? "Dentro de ventana configurada"
+          : "Sin ventana START/END: permitido 24h (solo ENABLED + días/UNTIL)",
   };
 }
 
@@ -324,6 +333,11 @@ function getQuestionsIaAutoDiagnostics() {
       ML_QUESTIONS_IA_AUTO_DAYS: process.env.ML_QUESTIONS_IA_AUTO_DAYS || "",
       ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW: process.env.ML_QUESTIONS_IA_AUTO_IGNORE_WINDOW || "",
       ML_QUESTIONS_IA_AUTO_FORCE: process.env.ML_QUESTIONS_IA_AUTO_FORCE || "",
+      ML_QUESTIONS_IA_AUTO_SUNDAY_IGNORE_WINDOW:
+        process.env.ML_QUESTIONS_IA_AUTO_SUNDAY_IGNORE_WINDOW != null &&
+        String(process.env.ML_QUESTIONS_IA_AUTO_SUNDAY_IGNORE_WINDOW).trim() !== ""
+          ? process.env.ML_QUESTIONS_IA_AUTO_SUNDAY_IGNORE_WINDOW
+          : "(vacío→1 domingo 24h si hay ventana)",
       ML_QUESTIONS_IA_AUTO_UNTIL: process.env.ML_QUESTIONS_IA_AUTO_UNTIL || "",
       ML_QUESTIONS_IA_AUTO_POLL_MS:
         process.env.ML_QUESTIONS_IA_AUTO_POLL_MS != null && String(process.env.ML_QUESTIONS_IA_AUTO_POLL_MS).trim() !== ""

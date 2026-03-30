@@ -2055,6 +2055,34 @@ async function listMlOrderPackMessagesByOrder(mlUserId, orderId, limit) {
   return rows;
 }
 
+/**
+ * Mensajes post-venta guardados (sync). Si `options.order_id` está definido, equivale a listMlOrderPackMessagesByOrder.
+ * @param {number} mlUserId
+ * @param {number} limit
+ * @param {{ order_id?: number }} [options]
+ */
+async function listMlOrderPackMessagesByUser(mlUserId, limit, options = {}) {
+  const oid = options.order_id != null ? Number(options.order_id) : NaN;
+  if (Number.isFinite(oid) && oid > 0) {
+    return listMlOrderPackMessagesByOrder(mlUserId, oid, limit);
+  }
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const n = Math.min(Math.max(Number(limit) || 200, 1), 5000);
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id, order_id, ml_message_id, from_user_id, to_user_id,
+            message_text, date_created, status, moderation_status, tag,
+            raw_json, fetched_at, updated_at
+     FROM ml_order_pack_messages
+     WHERE ml_user_id = $1
+     ORDER BY fetched_at DESC NULLS LAST, id DESC
+     LIMIT $2`,
+    [mlUid, n]
+  );
+  return rows;
+}
+
 async function upsertMlOrderFeedback(row) {
   await ensureSchema();
   const mlUid = Number(row.ml_user_id);
@@ -3014,6 +3042,7 @@ module.exports = {
   listMlOrderCountsByUser,
   upsertMlOrderPackMessage,
   listMlOrderPackMessagesByOrder,
+  listMlOrderPackMessagesByUser,
   upsertMlOrderFeedback,
   listMlOrderFeedbackByOrder,
   listMlOrderFeedbackByUser,

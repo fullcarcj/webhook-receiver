@@ -123,6 +123,7 @@ const {
   listMlOrdersAll,
   listMlOrderCountsByUserStatus,
   listMlOrderCountsByUser,
+  listMlOrderPackMessagesByUser,
   listMlRatingRequestLog,
   dbPath,
 } = require("./db");
@@ -212,6 +213,10 @@ function isListingChangeAckPath(pathname) {
 
 function isOrdenesMlPath(pathname) {
   return pathname === "/ordenes-ml" || pathname === "/ordenes-ml/";
+}
+
+function isMensajesPackOrdenPath(pathname) {
+  return pathname === "/mensajes-pack-orden" || pathname === "/mensajes-pack-orden/";
 }
 
 function rejectIngestSecret(req, res) {
@@ -1037,6 +1042,8 @@ const server = http.createServer(async (req, res) => {
           "GET|POST /listing-change-ack?k=ADMIN_SECRET — tabla ml_listing_change_ack: marcar ítem procesado (action: activate|add_stock|pause|delete|dismiss). POST JSON { ml_user_id, item_id, action, note?, webhook_log_id? }",
         ordenes_ml:
           "GET /ordenes-ml?k=ADMIN_SECRET — ml_orders (descarga: npm run sync-orders | npm run sync-orders-all); feedback detalle: npm run sync-order-feedback | sync-order-feedback-all; ?cuenta= ?status= ?format=json; status ML típicos en raíz JSON bajo ordenes_estados_ml",
+        mensajes_pack_orden:
+          "GET /mensajes-pack-orden?k=ADMIN_SECRET — ml_order_pack_messages (sync: npm run sync-pack-messages); sin ml_user_id: elige cuenta; ?ml_user_id= & opcional &order_id= &limit= ; ?format=json",
         ordenes_estados_ml: ML_ORDER_STATUSES_KNOWN,
       })
     );
@@ -2882,6 +2889,14 @@ const server = http.createServer(async (req, res) => {
       return `/ordenes-ml?${p.toString()}`;
     }
 
+    function packMsgHrefForOrder(mlUid, oid) {
+      const p = new URLSearchParams();
+      p.set("k", k);
+      p.set("ml_user_id", String(mlUid));
+      p.set("order_id", String(oid));
+      return `/mensajes-pack-orden?${p.toString()}`;
+    }
+
     const orderCountMap = new Map(
       orderCountsByUser.map((c) => [Number(c.ml_user_id), Number(c.total)])
     );
@@ -2917,7 +2932,7 @@ const server = http.createServer(async (req, res) => {
 
     const orderRows =
       orders.length === 0
-        ? `<tr><td colspan="12">Sin órdenes en <code>ml_orders</code>. Ejecuta <code>npm run sync-orders</code> o <code>npm run sync-orders-all</code> (todas las cuentas; en PowerShell a veces <code>-- --all</code> no llega al script).</td></tr>`
+        ? `<tr><td colspan="13">Sin órdenes en <code>ml_orders</code>. Ejecuta <code>npm run sync-orders</code> o <code>npm run sync-orders-all</code> (todas las cuentas; en PowerShell a veces <code>-- --all</code> no llega al script).</td></tr>`
         : orders
             .map((o) => {
               const nick = nickByUser.get(Number(o.ml_user_id)) || "—";
@@ -2943,6 +2958,7 @@ const server = http.createServer(async (req, res) => {
                 fpv != null && fpv !== "" && Number.isFinite(Number(fpv))
                   ? escapeHtml(String(fpv))
                   : "—";
+              const packHref = packMsgHrefForOrder(Number(o.ml_user_id), o.order_id);
               return `<tr>
   <td>${escapeHtml(o.ml_user_id)}</td>
   <td class="muted">${nick}</td>
@@ -2956,6 +2972,7 @@ const server = http.createServer(async (req, res) => {
   <td title="Nuestra calificación al comprador (feedback.sale)">${fbSale}</td>
   <td title="Calificación del comprador hacia nosotros (feedback.purchase.rating)">${fbPur}</td>
   <td title="Valor numérico: 1=positive, 0=neutral, -1=negative">${fpvS}</td>
+  <td><a href="${escapeAttr(packHref)}" title="Mensajes post-venta en BD">pack</a></td>
 </tr>`;
             })
             .join("");
@@ -3022,13 +3039,217 @@ const server = http.createServer(async (req, res) => {
 
   <h2>Órdenes (${orders.length} fila(s))</h2>
   <table>
-    <thead><tr><th>cuenta</th><th>nickname</th><th>order_id</th><th>status</th><th>total</th><th>moneda</th><th>date_created</th><th>buyer_id</th><th>tel comprador</th><th>feedback venta→comprador</th><th>feedback compra→nosotros</th><th>valor compra→nosotros</th></tr></thead>
+    <thead><tr><th>cuenta</th><th>nickname</th><th>order_id</th><th>status</th><th>total</th><th>moneda</th><th>date_created</th><th>buyer_id</th><th>tel comprador</th><th>feedback venta→comprador</th><th>feedback compra→nosotros</th><th>valor compra→nosotros</th><th>mensajes</th></tr></thead>
     <tbody>${orderRows}</tbody>
   </table>
 </body>
 </html>`;
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(html);
+    return;
+  }
+
+  /** Mensajes post-venta por orden (ml_order_pack_messages; npm run sync-pack-messages). */
+  if (req.method === "GET" && isMensajesPackOrdenPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Mensajes pack</title><p>Define <code>ADMIN_SECRET</code> y reinicia.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Mensajes pack</title><p>Acceso denegado. <code>/mensajes-pack-orden?k=…&amp;ml_user_id=…</code></p>"
+      );
+      return;
+    }
+    const limRaw = url.searchParams.get("limit");
+    const limNum = Math.min(5000, Math.max(1, Number(limRaw) || 500));
+    const mlUidRaw = url.searchParams.get("ml_user_id");
+    const mlUserId =
+      mlUidRaw != null && String(mlUidRaw).trim() !== ""
+        ? Number(String(mlUidRaw).trim())
+        : NaN;
+    const orderIdRaw = url.searchParams.get("order_id");
+    let orderIdOpt = null;
+    if (orderIdRaw != null && String(orderIdRaw).trim() !== "") {
+      const o = Number(String(orderIdRaw).trim());
+      if (Number.isFinite(o) && o > 0) orderIdOpt = o;
+    }
+
+    function packMsgQuery(overrides = {}) {
+      const p = new URLSearchParams();
+      p.set("k", k);
+      const uid =
+        overrides.ml_user_id !== undefined ? overrides.ml_user_id : mlUserId;
+      if (uid != null && Number.isFinite(Number(uid)) && Number(uid) > 0) {
+        p.set("ml_user_id", String(uid));
+      }
+      const oid =
+        overrides.order_id !== undefined ? overrides.order_id : orderIdOpt;
+      if (oid != null && Number.isFinite(Number(oid)) && Number(oid) > 0) {
+        p.set("order_id", String(oid));
+      }
+      const lim =
+        overrides.limit !== undefined ? overrides.limit : limNum;
+      if (lim != null) p.set("limit", String(lim));
+      return `/mensajes-pack-orden?${p.toString()}`;
+    }
+
+    if (!Number.isFinite(mlUserId) || mlUserId <= 0) {
+      let accounts = [];
+      try {
+        accounts = await listMlAccounts();
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+        return;
+      }
+      const accRows = accounts
+        .map((a) => {
+          const uid = Number(a.ml_user_id);
+          const href = packMsgQuery({ ml_user_id: uid, order_id: null, limit: limNum });
+          return `<tr><td>${escapeHtml(uid)}</td><td class="muted">${escapeHtml(
+            a.nickname != null ? String(a.nickname) : "—"
+          )}</td><td><a href="${escapeAttr(href)}">Ver mensajes de esta cuenta</a></td></tr>`;
+        })
+        .join("");
+      const pickerHtml = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Mensajes pack (órdenes)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #15202b; color: #e7e9ea; margin: 1.5rem; }
+    .lead { color: #8b98a5; font-size: 0.95rem; }
+    code { background: #1e2732; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    a { color: #1d9bf0; }
+    table { border-collapse: collapse; width: 100%; max-width: 720px; margin-top: 1rem; font-size: 0.9rem; }
+    th, td { border: 1px solid #38444d; padding: 0.4rem 0.55rem; text-align: left; }
+    th { background: #1e2732; }
+    .muted { color: #8b98a5; }
+  </style>
+</head>
+<body>
+  <h1>Mensajes post-venta por orden</h1>
+  <p class="lead">Tabla <code>ml_order_pack_messages</code>. Elige cuenta o abre con <code>?k=…&amp;ml_user_id=ID</code> y opcional <code>&amp;order_id=…</code>. Sync: <code>npm run sync-pack-messages</code>.</p>
+  <table>
+    <thead><tr><th>ml_user_id</th><th>nickname</th><th></th></tr></thead>
+    <tbody>${
+      accounts.length === 0
+        ? `<tr><td colspan="3">No hay cuentas en <code>ml_accounts</code>.</td></tr>`
+        : accRows
+    }</tbody>
+  </table>
+</body>
+</html>`;
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(pickerHtml);
+      return;
+    }
+
+    let rows;
+    try {
+      rows = await listMlOrderPackMessagesByUser(mlUserId, limNum, {
+        order_id: orderIdOpt,
+      });
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          ml_user_id: mlUserId,
+          order_id: orderIdOpt,
+          limit: limNum,
+          count: rows.length,
+          items: rows,
+        })
+      );
+      return;
+    }
+
+    const filterNote = orderIdOpt
+      ? `Cuenta <strong>${escapeHtml(mlUserId)}</strong> · orden <strong>${escapeHtml(
+          orderIdOpt
+        )}</strong> · <a href="${escapeAttr(
+          packMsgQuery({ order_id: null })
+        )}">Quitar filtro de orden (todas las recientes)</a>`
+      : `Cuenta <strong>${escapeHtml(mlUserId)}</strong> · mensajes recientes (todas las órdenes).`;
+
+    const tableRows = rows
+      .map((r) => {
+        const txt =
+          r.message_text != null && String(r.message_text).length > 200
+            ? `${escapeHtml(String(r.message_text).slice(0, 200))}…`
+            : escapeHtml(r.message_text || "—");
+        const rawPrev =
+          r.raw_json != null && String(r.raw_json).length > 120
+            ? `${escapeHtml(String(r.raw_json).slice(0, 120))}…`
+            : escapeHtml(r.raw_json || "—");
+        return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td>${escapeHtml(r.order_id)}</td>
+  <td>${escapeHtml(r.ml_message_id)}</td>
+  <td>${escapeHtml(r.from_user_id != null ? r.from_user_id : "—")}</td>
+  <td>${escapeHtml(r.to_user_id != null ? r.to_user_id : "—")}</td>
+  <td class="msg">${txt}</td>
+  <td class="muted">${escapeHtml(r.date_created || "—")}</td>
+  <td>${escapeHtml(r.status || "—")}</td>
+  <td>${escapeHtml(r.tag || "—")}</td>
+  <td class="muted">${escapeHtml(r.fetched_at || "—")}</td>
+  <td><pre class="payload">${rawPrev}</pre></td>
+</tr>`;
+      })
+      .join("");
+
+    const htmlOut = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Mensajes pack órdenes</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #15202b; color: #e7e9ea; margin: 1rem; }
+    h1 { font-size: 1.2rem; }
+    .lead { color: #8b98a5; font-size: 0.9rem; margin-top: 0.5rem; }
+    code { background: #1e2732; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    a { color: #1d9bf0; }
+    table { border-collapse: collapse; width: 100%; max-width: 1600px; margin-top: 1rem; font-size: 0.78rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.75rem; }
+    td.msg { max-width: 280px; word-break: break-word; }
+    pre.payload { margin: 0; max-height: 80px; overflow: auto; font-size: 0.7rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+  </style>
+</head>
+<body>
+  <h1>Mensajes post-venta (pack)</h1>
+  <p class="lead">${filterNote} · <code>?limit=${escapeHtml(
+    limNum
+  )}</code> · JSON: <code>?format=json</code> · <a href="${escapeAttr(
+    packMsgQuery({ ml_user_id: null })
+  )}">Elegir otra cuenta</a></p>
+  <p class="lead">Orden concreta: añade <code>&amp;order_id=NUM</code> a la URL. Datos: <code>npm run sync-pack-messages</code> / <code>sync-pack-messages-all</code>.</p>
+  <table>
+    <thead><tr><th>id</th><th>order_id</th><th>ml_message_id</th><th>from</th><th>to</th><th>texto</th><th>date_created</th><th>status</th><th>tag</th><th>fetched_at</th><th>raw (preview)</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="11">Sin mensajes en BD para este filtro.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(htmlOut);
     return;
   }
 
@@ -3915,10 +4136,11 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Publicaciones ML (listings por cuenta): http://localhost:${PORT}/publicaciones-ml?k=TU_ADMIN_SECRET`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
     console.log(`Órdenes ML (sync-orders): http://localhost:${PORT}/ordenes-ml?k=TU_ADMIN_SECRET`);
+    console.log(`Mensajes pack órdenes (BD): http://localhost:${PORT}/mensajes-pack-orden?k=TU_ADMIN_SECRET`);
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

@@ -2083,6 +2083,53 @@ async function listMlOrderPackMessagesByUser(mlUserId, limit, options = {}) {
   return rows;
 }
 
+/** Filas { ml_user_id, total } para resumen por cuenta (ml_order_pack_messages). */
+async function listMlOrderPackMessageCountsByUser() {
+  await ensureSchema();
+  const { rows } = await pool.query(
+    `SELECT ml_user_id, COUNT(*)::bigint AS total
+     FROM ml_order_pack_messages
+     GROUP BY ml_user_id
+     ORDER BY ml_user_id ASC`
+  );
+  return rows.map((r) => ({
+    ml_user_id: Number(r.ml_user_id),
+    total: Number(r.total),
+  }));
+}
+
+async function countMlOrderPackMessagesTotal() {
+  await ensureSchema();
+  const { rows } = await pool.query(`SELECT COUNT(*)::bigint AS c FROM ml_order_pack_messages`);
+  const n = rows[0] && rows[0].c != null ? Number(rows[0].c) : 0;
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+async function countMlOrderPackMessagesForMlUser(mlUserId) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return 0;
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::bigint AS c FROM ml_order_pack_messages WHERE ml_user_id = $1`,
+    [mlUid]
+  );
+  const n = rows[0] && rows[0].c != null ? Number(rows[0].c) : 0;
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+async function countMlOrderPackMessagesForOrder(mlUserId, orderId) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) return 0;
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::bigint AS c FROM ml_order_pack_messages WHERE ml_user_id = $1 AND order_id = $2`,
+    [mlUid, oid]
+  );
+  const n = rows[0] && rows[0].c != null ? Number(rows[0].c) : 0;
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
 async function upsertMlOrderFeedback(row) {
   await ensureSchema();
   const mlUid = Number(row.ml_user_id);
@@ -3043,6 +3090,10 @@ module.exports = {
   upsertMlOrderPackMessage,
   listMlOrderPackMessagesByOrder,
   listMlOrderPackMessagesByUser,
+  listMlOrderPackMessageCountsByUser,
+  countMlOrderPackMessagesTotal,
+  countMlOrderPackMessagesForMlUser,
+  countMlOrderPackMessagesForOrder,
   upsertMlOrderFeedback,
   listMlOrderFeedbackByOrder,
   listMlOrderFeedbackByUser,

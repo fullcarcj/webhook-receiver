@@ -124,6 +124,10 @@ const {
   listMlOrderCountsByUserStatus,
   listMlOrderCountsByUser,
   listMlOrderPackMessagesByUser,
+  listMlOrderPackMessageCountsByUser,
+  countMlOrderPackMessagesTotal,
+  countMlOrderPackMessagesForMlUser,
+  countMlOrderPackMessagesForOrder,
   listMlRatingRequestLog,
   dbPath,
 } = require("./db");
@@ -3102,20 +3106,46 @@ const server = http.createServer(async (req, res) => {
 
     if (!Number.isFinite(mlUserId) || mlUserId <= 0) {
       let accounts = [];
+      let countsByUser = [];
+      let totalBd = 0;
       try {
         accounts = await listMlAccounts();
+        countsByUser = await listMlOrderPackMessageCountsByUser();
+        totalBd = await countMlOrderPackMessagesTotal();
       } catch (e) {
         res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
         res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
         return;
       }
+      const countMap = new Map(countsByUser.map((c) => [Number(c.ml_user_id), Number(c.total)]));
+      if (url.searchParams.get("format") === "json") {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            total_messages_saved: totalBd,
+            by_account: accounts.map((a) => {
+              const uid = Number(a.ml_user_id);
+              return {
+                ml_user_id: uid,
+                nickname: a.nickname != null ? String(a.nickname) : null,
+                messages_saved: countMap.get(uid) ?? 0,
+              };
+            }),
+          })
+        );
+        return;
+      }
       const accRows = accounts
         .map((a) => {
           const uid = Number(a.ml_user_id);
+          const nMsg = countMap.get(uid) ?? 0;
           const href = packMsgQuery({ ml_user_id: uid, order_id: null, limit: limNum });
           return `<tr><td>${escapeHtml(uid)}</td><td class="muted">${escapeHtml(
             a.nickname != null ? String(a.nickname) : "—"
-          )}</td><td><a href="${escapeAttr(href)}">Ver mensajes de esta cuenta</a></td></tr>`;
+          )}</td><td style="text-align:right">${escapeHtml(String(nMsg))}</td><td><a href="${escapeAttr(
+            href
+          )}">Ver mensajes</a></td></tr>`;
         })
         .join("");
       const pickerHtml = `<!DOCTYPE html>
@@ -3129,20 +3159,23 @@ const server = http.createServer(async (req, res) => {
     .lead { color: #8b98a5; font-size: 0.95rem; }
     code { background: #1e2732; padding: 0.1rem 0.35rem; border-radius: 4px; }
     a { color: #1d9bf0; }
-    table { border-collapse: collapse; width: 100%; max-width: 720px; margin-top: 1rem; font-size: 0.9rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 820px; margin-top: 1rem; font-size: 0.9rem; }
     th, td { border: 1px solid #38444d; padding: 0.4rem 0.55rem; text-align: left; }
     th { background: #1e2732; }
+    th.num, td.num { text-align: right; }
     .muted { color: #8b98a5; }
   </style>
 </head>
 <body>
   <h1>Mensajes post-venta por orden</h1>
-  <p class="lead">Tabla <code>ml_order_pack_messages</code>. Elige cuenta o abre con <code>?k=…&amp;ml_user_id=ID</code> y opcional <code>&amp;order_id=…</code>. Sync: <code>npm run sync-pack-messages</code>.</p>
+  <p class="lead">Tabla <code>ml_order_pack_messages</code> · <strong>Total guardado en BD: ${escapeHtml(
+    String(totalBd)
+  )}</strong> mensaje(s). Elige cuenta o abre con <code>?k=…&amp;ml_user_id=ID</code> y opcional <code>&amp;order_id=…</code>. JSON: <code>?format=json</code>. Sync: <code>npm run sync-pack-messages</code>.</p>
   <table>
-    <thead><tr><th>ml_user_id</th><th>nickname</th><th></th></tr></thead>
+    <thead><tr><th>ml_user_id</th><th>nickname</th><th class="num">mensajes guardados</th><th></th></tr></thead>
     <tbody>${
       accounts.length === 0
-        ? `<tr><td colspan="3">No hay cuentas en <code>ml_accounts</code>.</td></tr>`
+        ? `<tr><td colspan="4">No hay cuentas en <code>ml_accounts</code>.</td></tr>`
         : accRows
     }</tbody>
   </table>
@@ -3154,10 +3187,16 @@ const server = http.createServer(async (req, res) => {
     }
 
     let rows;
+    let totalCuentaBd = 0;
+    let totalOrdenBd = null;
     try {
       rows = await listMlOrderPackMessagesByUser(mlUserId, limNum, {
         order_id: orderIdOpt,
       });
+      totalCuentaBd = await countMlOrderPackMessagesForMlUser(mlUserId);
+      if (orderIdOpt != null) {
+        totalOrdenBd = await countMlOrderPackMessagesForOrder(mlUserId, orderIdOpt);
+      }
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -3172,20 +3211,36 @@ const server = http.createServer(async (req, res) => {
           ml_user_id: mlUserId,
           order_id: orderIdOpt,
           limit: limNum,
-          count: rows.length,
+          total_messages_saved_account: totalCuentaBd,
+          total_messages_saved_order:
+            orderIdOpt != null ? totalOrdenBd : undefined,
+          count_rows_returned: rows.length,
           items: rows,
         })
       );
       return;
     }
 
+    const totalLine =
+      orderIdOpt != null && totalOrdenBd != null
+        ? `Guardados en BD: <strong>${escapeHtml(String(totalOrdenBd))}</strong> en esta orden · <strong>${escapeHtml(
+            String(totalCuentaBd)
+          )}</strong> en total para la cuenta. Mostrando hasta <strong>${escapeHtml(
+            String(limNum)
+          )}</strong> filas.`
+        : `Guardados en BD para esta cuenta: <strong>${escapeHtml(
+            String(totalCuentaBd)
+          )}</strong> mensaje(s). Mostrando hasta <strong>${escapeHtml(
+            String(limNum)
+          )}</strong> filas (orden reciente).`;
+
     const filterNote = orderIdOpt
       ? `Cuenta <strong>${escapeHtml(mlUserId)}</strong> · orden <strong>${escapeHtml(
           orderIdOpt
-        )}</strong> · <a href="${escapeAttr(
+        )}</strong> · ${totalLine} · <a href="${escapeAttr(
           packMsgQuery({ order_id: null })
         )}">Quitar filtro de orden (todas las recientes)</a>`
-      : `Cuenta <strong>${escapeHtml(mlUserId)}</strong> · mensajes recientes (todas las órdenes).`;
+      : `Cuenta <strong>${escapeHtml(mlUserId)}</strong>. ${totalLine}`;
 
     const tableRows = rows
       .map((r) => {

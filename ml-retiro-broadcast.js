@@ -35,6 +35,7 @@ require("./load-env-local");
 
 const { mercadoLibrePostJsonForUser } = require("./oauth-token");
 const { applyPostSalePlaceholders, MAX_OTHER } = require("./ml-post-sale-send");
+const { getAutoMessageBudgetForBuyerToday } = require("./ml-auto-message-cap");
 const {
   listMlAccounts,
   listMlOrdersEligibleForRetiroBroadcast,

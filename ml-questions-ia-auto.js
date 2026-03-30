@@ -15,6 +15,9 @@
  *
  * Polling: ML_QUESTIONS_IA_AUTO_POLL_MS vacío → 60000; 0 = sin poll. Respeta la misma ventana.
  *
+ * Texto extra (opcional): ML_QUESTIONS_IA_AUTO_EXTRA_LINE se añade al final de la plantilla elegida
+ * (p. ej. avisos de Semana Santa). Vacío = no se añade nada. Cuenta para ML_QUESTIONS_IA_MAX_CHARS.
+ *
  * Importante en producción: las variables deben estar en el **servidor** (p. ej. Render). `oauth-env.json`
  * solo aplica en local si el archivo existe; no sustituye env del panel si allí sigue ENABLED=1.
  */
@@ -69,6 +72,13 @@ function getQuestionsIaMaxChars() {
   const n = Number(process.env.ML_QUESTIONS_IA_MAX_CHARS || 2000);
   if (!Number.isFinite(n) || n < 100) return 2000;
   return Math.min(4000, Math.floor(n));
+}
+
+/** Aviso temporal (p. ej. Semana Santa); vacío = omitir. */
+function getQuestionsIaAutoExtraLine() {
+  const raw = process.env.ML_QUESTIONS_IA_AUTO_EXTRA_LINE;
+  if (raw == null || String(raw).trim() === "") return "";
+  return String(raw).trim();
 }
 
 function getQuestionsIaTimezone() {
@@ -344,6 +354,11 @@ function getQuestionsIaAutoDiagnostics() {
           ? process.env.ML_QUESTIONS_IA_AUTO_POLL_MS
           : `(vacío→${DEFAULT_IA_AUTO_POLL_MS})`,
       ML_QUESTIONS_IA_AUTO_POLL_LIMIT: process.env.ML_QUESTIONS_IA_AUTO_POLL_LIMIT || "",
+      ML_QUESTIONS_IA_AUTO_EXTRA_LINE:
+        process.env.ML_QUESTIONS_IA_AUTO_EXTRA_LINE != null &&
+        String(process.env.ML_QUESTIONS_IA_AUTO_EXTRA_LINE).trim() !== ""
+          ? String(process.env.ML_QUESTIONS_IA_AUTO_EXTRA_LINE).trim()
+          : "",
       ML_WEBHOOK_FETCH_RESOURCE: process.env.ML_WEBHOOK_FETCH_RESOURCE || "",
     },
     checks: {
@@ -364,6 +379,56 @@ function getQuestionsIaAutoDiagnostics() {
       retry_pending: "GET /preguntas-ia-auto-retry?k=ADMIN_SECRET",
     },
   };
+}
+
+/**
+ * Errores de POST /answers en los que ML indica que no tiene sentido seguir con esa fila en pending:
+ * pregunta ya no UNANSWERED, recurso inexistente, o ítem pausado (ML no permite contestar hasta reactivar).
+ */
+function mlAnswersPostErrorMeansDropLocalPending(httpStatus, rawText, data) {
+  const st = Number(httpStatus);
+  let blob = rawText != null ? String(rawText) : "";
+  if (data != null && typeof data === "object" && !Array.isArray(data)) {
+    try {
+      for (const k of ["message", "error", "cause"]) {
+        const v = data[k];
+        if (v == null) continue;
+        blob += typeof v === "string" ? v : JSON.stringify(v);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const low = blob.toLowerCase();
+  if (low.includes("not_unanswered_question")) return true;
+  if (low.includes("not_active_item")) return true;
+  if (low.includes("item must be active")) return true;
+  if (st === 404) return true;
+  return false;
+}
+
+function mlAnswersPostErrorDropReasonLog(httpStatus, rawText, data) {
+  let blob = rawText != null ? String(rawText) : "";
+  if (data != null && typeof data === "object" && !Array.isArray(data)) {
+    try {
+      for (const k of ["message", "error"]) {
+        const v = data[k];
+        if (v == null) continue;
+        blob += typeof v === "string" ? v : JSON.stringify(v);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const low = blob.toLowerCase();
+  if (low.includes("not_active_item") || low.includes("item must be active")) {
+    return "publicación pausada o no activa; ML no acepta respuestas hasta reactivar la publicación";
+  }
+  if (low.includes("not_unanswered_question")) {
+    return "pregunta ya no UNANSWERED o no admite respuesta en ML";
+  }
+  if (Number(httpStatus) === 404) return "recurso no encontrado en ML";
+  return "error permanente según API ML; pending local retirado";
 }
 
 function pickRandomIaBody(lastIndex) {
@@ -427,6 +492,10 @@ async function tryQuestionIaAutoAnswer(args) {
   const { text, index } = pickRandomIaBody(null);
   const maxC = getQuestionsIaMaxChars();
   let body = String(text).trim();
+  const extraLine = getQuestionsIaAutoExtraLine();
+  if (extraLine) {
+    body = `${body} ${extraLine}`;
+  }
   if (body.length > maxC) {
     body = body.slice(0, maxC);
   }
@@ -478,6 +547,20 @@ async function tryQuestionIaAutoAnswer(args) {
       });
     } catch (e) {
       console.error("[questions ia-auto] log api_error:", e.message || e);
+    }
+    if (mlAnswersPostErrorMeansDropLocalPending(res.status, res.rawText, res.data)) {
+      try {
+        await deleteMlQuestionPending(qid);
+        console.warn(
+          "[questions ia-auto] pending local eliminado question_id=%s (POST /answers HTTP %s; %s)",
+          qid,
+          res.status,
+          mlAnswersPostErrorDropReasonLog(res.status, res.rawText, res.data)
+        );
+      } catch (eDel) {
+        console.error("[questions ia-auto] delete pending tras error ML:", eDel.message || eDel);
+      }
+      return { ok: true, skip: "dropped_stale_pending", status: res.status };
     }
     return { ok: false, status: res.status, data: res.data, skip: "api_error" };
   }
@@ -579,7 +662,11 @@ async function retryPendingQuestionsIaAuto(opts) {
       evalAt,
     });
     const resueltaAuto =
-      r && r.ok === true && (r.question_id != null || r.skip === "already_sent");
+      r &&
+      r.ok === true &&
+      (r.question_id != null ||
+        r.skip === "already_sent" ||
+        r.skip === "dropped_stale_pending");
     if (!resueltaAuto) {
       try {
         await upsertMlQuestionPending({
@@ -648,11 +735,13 @@ function startQuestionsIaAutoPoll() {
     try {
       const out = await retryPendingQuestionsIaAuto({ limit });
       const answered = (out.results || []).filter((r) => r.ok === true && r.question_id != null).length;
+      const dropped = (out.results || []).filter((r) => r.skip === "dropped_stale_pending").length;
       if (out.pending_seen > 0) {
         console.log(
-          "[questions ia-auto poll] revisadas=%s respondidas_ok=%s",
+          "[questions ia-auto poll] revisadas=%s respondidas_ok=%s stale_pending_borrados=%s",
           out.pending_seen,
-          answered
+          answered,
+          dropped
         );
       }
     } catch (e) {

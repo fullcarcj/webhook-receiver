@@ -42,6 +42,7 @@ const {
   buildQuestionPendingRow,
   buildQuestionAnsweredRow,
   enrichAnsweredRowFromPendingSnapshot,
+  extractQuestionIdFromResource,
   isQuestionUnansweredStatus,
   isQuestionAnsweredOrClosedStatus,
 } = require("./ml-question-sync");
@@ -593,11 +594,31 @@ function scheduleTopicFetchFromWebhook(body) {
 
         const result = await mercadoLibreFetchForUser(mlUserId, requestPath);
         if (topic === "questions" && !result.ok) {
-          console.error(
-            "[ml questions] GET %s → HTTP %s (revisa token y ml_accounts; no se actualiza pending/answered)",
-            requestPath,
-            result.status
-          );
+          const st = result.status;
+          if (st === 404 || st === 410) {
+            const qidGone = extractQuestionIdFromResource(resourceStr);
+            if (qidGone != null && Number.isFinite(qidGone) && qidGone > 0) {
+              try {
+                const removed = await deleteMlQuestionPending(qidGone);
+                if (removed > 0) {
+                  console.log(
+                    "[ml questions] GET %s → %s; eliminado pending ml_question_id=%s (recurso inexistente en ML)",
+                    requestPath,
+                    st,
+                    qidGone
+                  );
+                }
+              } catch (ePg) {
+                console.error("[ml questions] DELETE pending tras %s:", st, ePg.message || ePg);
+              }
+            }
+          } else {
+            console.error(
+              "[ml questions] GET %s → HTTP %s (revisa token y ml_accounts; no se actualiza pending/answered)",
+              requestPath,
+              st
+            );
+          }
         }
         let payloadStr = null;
         if (result.data != null) {
@@ -725,7 +746,9 @@ function scheduleTopicFetchFromWebhook(body) {
                         const resueltaAuto =
                           r &&
                           r.ok === true &&
-                          (r.question_id != null || r.skip === "already_sent");
+                          (r.question_id != null ||
+                            r.skip === "already_sent" ||
+                            r.skip === "dropped_stale_pending");
                         if (!resueltaAuto) {
                           await upsertMlQuestionPending({
                             ...row,
@@ -1032,11 +1055,11 @@ const server = http.createServer(async (req, res) => {
           ml_questions_refresh:
             "GET /preguntas-ml-refresh?k=ADMIN_SECRET&ml_question_id=ID — sincroniza una pregunta con la API ML (respuesta manual en la app sin webhook); opcional ml_user_id= vendedor si pending tiene user_id erróneo",
           ml_questions_sync_pending:
-            "GET /preguntas-ml-sync-pending?k=ADMIN_SECRET&limit=50 — recorre pending y alinea con ML (las ya answered pasan a answered y salen de pending)",
+            "GET /preguntas-ml-sync-pending?k=ADMIN_SECRET&limit=50 — recorre pending y alinea con ML (answered/cerradas → answered; GET 404/410 → borra pending huérfano)",
           delete_all_ml_questions_pending:
             "DELETE /admin/ml-questions-pending (cabecera X-Admin-Secret) vacía ml_questions_pending (solo BD local; no afecta preguntas en ML)",
           respuesta_automatica_ia:
-            "Tipo D (preguntas): ML_QUESTIONS_IA_AUTO_ENABLED=1 → POST /answers, plantillas QUESTION_IA_BODIES. Ventana ML_QUESTIONS_IA_AUTO_WINDOW_START/END (HH:mm, ML_QUESTIONS_IA_AUTO_TIMEZONE); domingo por defecto ignora esa franja (24 h) salvo ML_QUESTIONS_IA_AUTO_SUNDAY_IGNORE_WINDOW=0; ML_QUESTIONS_IA_AUTO_DAYS (0=dom); IGNORE_WINDOW/FORCE ignora horario todos los días. Éxito → answered + borrar pending.",
+            "Tipo D (preguntas): ML_QUESTIONS_IA_AUTO_ENABLED=1 → POST /answers, plantillas QUESTION_IA_BODIES + ML_QUESTIONS_IA_AUTO_EXTRA_LINE opcional al final (avisos p. ej. Semana Santa). Ventana START/END (TIMEZONE); domingo 24 h salvo SUNDAY_IGNORE_WINDOW=0; DAYS; IGNORE_WINDOW/FORCE. Éxito → answered + borrar pending.",
           log_ia_auto_omitidos:
             "GET /preguntas-ia-auto-log?k=ADMIN_SECRET — ml_questions_ia_auto_log (intentos sin POST /answers cuando IA desactivada u otros motivos; ?format=json&limit=)",
           retry_ia_auto_pending:

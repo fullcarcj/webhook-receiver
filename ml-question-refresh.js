@@ -48,11 +48,37 @@ async function refreshMlQuestionFromApi(args) {
 
   const res = await mercadoLibreFetchForUser(uid, `/questions/${qid}`);
   if (!res.ok) {
+    const st = res.status;
+    /** Pregunta borrada o ya no expuesta: evita fantasmas en ml_questions_pending. */
+    if (st === 404 || st === 410) {
+      let pendingRowsRemoved = 0;
+      try {
+        pendingRowsRemoved = await deleteMlQuestionPending(qid);
+      } catch (e) {
+        return {
+          ok: false,
+          ml_user_id: uid,
+          ml_question_id: qid,
+          http_status: st,
+          error: (e && e.message) || String(e),
+        };
+      }
+      return {
+        ok: true,
+        action: "removed_gone",
+        ml_user_id: uid,
+        ml_question_id: qid,
+        http_status: st,
+        pending_rows_removed: pendingRowsRemoved,
+        note:
+          "El recurso ya no existe en la API ML (404/410). Se quitó la fila de ml_questions_pending si existía.",
+      };
+    }
     return {
       ok: false,
       ml_user_id: uid,
       ml_question_id: qid,
-      http_status: res.status,
+      http_status: st,
       error: (res.rawText || "").slice(0, 800),
     };
   }
@@ -142,7 +168,8 @@ async function refreshMlQuestionFromApi(args) {
 
 /**
  * Recorre ml_questions_pending y alinea cada una con GET /questions/{id}.
- * Si en ML ya está ANSWERED/CLOSED, pasa a answered y borra pending.
+ * Si en ML ya está ANSWERED/CLOSED/DELETED/…, pasa a answered y borra pending.
+ * Si el GET devuelve 404/410, borra pending (pregunta ya no existe en ML).
  * @param {{ limit?: number }} [opts]
  */
 async function syncAllPendingQuestionsFromApi(opts) {

@@ -1,6 +1,7 @@
 /**
  * Flujo: webhook topic `questions` → (ml_topic_fetches) GET mismo path que el resource, p. ej. `/questions/13552014761`
- * → `UNANSWERED` → ml_questions_pending; respondida/cerrada → borrar pending y upsert en ml_questions_answered.
+ * → `UNANSWERED` → ml_questions_pending; respondida/cerrada/borrada (estado en JSON) → borrar pending y upsert answered.
+ * Si el GET devuelve 404/410 (pregunta eliminada en ML), `refreshMlQuestionFromApi` y el fetch del webhook borran pending.
  * @see https://developers.mercadolibre.com.ar/es_ar/gestiona-preguntas
  */
 

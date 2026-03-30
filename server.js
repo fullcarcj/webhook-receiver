@@ -98,6 +98,7 @@ const {
   updatePostSaleMessage,
   deletePostSaleMessage,
   listPostSaleAutoSendLog,
+  listMlMessageKindSendLog,
   listMlVentasDetalleWeb,
   deleteAllMlVentasDetalleWeb,
   getMlAccount,
@@ -177,6 +178,11 @@ function isRecordatoriosCalificacionPath(pathname) {
     pathname === "/recordatorios" ||
     pathname === "/recordatorios/"
   );
+}
+
+/** Log unificado mensajes tipo A/B/C (tabla ml_message_kind_send_log). */
+function isEnviosTiposAbcPath(pathname) {
+  return pathname === "/envios-tipos-abc" || pathname === "/envios-tipos-abc/";
 }
 
 function isVentasDetalleWebPath(pathname) {
@@ -1001,6 +1007,8 @@ const server = http.createServer(async (req, res) => {
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:
           "GET /envios-postventa?k=ADMIN_SECRET (historial). POST /envios-postventa/retry?k=… JSON {order_id,ml_user_id,buyer_id?} opcional force, topic",
+        log_envios_tipos_abc:
+          "GET /envios-tipos-abc?k=ADMIN_SECRET - log unificado ml_message_kind_send_log (tipos A/B/C; ?kind=a|b|c|all & outcome=success|skipped|api_error|all)",
         recordatorios_calificacion:
           "GET /recordatorios-calificacion?k=ADMIN_SECRET — visualiza tabla ml_rating_request_log (cada POST recordatorio calificación; HTML o ?format=json; ?outcome=all|success|api_error; columna feedback comprador = snapshot ml_orders). Alias corto: GET /recordatorios?k=…",
         ml_rating_request_log:
@@ -3434,6 +3442,150 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Log unificado: tipo A (post-venta orden), B (retiro), C (calificación) — `ml_message_kind_send_log`. */
+  if (req.method === "GET" && isEnviosTiposAbcPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Envíos A/B/C</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Envíos A/B/C</title><p>Acceso denegado. <code>/envios-tipos-abc?k=…</code></p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    const kindRaw = (url.searchParams.get("kind") || "all").trim().toLowerCase();
+    const validKinds = new Set(["all", "a", "b", "c"]);
+    const curKind = validKinds.has(kindRaw) ? kindRaw : "all";
+    const messageKindOpt =
+      curKind === "a" ? "A" : curKind === "b" ? "B" : curKind === "c" ? "C" : "ALL";
+    const outcomeRaw = url.searchParams.get("outcome") || "default";
+    const validOutcomes = new Set(["default", "all", "success", "skipped", "api_error"]);
+    const curOutcome = validOutcomes.has(String(outcomeRaw).toLowerCase())
+      ? String(outcomeRaw).toLowerCase()
+      : "default";
+    const outcomeOpt =
+      curOutcome === "all" || curOutcome === "default" ? "all" : curOutcome;
+    let rows;
+    try {
+      rows = await listMlMessageKindSendLog(lim, 2000, {
+        message_kind: messageKindOpt,
+        outcome: outcomeOpt,
+      });
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    const kForLinks = k;
+    const limForLinks = lim && String(lim).trim() !== "" ? String(lim) : "";
+    function tiposAbcQuery(kindKey, outcomeKey) {
+      const p = new URLSearchParams();
+      p.set("k", kForLinks);
+      if (limForLinks) p.set("limit", limForLinks);
+      if (kindKey && kindKey !== "all") p.set("kind", kindKey);
+      if (outcomeKey && outcomeKey !== "default") p.set("outcome", outcomeKey);
+      return `/envios-tipos-abc?${p.toString()}`;
+    }
+    const kindNav = ["all", "a", "b", "c"]
+      .map((kindKey) => {
+        const active = curKind === kindKey ? ' class="active"' : "";
+        const label =
+          kindKey === "all"
+            ? "Todos (A+B+C)"
+            : kindKey === "a"
+              ? "Solo A"
+              : kindKey === "b"
+                ? "Solo B"
+                : "Solo C";
+        return `<a href="${escapeAttr(tiposAbcQuery(kindKey, curOutcome))}"${active}>${escapeHtml(label)}</a>`;
+      })
+      .join("\n    ");
+    const outcomeNav = ["default", "all", "success", "skipped", "api_error"]
+      .map((outKey) => {
+        const active = curOutcome === outKey ? ' class="active"' : "";
+        const label =
+          outKey === "default"
+            ? "Outcome (todos)"
+            : outKey === "all"
+              ? "all"
+              : outKey;
+        return `<a href="${escapeAttr(tiposAbcQuery(curKind, outKey))}"${active}>${escapeHtml(label)}</a>`;
+      })
+      .join("\n    ");
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          kind: curKind,
+          outcome: curOutcome,
+          count: rows.length,
+          items: rows,
+        })
+      );
+      return;
+    }
+    const tableRows = rows
+      .map((r) => {
+        return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td class="muted">${escapeHtml(r.created_at)}</td>
+  <td><strong>${escapeHtml(r.message_kind)}</strong></td>
+  <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.buyer_id)}</td>
+  <td>${escapeHtml(r.order_id)}</td>
+  <td>${escapeHtml(r.outcome)}</td>
+  <td>${escapeHtml(r.skip_reason)}</td>
+  <td>${escapeHtml(r.http_status)}</td>
+  <td>${escapeHtml(r.detail)}</td>
+</tr>`;
+      })
+      .join("");
+    const htmlOut = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Log envíos tipo A / B / C</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 1200px; margin-top: 1rem; font-size: 0.78rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.75rem; }
+    .filter-nav { margin-top: 0.75rem; line-height: 1.8; font-size: 0.85rem; }
+    .filter-nav a { color: #1d9bf0; text-decoration: none; margin-right: 0.35rem; }
+    .filter-nav a:hover { text-decoration: underline; }
+    .filter-nav a.active { font-weight: 600; color: #e7e9ea; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Log unificado: mensajes tipo A, B y C</h1>
+  <p class="lead">Tabla <code>ml_message_kind_send_log</code> · A = post-venta orden · B = retiro tienda · C = recordatorio calificación. ${rows.length} fila(s). JSON: <code>?format=json</code> · <code>?kind=a|b|c|all</code> · <code>?outcome=success|skipped|api_error|all</code></p>
+  <nav class="filter-nav" aria-label="Tipo"><span class="muted">Tipo:</span> ${kindNav}</nav>
+  <nav class="filter-nav" aria-label="Outcome"><span class="muted">Outcome:</span> ${outcomeNav}</nav>
+  <table>
+    <thead><tr><th>id</th><th>created_at</th><th>tipo</th><th>ml_user_id</th><th>buyer_id</th><th>order_id</th><th>outcome</th><th>skip_reason</th><th>http</th><th>detail</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="10">Sin registros.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(htmlOut);
+    return;
+  }
+
   /** Log envíos recordatorio calificación (ml_rating_request_log; job rating-request-daily). */
   if (req.method === "GET" && isRecordatoriosCalificacionPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
@@ -4179,6 +4331,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
     console.log(`Log envíos post-venta: http://localhost:${PORT}/envios-postventa?k=TU_ADMIN_SECRET`);
+    console.log(`Log tipos A/B/C (unificado): http://localhost:${PORT}/envios-tipos-abc?k=TU_ADMIN_SECRET`);
     console.log(
       `Log recordatorios calificación: http://localhost:${PORT}/recordatorios-calificacion?k=TU_ADMIN_SECRET (alias: /recordatorios?k=…)`
     );
@@ -4195,7 +4348,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /envios-tipos-abc /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

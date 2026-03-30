@@ -41,6 +41,7 @@ const {
   listMlOrdersEligibleForRetiroBroadcast,
   insertMlRetiroBroadcastSent,
   insertMlRetiroBroadcastLog,
+  insertMlMessageKindSendLog,
   wasRetiroBroadcastSentToBuyerTodaySlot,
 } = require("./db");
 
@@ -287,6 +288,16 @@ async function runRetiroBroadcastForUser(mlUserId, options = {}) {
         request_path: res.path != null ? String(res.path) : null,
         response_body: responseBodyForLog(res),
       });
+      await insertMlMessageKindSendLog({
+        message_kind: "B",
+        ml_user_id: mlUid,
+        buyer_id: buyerId,
+        order_id: orderId,
+        outcome: "success",
+        http_status: res.status,
+        detail: `slot=${slot}`,
+        created_at: now,
+      });
       await insertMlRetiroBroadcastSent({
         ml_user_id: mlUid,
         buyer_id: buyerId,
@@ -312,6 +323,17 @@ async function runRetiroBroadcastForUser(mlUserId, options = {}) {
         request_path: res.path != null ? String(res.path) : null,
         response_body: responseBodyForLog(res),
         error_message: mlRetiroApiErrorLine(res.data) || `HTTP ${res.status}`,
+      });
+      await insertMlMessageKindSendLog({
+        message_kind: "B",
+        ml_user_id: mlUid,
+        buyer_id: buyerId,
+        order_id: orderId,
+        outcome: "api_error",
+        skip_reason: mlRetiroApiErrorLine(res.data) || `HTTP ${res.status}`,
+        http_status: res.status,
+        detail: `slot=${slot}`,
+        created_at: now,
       });
       failed++;
       console.warn(

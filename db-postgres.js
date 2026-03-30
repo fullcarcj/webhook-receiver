@@ -225,6 +225,21 @@ async function runSchemaAndSeed() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_retiro_log_created ON ml_retiro_broadcast_log(created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_retiro_log_user ON ml_retiro_broadcast_log(ml_user_id)`,
+    `CREATE TABLE IF NOT EXISTS ml_message_kind_send_log (
+      id BIGSERIAL PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      message_kind CHAR(1) NOT NULL CHECK (message_kind IN ('A','B','C')),
+      ml_user_id BIGINT NOT NULL,
+      buyer_id BIGINT,
+      order_id BIGINT,
+      outcome TEXT NOT NULL,
+      skip_reason TEXT,
+      http_status INTEGER,
+      detail TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_msg_kind_log_created ON ml_message_kind_send_log(created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_msg_kind_log_user ON ml_message_kind_send_log(ml_user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_msg_kind_log_kind ON ml_message_kind_send_log(message_kind)`,
     `CREATE TABLE IF NOT EXISTS ml_questions_ia_auto_sent (
       ml_question_id BIGINT PRIMARY KEY,
       ml_user_id BIGINT NOT NULL,
@@ -1401,6 +1416,83 @@ async function insertPostSaleAutoSendLog(row) {
     ]
   );
   return Number(rows[0].id);
+}
+
+/**
+ * Registro unificado de intentos/envíos por tipo de mensaje (A post-venta orden, B retiro, C calificación).
+ * Fallos silenciosos para no interrumpir el flujo de envío.
+ */
+async function insertMlMessageKindSendLog(row) {
+  try {
+    const kindRaw = row.message_kind != null ? String(row.message_kind).trim().toUpperCase() : "";
+    const kind = kindRaw === "A" || kindRaw === "B" || kindRaw === "C" ? kindRaw : null;
+    if (!kind) return null;
+    const mlUid = Number(row.ml_user_id);
+    if (!Number.isFinite(mlUid) || mlUid <= 0) return null;
+    const oc = row.outcome != null ? String(row.outcome).trim() : "";
+    if (!oc) return null;
+    await ensureSchema();
+    await pool.query(
+      `INSERT INTO ml_message_kind_send_log (
+         created_at, message_kind, ml_user_id, buyer_id, order_id, outcome, skip_reason, http_status, detail
+       ) VALUES ($1::timestamptz,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        row.created_at != null ? String(row.created_at) : new Date().toISOString(),
+        kind,
+        mlUid,
+        row.buyer_id != null && Number.isFinite(Number(row.buyer_id)) ? Number(row.buyer_id) : null,
+        row.order_id != null && Number.isFinite(Number(row.order_id)) ? Number(row.order_id) : null,
+        oc.slice(0, 80),
+        row.skip_reason != null ? String(row.skip_reason).slice(0, 2000) : null,
+        row.http_status != null ? Number(row.http_status) : null,
+        row.detail != null ? String(row.detail).slice(0, 2000) : null,
+      ]
+    );
+  } catch (e) {
+    console.error("[db] insertMlMessageKindSendLog:", e.message);
+  }
+  return null;
+}
+
+/**
+ * @param {string|number|null} limit
+ * @param {number|null} maxAllowed
+ * @param {{ message_kind?: 'A'|'B'|'C'|'all', outcome?: string }} [options]
+ */
+async function listMlMessageKindSendLog(limit, maxAllowed, options = {}) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  const mkRaw = options.message_kind != null ? String(options.message_kind).trim().toUpperCase() : "ALL";
+  const mk =
+    mkRaw === "A" || mkRaw === "B" || mkRaw === "C"
+      ? mkRaw
+      : "ALL";
+  const ocRaw = options.outcome != null ? String(options.outcome).trim().toLowerCase() : "default";
+  const validOutcomes = new Set(["success", "skipped", "api_error"]);
+  const ocFilter = validOutcomes.has(ocRaw) ? ocRaw : null;
+
+  const conditions = [];
+  const params = [];
+  let pi = 1;
+  if (mk !== "ALL") {
+    conditions.push(`message_kind = $${pi++}`);
+    params.push(mk);
+  }
+  if (ocFilter) {
+    conditions.push(`outcome = $${pi++}`);
+    params.push(ocFilter);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  params.push(n);
+  const { rows } = await pool.query(
+    `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, outcome, skip_reason, http_status, detail
+     FROM ml_message_kind_send_log
+     ${where}
+     ORDER BY id DESC LIMIT $${pi}`,
+    params
+  );
+  return rows;
 }
 
 /**
@@ -3091,6 +3183,8 @@ module.exports = {
   markPostSaleSent,
   deletePostSaleSent,
   insertPostSaleAutoSendLog,
+  insertMlMessageKindSendLog,
+  listMlMessageKindSendLog,
   listPostSaleAutoSendLog,
   insertMlVentasDetalleWeb,
   listMlVentasDetalleWeb,

@@ -27,6 +27,7 @@ const {
   releasePostSaleStepClaim,
   hasPostSaleSuccessForStepToday,
   insertPostSaleAutoSendLog,
+  insertMlMessageKindSendLog,
 } = require("./db");
 const { getAutoMessageBudgetForBuyerToday, getMlAutoMessageTimezone } = require("./ml-auto-message-cap");
 
@@ -66,6 +67,21 @@ async function logAutoSend(row) {
     await insertPostSaleAutoSendLog(row);
   } catch (e) {
     console.error("[post-sale log DB]", e.message);
+  }
+  try {
+    await insertMlMessageKindSendLog({
+      message_kind: "A",
+      ml_user_id: row.ml_user_id,
+      buyer_id: row.buyer_id,
+      order_id: row.order_id,
+      outcome: row.outcome,
+      skip_reason: row.skip_reason,
+      http_status: row.http_status,
+      detail: null,
+      created_at: row.created_at,
+    });
+  } catch (e) {
+    console.error("[message-kind A log]", e.message);
   }
 }
 
@@ -248,6 +264,7 @@ async function trySendDefaultPostSaleMessage(args) {
       await logAutoSend({
         ...base,
         order_id: orderId,
+        buyer_id: buyerId,
         outcome: "skipped",
         skip_reason: "no_template",
       });
@@ -272,6 +289,7 @@ async function trySendDefaultPostSaleMessage(args) {
       await logAutoSend({
         ...base,
         order_id: orderId,
+        buyer_id: buyerId,
         outcome: "skipped",
         skip_reason: "auto_message_cap_day",
       });
@@ -286,6 +304,7 @@ async function trySendDefaultPostSaleMessage(args) {
       await logAutoSend({
         ...base,
         order_id: orderId,
+        buyer_id: buyerId,
         outcome: "skipped",
         skip_reason: "bad_option",
         option_id: optionId,
@@ -317,6 +336,7 @@ async function trySendDefaultPostSaleMessage(args) {
         await logAutoSend({
           ...base,
           order_id: orderId,
+          buyer_id: buyerId,
           outcome: "skipped",
           skip_reason: `post_sale_same_day_log_step=${step}`,
         });
@@ -369,6 +389,7 @@ async function trySendDefaultPostSaleMessage(args) {
         await logAutoSend({
           ...base,
           order_id: orderId,
+          buyer_id: buyerId,
           outcome: "success",
           http_status: result.status,
           option_id: optionId,
@@ -400,6 +421,7 @@ async function trySendDefaultPostSaleMessage(args) {
         await logAutoSend({
           ...base,
           order_id: orderId,
+          buyer_id: buyerId,
           outcome: "api_error",
           skip_reason: `message_step=${step}`,
           http_status: result.status,

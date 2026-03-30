@@ -53,6 +53,7 @@ const {
   insertMlRatingRequestSent,
   wasRatingRequestSentToBuyerToday,
   insertMlRatingRequestLog,
+  insertMlMessageKindSendLog,
 } = require("./db");
 const { getAutoMessageBudgetForBuyerToday } = require("./ml-auto-message-cap");
 
@@ -318,6 +319,15 @@ async function runRatingRequestDailyForUser(mlUserId, options = {}) {
         request_path: res.path != null ? String(res.path) : null,
         response_body: responseBodyForLog(res),
       });
+      await insertMlMessageKindSendLog({
+        message_kind: "C",
+        ml_user_id: mlUid,
+        buyer_id: buyerId,
+        order_id: orderId,
+        outcome: "success",
+        http_status: res.status,
+        created_at: now,
+      });
       await insertMlRatingRequestSent({
         order_id: orderId,
         ml_user_id: mlUid,
@@ -339,6 +349,16 @@ async function runRatingRequestDailyForUser(mlUserId, options = {}) {
         request_path: res.path != null ? String(res.path) : null,
         response_body: responseBodyForLog(res),
         error_message: mlRatingApiErrorLine(res.data) || `HTTP ${res.status}`,
+      });
+      await insertMlMessageKindSendLog({
+        message_kind: "C",
+        ml_user_id: mlUid,
+        buyer_id: buyerId,
+        order_id: orderId,
+        outcome: "api_error",
+        skip_reason: mlRatingApiErrorLine(res.data) || `HTTP ${res.status}`,
+        http_status: res.status,
+        created_at: now,
       });
       failed++;
       const preview = (res.rawText || "").slice(0, 300);

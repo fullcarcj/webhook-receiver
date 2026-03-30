@@ -14,7 +14,7 @@ Equivale a `node ml-order-feedback-sync.js --all --status=confirmed`. Ese script
 
 ---
 
-## Automático: todos los días a las 10:00 UTC
+## Automático: todos los días a las **8:30** (America/Caracas) = **12:30 UTC**
 
 Si usás **GitHub** con este repositorio:
 
@@ -26,10 +26,10 @@ Si usás **GitHub** con este repositorio:
 
 El archivo **`.github/workflows/rating-request-daily.yml`** ejecuta:
 
-- **Cron:** `0 10 * * *` → **10:00 UTC** cada día.
+- **Cron:** `30 12 * * *` → **12:30 UTC** cada día = **8:30** en Caracas (America/Caracas, UTC−4).
 - Comando: `node ml-rating-request-daily.js --all` con `ML_RATING_REQUEST_ENABLED=1` y lookback **6** días (salvo que cambies el workflow).
 
-**Zona horaria:** 10:00 UTC equivale a **07:00** en Argentina (ART, UTC−3). Si cambiás la hora, editá el cron en ese YAML (minuto hora * * *).
+Si cambiás la hora local, calculá el equivalente en UTC y editá el cron en ese YAML (`minuto hora * * *`).
 
 ---
 
@@ -69,13 +69,13 @@ npm run rating-request-print-message
 
 ## Opción sin GitHub: cron en Linux o Programador de tareas en Windows
 
-**Linux (crontab):** 10:00 UTC sería:
+**Linux (crontab):** misma hora que GitHub (12:30 UTC = 8:30 Caracas):
 
 ```cron
-0 10 * * * cd /ruta/al/webhook-receiver && ML_RATING_REQUEST_ENABLED=1 /usr/bin/node ml-rating-request-daily.js --all >> /tmp/rating-request.log 2>&1
+30 12 * * * cd /ruta/al/webhook-receiver && ML_RATING_REQUEST_ENABLED=1 /usr/bin/node ml-rating-request-daily.js --all >> /tmp/rating-request.log 2>&1
 ```
 
-Ajustá la ruta a `node` y al proyecto. Si el servidor está en hora local Argentina y querés 10:00 UTC, el sistema debe usar zona correcta o calculá el minuto/hora equivalente.
+Ajustá la ruta a `node` y al proyecto. Si el servidor usa otra zona, recalculá UTC o programá la tarea en hora local.
 
 **Windows:** Programador de tareas: acción “Iniciar programa” → `node`, argumentos `ml-rating-request-daily.js --all`, carpeta inicial = raíz del repo; en “Variables de entorno” o en `oauth-env.json` definí `DATABASE_URL` y `ML_RATING_REQUEST_ENABLED=1`.
 

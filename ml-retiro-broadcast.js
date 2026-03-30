@@ -254,7 +254,7 @@ async function runRetiroBroadcastForUser(mlUserId, options = {}) {
     text = String(text).trim();
     if (text.length > MAX_OTHER) {
       console.warn(
-        "[retiro-broadcast] order_id=%s texto truncado de %s a %s chars",
+        "[retiro-broadcast] tipo=B order_id=%s texto truncado de %s a %s chars",
         orderId,
         text.length,
         MAX_OTHER
@@ -309,7 +309,12 @@ async function runRetiroBroadcastForUser(mlUserId, options = {}) {
       });
       buyersMessaged.add(buyerId);
       sent++;
-      console.log("[retiro-broadcast] enviado slot=%s order_id=%s ml_user_id=%s", slot, orderId, mlUid);
+      console.log(
+        "[retiro-broadcast] tipo=B enviado slot=%s order_id=%s ml_user_id=%s",
+        slot,
+        orderId,
+        mlUid
+      );
     } else {
       await insertMlRetiroBroadcastLog({
         created_at: now,
@@ -337,7 +342,7 @@ async function runRetiroBroadcastForUser(mlUserId, options = {}) {
       });
       failed++;
       console.warn(
-        "[retiro-broadcast] fallo slot=%s order_id=%s HTTP %s",
+        "[retiro-broadcast] tipo=B fallo slot=%s order_id=%s HTTP %s",
         slot,
         orderId,
         res.status
@@ -440,7 +445,7 @@ async function main() {
   }
 
   console.log(
-    "[retiro-broadcast] slot=%s tz=%s lookback_days=%s since>=%s enabled=%s order_status=%s",
+    "[retiro-broadcast] tipo=B slot=%s tz=%s lookback_days=%s since>=%s enabled=%s order_status=%s",
     slot,
     defaultTimezone(),
     lookbackDays(),
@@ -459,7 +464,7 @@ async function main() {
     const r = await runRetiroBroadcastForUser(uid, { orderStatus, slot });
     results.push({ ml_user_id: uid, ...r });
     console.log(
-      "[retiro-broadcast] ml_user_id=%s eligible=%s sent=%s skipped_mismo_comprador=%s skipped_tope_3_dia=%s failed=%s err=%s",
+      "[retiro-broadcast] tipo=B ml_user_id=%s eligible=%s sent=%s skipped_mismo_comprador=%s skipped_auto_cap_dia=%s failed=%s err=%s",
       uid,
       r.eligible,
       r.sent,

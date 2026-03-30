@@ -1,4 +1,4 @@
-# Recordatorios de calificación ML: todos los días a las 10:00 UTC.
+# Recordatorios de calificación ML (tipo C): 8:30 America/Caracas = 12:30 UTC (UTC−4).
 # Requiere el secret DATABASE_URL (PostgreSQL con ml_accounts y datos de órdenes).
 # Ejecución manual: pestaña Actions → este workflow → Run workflow.
 
@@ -6,7 +6,7 @@ name: Recordatorio calificación ML
 
 on:
   schedule:
-    - cron: "0 10 * * *"
+    - cron: "30 12 * * *"
   workflow_dispatch:
 
 concurrency:

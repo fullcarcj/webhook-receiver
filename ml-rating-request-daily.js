@@ -39,9 +39,9 @@
  *   node ml-rating-request-daily.js --all
  *   node ml-rating-request-daily.js --all --status=confirmed
  *
- * Automático 10:00 UTC: ver .github/workflows/rating-request-daily.yml y RECORDATORIO-CALIFICACION.md
- * Cron (ejemplo servidor propio, 10:00 UTC):
- *   0 10 * * * cd /ruta && ML_RATING_REQUEST_ENABLED=1 node ml-rating-request-daily.js --all
+ * Automático 8:30 Caracas (12:30 UTC): ver .github/workflows/rating-request-daily.yml y RECORDATORIO-CALIFICACION.md
+ * Cron (ejemplo servidor propio, misma hora que GitHub Actions):
+ *   30 12 * * * cd /ruta && ML_RATING_REQUEST_ENABLED=1 node ml-rating-request-daily.js --all
  */
 require("./load-env-local");
 

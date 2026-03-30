@@ -1,4 +1,6 @@
 /**
+ * MENSAJE TIPO B (`MESSAGE_TYPE_B` en ml-message-types.js): recordatorio para ir a la tienda / despacho.
+ *
  * Mensajería post-venta (ML): recordatorios de retiro por la mañana y de despacho por la tarde.
  * En cada envío se elige una plantilla al azar entre 10 (pool mañana o pool tarde).
  *
@@ -13,7 +15,7 @@
  * Además, regla global: no más de **ML_AUTO_MESSAGE_MAX** mensajes automáticos al mismo comprador el **mismo día**
  * (post-venta + calificación + retiro; ver `ml-auto-message-cap.js`).
  *
- * Horarios programados (Venezuela, America/Caracas): 7:30 y 14:30 — ver .github/workflows/retiro-broadcast-*.yml.
+ * Horarios programados (Venezuela, America/Caracas): 7:30 y 14:20 — ver .github/workflows/retiro-broadcast-*.yml.
  *
  * Env:
  *   ML_RETIRO_ENABLED=1
@@ -22,7 +24,7 @@
  *   ML_RETIRO_ORDER_STATUS=confirmed  — opcional (filtra ml_orders.status)
  *   ML_RETIRO_TIMEZONE=America/Caracas — día civil para deduplicar
  *   ML_RETIRO_DELAY_MS=400
- *   ML_RETIRO_OPTION_ID=OTHER         — igual post-venta (OTHER o SEND_INVOICE_LINK)
+ *   ML_RETIRO_OPTION_ID=OTHER         — tipo B (OTHER o SEND_INVOICE_LINK; independiente de ML_POST_SALE_OPTION_ID)
  *
  * Uso:
  *   ML_RETIRO_ENABLED=1 ML_RETIRO_SLOT=morning node ml-retiro-broadcast.js --all
@@ -153,12 +155,8 @@ async function sendRetiroBroadcastMessage(mlUserId, orderId, buyerId, text) {
     tag: "post_sale",
   });
   const path = `/messages/packs/${orderId}/sellers/${mlUserId}?${q.toString()}`;
-  const optionId = (
-    process.env.ML_RETIRO_OPTION_ID ||
-    process.env.ML_RATING_REQUEST_OPTION_ID ||
-    process.env.ML_POST_SALE_OPTION_ID ||
-    "OTHER"
-  ).trim();
+  /** Solo `ML_RETIRO_*` (no se reutiliza `ML_POST_SALE_OPTION_ID` del tipo A). */
+  const optionId = (process.env.ML_RETIRO_OPTION_ID || "OTHER").trim();
   if (optionId !== "OTHER" && optionId !== "SEND_INVOICE_LINK") {
     return {
       ok: false,

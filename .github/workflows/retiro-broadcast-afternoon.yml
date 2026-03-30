@@ -1,11 +1,11 @@
-# Recordatorio tarde (Venezuela 14:30): despacho hasta 17:00, delivery, tasa BCV. UTC 18:30 (America/Caracas UTC-4).
+# Recordatorio tarde (Venezuela 14:20): despacho hasta 17:00, delivery, tasa BCV. UTC 18:20 (America/Caracas UTC-4).
 # Requiere secret DATABASE_URL. ML_RETIRO_ENABLED=1 en el job.
 
 name: Retiro ML — tarde
 
 on:
   schedule:
-    - cron: "30 18 * * *"
+    - cron: "20 18 * * *"
   workflow_dispatch:
 
 concurrency:

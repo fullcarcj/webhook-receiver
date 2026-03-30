@@ -1,8 +1,12 @@
 /**
+ * MENSAJE TIPO C (`MESSAGE_TYPE_C` en ml-message-types.js): recordatorio para que el comprador califique.
+ *
  * Job diario (cron): envía un mensaje post-venta pidiendo calificación al comprador
  * solo si vos ya calificaste (lado sale) y la calificación compra→nosotros está **pending**
  * (sin rating: feedback_purchase_value IS NULL y texto pending/vacío; sin fila purchase con rating en ml_order_feedback),
- * y la orden tiene date_created dentro de la ventana (p. ej. últimos 6 días).
+ * y la orden tiene date_created dentro de la ventana (ML_RATING_REQUEST_LOOKBACK_DAYS).
+ *
+ * Por orden: como máximo ML_RATING_REQUEST_MAX_DAYS envíos (defecto 8), uno por día en que el job corre y la orden sigue elegible.
  *
  * REGLA (inviolable): como máximo UN mensaje de recordatorio por comprador y por cuenta
  * vendedora (ml_user_id) por día civil en UTC. Se aplica en tres capas:
@@ -14,11 +18,12 @@
  *
  * Configuración:
  *   ML_RATING_REQUEST_ENABLED=1          — obligatorio para enviar
- *   ML_RATING_REQUEST_LOOKBACK_DAYS=6    — órdenes con date_created >= ahora − N días (por defecto 6)
+ *   ML_RATING_REQUEST_LOOKBACK_DAYS=14   — órdenes con date_created >= ahora − N días (por defecto 14; debe cubrir el tope de días de tipo C)
+ *   ML_RATING_REQUEST_MAX_DAYS=8         — máximo de envíos tipo C por orden (defecto 8)
  *   ML_RATING_REQUEST_ORDER_STATUS=      — opcional: filtra ml_orders.status (ej. confirmed). También --status=confirmed
  *   ML_RATING_REQUEST_DELAY_MS=400       — pausa entre envíos
  *   ML_RATING_REQUEST_BODY="..."         — texto (máx. 350 chars API ML). Placeholders: {{order_id}} {{buyer_id}} {{seller_id}} {{ml_user_id}}
- *   ML_RATING_REQUEST_OPTION_ID=OTHER    — igual que post-venta (OTHER o SEND_INVOICE_LINK)
+ *   ML_RATING_REQUEST_OPTION_ID=OTHER    — tipo C (OTHER o SEND_INVOICE_LINK; independiente de ML_POST_SALE_OPTION_ID)
  *
  * Mensajes predeterminados: 10 plantillas distintas (RATING_REQUEST_BODIES); en cada envío se elige una al azar
  * para variar el texto (sin repetir consecutivamente en la misma corrida). Si definís ML_RATING_REQUEST_BODY,
@@ -130,8 +135,14 @@ function sleep(ms) {
 }
 
 function lookbackDays() {
-  const n = Number(process.env.ML_RATING_REQUEST_LOOKBACK_DAYS || 6);
-  if (!Number.isFinite(n) || n <= 0) return 6;
+  const n = Number(process.env.ML_RATING_REQUEST_LOOKBACK_DAYS || 14);
+  if (!Number.isFinite(n) || n <= 0) return 14;
+  return Math.min(90, Math.floor(n));
+}
+
+function maxRatingRequestSendsPerOrder() {
+  const n = Number(process.env.ML_RATING_REQUEST_MAX_DAYS || 8);
+  if (!Number.isFinite(n) || n <= 0) return 8;
   return Math.min(90, Math.floor(n));
 }
 
@@ -171,11 +182,8 @@ async function sendRatingRequestMessage(mlUserId, orderId, buyerId, text) {
     tag: "post_sale",
   });
   const path = `/messages/packs/${orderId}/sellers/${mlUserId}?${q.toString()}`;
-  const optionId = (
-    process.env.ML_RATING_REQUEST_OPTION_ID ||
-    process.env.ML_POST_SALE_OPTION_ID ||
-    "OTHER"
-  ).trim();
+  /** Solo `ML_RATING_REQUEST_*` (no se reutiliza `ML_POST_SALE_OPTION_ID` del tipo A). */
+  const optionId = (process.env.ML_RATING_REQUEST_OPTION_ID || "OTHER").trim();
   if (optionId !== "OTHER" && optionId !== "SEND_INVOICE_LINK") {
     return {
       ok: false,
@@ -225,7 +233,8 @@ async function runRatingRequestDailyForUser(mlUserId, options = {}) {
     sinceIso(),
     dayStartIso,
     dayEndIso,
-    orderStatusRaw
+    orderStatusRaw,
+    maxRatingRequestSendsPerOrder()
   );
   const delayMs = defaultDelayMs();
   const useCustomBody =
@@ -486,6 +495,7 @@ module.exports = {
   runRatingRequestDailyForUser,
   sendRatingRequestMessage,
   lookbackDays,
+  maxRatingRequestSendsPerOrder,
   sinceIso,
   utcDayBoundsUtc,
   DEFAULT_BODY,

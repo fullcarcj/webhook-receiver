@@ -80,7 +80,8 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS ml_rating_request_sent (
-    order_id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL,
     ml_user_id INTEGER NOT NULL,
     buyer_id INTEGER,
     sent_at TEXT NOT NULL,
@@ -89,6 +90,7 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user ON ml_rating_request_sent(ml_user_id);
   CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user_buyer_sent ON ml_rating_request_sent(ml_user_id, buyer_id, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_ml_rating_request_sent_order ON ml_rating_request_sent(order_id);
 
   CREATE TABLE IF NOT EXISTS ml_rating_request_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -704,6 +706,35 @@ const FETCH_PROCESS_STATUS_POST_SALE_FAILED = "Fallo post-venta";
     `);
   } catch (e) {
     console.error("[db] migrate ml_rating_request_sent buyer_id:", e.message);
+  }
+})();
+
+(function migrateMlRatingRequestSentMultiRow() {
+  try {
+    const t = db.prepare("PRAGMA table_info(ml_rating_request_sent)").all();
+    const names = new Set(t.map((c) => c.name));
+    if (names.has("id")) return;
+    db.exec(`
+      CREATE TABLE ml_rating_request_sent_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
+        ml_user_id INTEGER NOT NULL,
+        buyer_id INTEGER,
+        sent_at TEXT NOT NULL,
+        http_status INTEGER,
+        error_message TEXT
+      );
+      INSERT INTO ml_rating_request_sent_new (order_id, ml_user_id, buyer_id, sent_at, http_status, error_message)
+      SELECT order_id, ml_user_id, buyer_id, sent_at, http_status, error_message FROM ml_rating_request_sent;
+      DROP TABLE ml_rating_request_sent;
+      ALTER TABLE ml_rating_request_sent_new RENAME TO ml_rating_request_sent;
+      CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user ON ml_rating_request_sent(ml_user_id);
+      CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user_buyer_sent ON ml_rating_request_sent(ml_user_id, buyer_id, sent_at);
+      CREATE INDEX IF NOT EXISTS idx_ml_rating_request_sent_order ON ml_rating_request_sent(order_id);
+    `);
+    console.log("[db] ml_rating_request_sent: varias filas por order_id (tipo C)");
+  } catch (e) {
+    console.error("[db] migrate ml_rating_request_sent multi-row:", e.message);
   }
 })();
 
@@ -1909,7 +1940,7 @@ function insertMlRatingRequestSent(row) {
   }
   const sentAt = row.sent_at != null ? String(row.sent_at) : new Date().toISOString();
   db.prepare(
-    `INSERT OR IGNORE INTO ml_rating_request_sent (order_id, ml_user_id, buyer_id, sent_at, http_status, error_message)
+    `INSERT INTO ml_rating_request_sent (order_id, ml_user_id, buyer_id, sent_at, http_status, error_message)
      VALUES (?,?,?,?,?,?)`
   ).run(
     oid,
@@ -1942,11 +1973,21 @@ function wasRatingRequestSentToBuyerToday(mlUserId, buyerId, dayStartIso, dayEnd
   return Boolean(r);
 }
 
-function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, dayEndIso, orderStatus) {
+function listMlOrdersEligibleForRatingRequest(
+  mlUserId,
+  sinceIso,
+  dayStartIso,
+  dayEndIso,
+  orderStatus,
+  maxSendsPerOrder
+) {
   const mlUid = Number(mlUserId);
   if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
   const since = sinceIso != null ? String(sinceIso).trim() : "";
   if (!since) return [];
+  const maxRaw = maxSendsPerOrder != null ? Number(maxSendsPerOrder) : 8;
+  const maxSends =
+    Number.isFinite(maxRaw) && maxRaw > 0 ? Math.min(90, Math.floor(maxRaw)) : 8;
   const ds = dayStartIso != null ? String(dayStartIso).trim() : "";
   const de = dayEndIso != null ? String(dayEndIso).trim() : "";
   const filterBuyerDay = ds !== "" && de !== "";
@@ -1957,7 +1998,7 @@ function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, d
     : "";
 
   if (filterBuyerDay) {
-    const params = st ? [mlUid, since, ds, de, st] : [mlUid, since, ds, de];
+    const params = st ? [mlUid, since, maxSends, ds, de, st] : [mlUid, since, maxSends, ds, de];
     return db
       .prepare(
         `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
@@ -1966,7 +2007,7 @@ function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, d
            AND o.date_created >= ?
            AND o.buyer_id IS NOT NULL
            AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
-           AND NOT EXISTS (SELECT 1 FROM ml_rating_request_sent r WHERE r.order_id = o.order_id)
+           AND (SELECT COUNT(*) FROM ml_rating_request_sent r WHERE r.order_id = o.order_id) < ?
            AND NOT EXISTS (
              SELECT 1 FROM ml_rating_request_sent r
              WHERE r.ml_user_id = o.ml_user_id
@@ -2002,7 +2043,7 @@ function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, d
       .all(...params);
   }
 
-  const paramsSimple = st ? [mlUid, since, st] : [mlUid, since];
+  const paramsSimple = st ? [mlUid, since, maxSends, st] : [mlUid, since, maxSends];
   return db
     .prepare(
       `SELECT o.id, o.ml_user_id, o.order_id, o.buyer_id, o.status, o.date_created
@@ -2011,7 +2052,7 @@ function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, d
          AND o.date_created >= ?
          AND o.buyer_id IS NOT NULL
          AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
-         AND NOT EXISTS (SELECT 1 FROM ml_rating_request_sent r WHERE r.order_id = o.order_id)
+         AND (SELECT COUNT(*) FROM ml_rating_request_sent r WHERE r.order_id = o.order_id) < ?
          AND (
            EXISTS (
              SELECT 1 FROM ml_order_feedback f

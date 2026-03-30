@@ -1,5 +1,7 @@
 /**
- * Envío automático del texto de post_sale_messages vía API ML.
+ * MENSAJE TIPO A (`MESSAGE_TYPE_A` en ml-message-types.js): post-venta automático al recibir la orden.
+ *
+ * Envío del texto de post_sale_messages vía API ML.
  * POST .../messages/packs/{order_id}/sellers/{seller_id}?application_id=...&tag=post_sale
  * Body: from.user_id = vendedor, to.user_id = comprador (buyer_id).
  *

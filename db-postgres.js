@@ -166,13 +166,15 @@ async function runSchemaAndSeed() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_post_sale_steps_order ON ml_post_sale_steps_sent(order_id)`,
     `CREATE TABLE IF NOT EXISTS ml_rating_request_sent (
-      order_id BIGINT PRIMARY KEY,
+      id BIGSERIAL PRIMARY KEY,
+      order_id BIGINT NOT NULL,
       ml_user_id BIGINT NOT NULL,
       buyer_id BIGINT,
       sent_at TEXT NOT NULL,
       http_status INTEGER,
       error_message TEXT
     )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_sent_order ON ml_rating_request_sent(order_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user ON ml_rating_request_sent(ml_user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_user_buyer_sent ON ml_rating_request_sent(ml_user_id, buyer_id, sent_at)`,
     `CREATE TABLE IF NOT EXISTS ml_rating_request_log (
@@ -472,6 +474,7 @@ async function runSchemaAndSeed() {
   await migrateMlOrdersExtraColumns();
   await migrateMlOrdersFeedbackPurchaseValue();
   await migrateMlRatingRequestSentBuyerId();
+  await migrateMlRatingRequestSentMultiRow();
 }
 
 async function migrateMlOrdersFeedbackPurchaseValue() {
@@ -516,6 +519,30 @@ async function migrateMlRatingRequestSentBuyerId() {
     `);
   } catch (e) {
     console.error("[db] migrate ml_rating_request_sent buyer_id:", e.message);
+  }
+}
+
+/** Mensaje tipo C: varias filas por order_id (hasta N días de recordatorio). */
+async function migrateMlRatingRequestSentMultiRow() {
+  try {
+    const { rows: col } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_rating_request_sent' AND column_name = 'id'`
+    );
+    if (col.length > 0) {
+      await pool.query(
+        `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_sent_order ON ml_rating_request_sent(order_id)`
+      );
+      return;
+    }
+    await pool.query(`ALTER TABLE ml_rating_request_sent DROP CONSTRAINT IF EXISTS ml_rating_request_sent_pkey`);
+    await pool.query(`ALTER TABLE ml_rating_request_sent ADD COLUMN id BIGSERIAL PRIMARY KEY`);
+    await pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_ml_rating_request_sent_order ON ml_rating_request_sent(order_id)`
+    );
+    console.log("[db] ml_rating_request_sent: varias filas por order_id (tipo C, hasta N envíos por orden)");
+  } catch (e) {
+    console.error("[db] migrate ml_rating_request_sent multi-row:", e.message);
   }
 }
 
@@ -2311,8 +2338,7 @@ async function insertMlRatingRequestSent(row) {
   const sentAt = row.sent_at != null ? String(row.sent_at) : new Date().toISOString();
   await pool.query(
     `INSERT INTO ml_rating_request_sent (order_id, ml_user_id, buyer_id, sent_at, http_status, error_message)
-     VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (order_id) DO NOTHING`,
+     VALUES ($1,$2,$3,$4,$5,$6)`,
     [
       oid,
       mlUid,
@@ -2359,13 +2385,25 @@ async function wasRatingRequestSentToBuyerToday(mlUserId, buyerId, dayStartIso, 
  * @param {string} [dayStartIso] - inicio del día UTC (incl.) para no repetir comprador
  * @param {string} [dayEndIso] - fin del día UTC (excl.)
  * @param {string|null} [orderStatus] - si se pasa (ej. "confirmed"), solo órdenes con ese status en ml_orders (comparación case-insensitive)
+ * @param {number} [maxSendsPerOrder=8] - tope de envíos tipo C por orden (uno por día cuando corre el job)
  */
-async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStartIso, dayEndIso, orderStatus) {
+async function listMlOrdersEligibleForRatingRequest(
+  mlUserId,
+  sinceIso,
+  dayStartIso,
+  dayEndIso,
+  orderStatus,
+  maxSendsPerOrder
+) {
   await ensureSchema();
   const mlUid = Number(mlUserId);
   if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
   const since = sinceIso != null ? String(sinceIso).trim() : "";
   if (!since) return [];
+
+  const maxRaw = maxSendsPerOrder != null ? Number(maxSendsPerOrder) : 8;
+  const maxSends =
+    Number.isFinite(maxRaw) && maxRaw > 0 ? Math.min(90, Math.floor(maxRaw)) : 8;
 
   const ds = dayStartIso != null ? String(dayStartIso).trim() : "";
   const de = dayEndIso != null ? String(dayEndIso).trim() : "";
@@ -2384,7 +2422,7 @@ async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStart
        AND o.date_created >= $2
        AND o.buyer_id IS NOT NULL
        AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
-       AND NOT EXISTS (SELECT 1 FROM ml_rating_request_sent r WHERE r.order_id = o.order_id)
+       AND (SELECT COUNT(*)::int FROM ml_rating_request_sent r WHERE r.order_id = o.order_id) < $6
        AND NOT EXISTS (
          SELECT 1 FROM ml_rating_request_sent r
          WHERE r.ml_user_id = o.ml_user_id
@@ -2422,7 +2460,7 @@ async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStart
        AND o.date_created >= $2
        AND o.buyer_id IS NOT NULL
        AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
-       AND NOT EXISTS (SELECT 1 FROM ml_rating_request_sent r WHERE r.order_id = o.order_id)
+       AND (SELECT COUNT(*)::int FROM ml_rating_request_sent r WHERE r.order_id = o.order_id) < $4
        AND (
          EXISTS (
            SELECT 1 FROM ml_order_feedback f
@@ -2448,7 +2486,9 @@ async function listMlOrdersEligibleForRatingRequest(mlUserId, sinceIso, dayStart
        )${statusClause}
      ORDER BY o.date_created DESC NULLS LAST, o.id DESC`;
 
-  const params = filterBuyerDay ? [mlUid, since, ds, de, st] : [mlUid, since, st];
+  const params = filterBuyerDay
+    ? [mlUid, since, ds, de, st, maxSends]
+    : [mlUid, since, st, maxSends];
   const { rows } = await pool.query(sql, params);
   return rows;
 }

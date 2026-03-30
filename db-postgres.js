@@ -1251,6 +1251,60 @@ async function markPostSaleStepSent(orderId, stepIndex) {
   );
 }
 
+/**
+ * Reserva atómica del paso antes del POST a ML: solo un proceso puede “ganar” por (order_id, step_index).
+ * Si ya había fila (envío previo OK o carrera), devuelve false y no se debe enviar.
+ * Si el POST falla, llamar releasePostSaleStepClaim para permitir reintento.
+ */
+async function tryClaimPostSaleStepForSend(orderId, stepIndex) {
+  await ensureSchema();
+  const id = Number(orderId);
+  const si = Number(stepIndex);
+  if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(si) || si < 0) return false;
+  const now = new Date().toISOString();
+  const { rows } = await pool.query(
+    `INSERT INTO ml_post_sale_steps_sent (order_id, step_index, sent_at) VALUES ($1, $2, $3)
+     ON CONFLICT (order_id, step_index) DO NOTHING
+     RETURNING order_id`,
+    [id, si, now]
+  );
+  return rows.length > 0;
+}
+
+async function releasePostSaleStepClaim(orderId, stepIndex) {
+  await ensureSchema();
+  const id = Number(orderId);
+  const si = Number(stepIndex);
+  if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(si) || si < 0) return;
+  await pool.query(`DELETE FROM ml_post_sale_steps_sent WHERE order_id = $1 AND step_index = $2`, [id, si]);
+}
+
+/**
+ * Si ya consta un envío exitoso de este paso en el día civil (tz), no reenviar el mismo mensaje ese día
+ * (p. ej. fila en steps_sent borrada pero log conservado, o inconsistencia).
+ */
+async function hasPostSaleSuccessForStepToday(orderId, stepIndex, tz) {
+  await ensureSchema();
+  const id = Number(orderId);
+  const si = Number(stepIndex);
+  if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(si) || si < 0) return false;
+  const zone =
+    tz != null && String(tz).trim() !== "" ? String(tz).trim() : "America/Caracas";
+  const skipReason = `message_step=${si}`;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM ml_post_sale_auto_send_log
+     WHERE order_id = $1
+       AND outcome = 'success'
+       AND skip_reason = $2
+       AND topic = 'orders_v2'
+       AND DATE(timezone($3::text, (created_at)::timestamptz))
+         = DATE(timezone($3::text, CURRENT_TIMESTAMP))
+     LIMIT 1`,
+    [id, skipReason, zone]
+  );
+  return rows.length > 0;
+}
+
 async function markPostSaleSent(orderId) {
   await ensureSchema();
   const id = Number(orderId);
@@ -2818,6 +2872,9 @@ module.exports = {
   wasPostSaleSent,
   isPostSaleStepSent,
   markPostSaleStepSent,
+  tryClaimPostSaleStepForSend,
+  releasePostSaleStepClaim,
+  hasPostSaleSuccessForStepToday,
   markPostSaleSent,
   deletePostSaleSent,
   insertPostSaleAutoSendLog,

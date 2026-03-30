@@ -5,6 +5,7 @@
  *
  * Varias plantillas: filas en post_sale_messages ordenadas por id (1.º = principal, 2.º y 3.º opcionales).
  * ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (por defecto 1). ML_POST_SALE_EXTRA_DELAY_MS entre envíos (default 1500).
+ * Antiduplicado: cola por order_id + reserva atómica en BD (tryClaim) + log de éxito el mismo día (zona ML_AUTO_MESSAGE_TIMEZONE).
  * Placeholders en el texto: {{order_id}}, {{buyer_id}}, {{seller_id}}, {{ml_user_id}}
  */
 const { mercadoLibrePostJsonForUser, mercadoLibreFetchForUser } = require("./oauth-token");
@@ -20,9 +21,12 @@ const {
   markPostSaleSent,
   markPostSaleStepSent,
   isPostSaleStepSent,
+  tryClaimPostSaleStepForSend,
+  releasePostSaleStepClaim,
+  hasPostSaleSuccessForStepToday,
   insertPostSaleAutoSendLog,
 } = require("./db");
-const { getAutoMessageBudgetForBuyerToday } = require("./ml-auto-message-cap");
+const { getAutoMessageBudgetForBuyerToday, getMlAutoMessageTimezone } = require("./ml-auto-message-cap");
 
 const MAX_OTHER = Number(process.env.ML_POST_SALE_MAX_CHARS || 350);
 
@@ -65,6 +69,20 @@ async function logAutoSend(row) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Evita condición de carrera: ML envía varias notificaciones por la misma orden; en paralelo ambas pasaban wasPostSaleSent antes del INSERT en ml_post_sale_steps_sent. */
+const postSaleSerialChains = new Map();
+function runPostSaleSerializedForOrder(orderId, fn) {
+  const key = String(orderId);
+  const prev = postSaleSerialChains.get(key) || Promise.resolve();
+  const current = prev.then(() => fn());
+  postSaleSerialChains.set(key, current);
+  return current.finally(() => {
+    if (postSaleSerialChains.get(key) === current) {
+      postSaleSerialChains.delete(key);
+    }
+  });
 }
 
 /**
@@ -206,175 +224,197 @@ async function trySendDefaultPostSaleMessage(args) {
     return { skipped: true, reason: "no_order_id" };
   }
 
-  if (topic === "orders_v2" || String(topic).startsWith("orders")) {
-    const enriched = await ensureOrderPayloadForPostSale(args.mlUserId, orderId, payload);
-    if (enriched) payload = enriched;
-  }
-
-  const buyerId = extractBuyerIdForPostSale(payload, args.mlUserId);
-  if (!buyerId) {
-    await logAutoSend({
-      ...base,
-      order_id: orderId,
-      outcome: "skipped",
-      skip_reason: "no_buyer_id",
-    });
-    return { skipped: true, reason: "no_buyer_id", order_id: orderId };
-  }
-
-  const { totalSteps, bodies } = await computePostSaleBodiesAndSteps();
-  if (totalSteps === 0) {
-    await logAutoSend({
-      ...base,
-      order_id: orderId,
-      outcome: "skipped",
-      skip_reason: "no_template",
-    });
-    return { skipped: true, reason: "no_template" };
-  }
-
-  /** Solo pruebas: sin deduplicación ni marcas en BD; puede repetir envíos al comprador. */
-  const disableDedup = process.env.ML_POST_SALE_DISABLE_DEDUP === "1";
-  if (disableDedup && !warnedDisableDedupOnce) {
-    warnedDisableDedupOnce = true;
-    console.warn(
-      "[post-sale] ML_POST_SALE_DISABLE_DEDUP=1: deduplicación desactivada (no se usa ml_post_sale_sent/steps_sent)."
-    );
-  }
-
-  if (!disableDedup && (await wasPostSaleSent(orderId, totalSteps))) {
-    return { skipped: true, reason: "already_sent", order_id: orderId };
-  }
-
-  let remainingAuto = await getAutoMessageBudgetForBuyerToday(args.mlUserId, buyerId);
-  if (remainingAuto <= 0) {
-    await logAutoSend({
-      ...base,
-      order_id: orderId,
-      outcome: "skipped",
-      skip_reason: "auto_message_cap_day",
-    });
-    return { skipped: true, reason: "auto_message_cap_day", order_id: orderId };
-  }
-
-  const optionId = (process.env.ML_POST_SALE_OPTION_ID || "OTHER").trim();
-  if (optionId !== "OTHER" && optionId !== "SEND_INVOICE_LINK") {
-    console.error(
-      "[post-sale] ML_POST_SALE_OPTION_ID debe ser OTHER o SEND_INVOICE_LINK para texto de plantilla"
-    );
-    await logAutoSend({
-      ...base,
-      order_id: orderId,
-      outcome: "skipped",
-      skip_reason: "bad_option",
-      option_id: optionId,
-    });
-    return { skipped: true, reason: "bad_option" };
-  }
-
-  const appId = String(
-    process.env.ML_APPLICATION_ID || process.env.OAUTH_CLIENT_ID || "1837222235616049"
-  ).trim();
-  const q = new URLSearchParams({
-    application_id: appId,
-    tag: "post_sale",
-  });
-  const path = `/messages/packs/${orderId}/sellers/${args.mlUserId}?${q.toString()}`;
-  const delayMs = Math.max(0, Number(process.env.ML_POST_SALE_EXTRA_DELAY_MS) || 1500);
-  const ctx = { orderId, buyerId, sellerId: args.mlUserId };
-
-  let lastResult = { ok: false, status: 0, order_id: orderId, data: null };
-  let stoppedByAutoCap = false;
-
-  for (let step = 0; step < totalSteps; step++) {
-    if (remainingAuto <= 0) {
-      stoppedByAutoCap = true;
-      break;
-    }
-    if (!disableDedup && (await isPostSaleStepSent(orderId, step))) {
-      continue;
-    }
-    if (step > 0) {
-      await sleep(delayMs);
+  return runPostSaleSerializedForOrder(orderId, async () => {
+    if (topic === "orders_v2" || String(topic).startsWith("orders")) {
+      const enriched = await ensureOrderPayloadForPostSale(args.mlUserId, orderId, payload);
+      if (enriched) payload = enriched;
     }
 
-    let text = applyPostSalePlaceholders(bodies[step], ctx);
-    text = String(text).trim();
-    if (text.length > MAX_OTHER) {
+    const buyerId = extractBuyerIdForPostSale(payload, args.mlUserId);
+    if (!buyerId) {
+      await logAutoSend({
+        ...base,
+        order_id: orderId,
+        outcome: "skipped",
+        skip_reason: "no_buyer_id",
+      });
+      return { skipped: true, reason: "no_buyer_id", order_id: orderId };
+    }
+
+    const { totalSteps, bodies } = await computePostSaleBodiesAndSteps();
+    if (totalSteps === 0) {
+      await logAutoSend({
+        ...base,
+        order_id: orderId,
+        outcome: "skipped",
+        skip_reason: "no_template",
+      });
+      return { skipped: true, reason: "no_template" };
+    }
+
+    /** Solo pruebas: sin deduplicación ni marcas en BD; puede repetir envíos al comprador. */
+    const disableDedup = process.env.ML_POST_SALE_DISABLE_DEDUP === "1";
+    if (disableDedup && !warnedDisableDedupOnce) {
+      warnedDisableDedupOnce = true;
       console.warn(
-        `[post-sale] paso ${step} (${text.length} chars) truncado a ${MAX_OTHER} (límite API ML).`
+        "[post-sale] ML_POST_SALE_DISABLE_DEDUP=1: deduplicación desactivada (no se usa ml_post_sale_sent/steps_sent)."
       );
-      text = text.slice(0, MAX_OTHER);
     }
 
-    const result = await mercadoLibrePostJsonForUser(args.mlUserId, path, {
-      from: { user_id: args.mlUserId },
-      to: { user_id: buyerId },
-      option_id: optionId,
-      text,
-    });
+    if (!disableDedup && (await wasPostSaleSent(orderId, totalSteps))) {
+      return { skipped: true, reason: "already_sent", order_id: orderId };
+    }
 
-    lastResult = { ok: result.ok, status: result.status, order_id: orderId, data: result.data };
-
-    if (result.ok) {
-      if (!disableDedup) {
-        await markPostSaleStepSent(orderId, step);
-      }
-      remainingAuto--;
-      console.log("[post-sale] enviado order_id=%s step=%s option=%s", orderId, step, optionId);
-      const resp =
-        result.data != null
-          ? typeof result.data === "string"
-            ? result.data
-            : JSON.stringify(result.data)
-          : null;
+    let remainingAuto = await getAutoMessageBudgetForBuyerToday(args.mlUserId, buyerId);
+    if (remainingAuto <= 0) {
       await logAutoSend({
         ...base,
         order_id: orderId,
-        outcome: "success",
-        http_status: result.status,
-        option_id: optionId,
-        request_path: result.path,
-        response_body: resp,
-        skip_reason: `message_step=${step}`,
+        outcome: "skipped",
+        skip_reason: "auto_message_cap_day",
       });
-    } else {
-      const mlCause = mercadoLibreErrorCause(result.data);
-      const mlMsg = mercadoLibreErrorMessage(result.data);
-      const preview = (result.rawText || "").slice(0, 400);
+      return { skipped: true, reason: "auto_message_cap_day", order_id: orderId };
+    }
+
+    const optionId = (process.env.ML_POST_SALE_OPTION_ID || "OTHER").trim();
+    if (optionId !== "OTHER" && optionId !== "SEND_INVOICE_LINK") {
       console.error(
-        "[post-sale] fallo HTTP %s order_id=%s step=%s%s: %s",
-        result.status,
-        orderId,
-        step,
-        mlCause ? ` cause=${mlCause}` : "",
-        preview
+        "[post-sale] ML_POST_SALE_OPTION_ID debe ser OTHER o SEND_INVOICE_LINK para texto de plantilla"
       );
-      const errMsg =
-        mlCause != null
-          ? `HTTP ${result.status} · ${mlCause}`
-          : mlMsg != null
-            ? `HTTP ${result.status} · ${mlMsg}`
-            : `HTTP ${result.status}`;
       await logAutoSend({
         ...base,
         order_id: orderId,
-        outcome: "api_error",
-        skip_reason: `message_step=${step}`,
-        http_status: result.status,
+        outcome: "skipped",
+        skip_reason: "bad_option",
         option_id: optionId,
-        request_path: result.path,
-        response_body: result.rawText ? String(result.rawText).slice(0, 8000) : null,
-        error_message: errMsg,
       });
-      return { ok: false, status: result.status, order_id: orderId, data: result.data, step };
+      return { skipped: true, reason: "bad_option" };
     }
-  }
 
-  if (!disableDedup && !stoppedByAutoCap) {
-    await markPostSaleSent(orderId);
-  }
-  return lastResult;
+    const appId = String(
+      process.env.ML_APPLICATION_ID || process.env.OAUTH_CLIENT_ID || "1837222235616049"
+    ).trim();
+    const q = new URLSearchParams({
+      application_id: appId,
+      tag: "post_sale",
+    });
+    const path = `/messages/packs/${orderId}/sellers/${args.mlUserId}?${q.toString()}`;
+    const delayMs = Math.max(0, Number(process.env.ML_POST_SALE_EXTRA_DELAY_MS) || 1500);
+    const ctx = { orderId, buyerId, sellerId: args.mlUserId };
+    const capTz = getMlAutoMessageTimezone();
+
+    let lastResult = { ok: false, status: 0, order_id: orderId, data: null };
+    let stoppedByAutoCap = false;
+
+    for (let step = 0; step < totalSteps; step++) {
+      if (remainingAuto <= 0) {
+        stoppedByAutoCap = true;
+        break;
+      }
+      if (!disableDedup && (await hasPostSaleSuccessForStepToday(orderId, step, capTz))) {
+        await logAutoSend({
+          ...base,
+          order_id: orderId,
+          outcome: "skipped",
+          skip_reason: `post_sale_same_day_log_step=${step}`,
+        });
+        continue;
+      }
+      if (disableDedup) {
+        if (await isPostSaleStepSent(orderId, step)) {
+          continue;
+        }
+      } else {
+        const claimed = await tryClaimPostSaleStepForSend(orderId, step);
+        if (!claimed) {
+          continue;
+        }
+      }
+      if (step > 0) {
+        await sleep(delayMs);
+      }
+
+      let text = applyPostSalePlaceholders(bodies[step], ctx);
+      text = String(text).trim();
+      if (text.length > MAX_OTHER) {
+        console.warn(
+          `[post-sale] paso ${step} (${text.length} chars) truncado a ${MAX_OTHER} (límite API ML).`
+        );
+        text = text.slice(0, MAX_OTHER);
+      }
+
+      const result = await mercadoLibrePostJsonForUser(args.mlUserId, path, {
+        from: { user_id: args.mlUserId },
+        to: { user_id: buyerId },
+        option_id: optionId,
+        text,
+      });
+
+      lastResult = { ok: result.ok, status: result.status, order_id: orderId, data: result.data };
+
+      if (result.ok) {
+        if (disableDedup) {
+          await markPostSaleStepSent(orderId, step);
+        }
+        remainingAuto--;
+        console.log("[post-sale] enviado order_id=%s step=%s option=%s", orderId, step, optionId);
+        const resp =
+          result.data != null
+            ? typeof result.data === "string"
+              ? result.data
+              : JSON.stringify(result.data)
+            : null;
+        await logAutoSend({
+          ...base,
+          order_id: orderId,
+          outcome: "success",
+          http_status: result.status,
+          option_id: optionId,
+          request_path: result.path,
+          response_body: resp,
+          skip_reason: `message_step=${step}`,
+        });
+      } else {
+        const mlCause = mercadoLibreErrorCause(result.data);
+        const mlMsg = mercadoLibreErrorMessage(result.data);
+        const preview = (result.rawText || "").slice(0, 400);
+        console.error(
+          "[post-sale] fallo HTTP %s order_id=%s step=%s%s: %s",
+          result.status,
+          orderId,
+          step,
+          mlCause ? ` cause=${mlCause}` : "",
+          preview
+        );
+        const errMsg =
+          mlCause != null
+            ? `HTTP ${result.status} · ${mlCause}`
+            : mlMsg != null
+              ? `HTTP ${result.status} · ${mlMsg}`
+              : `HTTP ${result.status}`;
+        if (!disableDedup) {
+          await releasePostSaleStepClaim(orderId, step);
+        }
+        await logAutoSend({
+          ...base,
+          order_id: orderId,
+          outcome: "api_error",
+          skip_reason: `message_step=${step}`,
+          http_status: result.status,
+          option_id: optionId,
+          request_path: result.path,
+          response_body: result.rawText ? String(result.rawText).slice(0, 8000) : null,
+          error_message: errMsg,
+        });
+        return { ok: false, status: result.status, order_id: orderId, data: result.data, step };
+      }
+    }
+
+    if (!disableDedup && !stoppedByAutoCap) {
+      await markPostSaleSent(orderId);
+    }
+    return lastResult;
+  });
 }
 
 module.exports = { trySendDefaultPostSaleMessage, MAX_OTHER, applyPostSalePlaceholders };

@@ -10,7 +10,8 @@
  * - Datos técnicos variables (medidas, dientes, material, snapshot de attributes ML): **`atributos` JSONB**.
  * - **`cod_producto`** / **`marca_producto`**: pieza y marca (alias JSON `Cod_producto` / `Marca_producto`; `cod_marca_proveedor` se migra a `cod_producto`).
  * - **`aplicacion_extendida`**, **`ubicacion`**: compatibilidades y ubicación en almacén.
- * - **`urls` JSONB**: enlaces en la misma fila (`ml`, `web`, etc.). Tabla hija solo si hace falta historial o muchas URLs por fuente.
+ * - **`urls` JSONB**: enlaces extra (`ml`, `web`, etc.).
+ * - **`imagenes_cantidad`** (0–9): cuántas imágenes hay para el SKU; las URLs se arman con env **`PRODUCT_IMAGE_BASE_URL`** (no uses DATABASE_URL) y **`PRODUCT_IMAGE_EXT`** (p. ej. `.webp`): `{base}/{sku}_{n}.ext`. La API añade **`imagenes_urls`** en JSON.
  *
  * @example
  * const { insertProducto, upsertProductoBySku, listProductos } = require("./db");
@@ -24,6 +25,7 @@
  *   stock: 10,
  *   precio_usd: 25.5,
  *   oem: "ABC123",
+ *   imagenes_cantidad: 3,
  *   urls: { ml: "https://articulo.mercadolibre.com.ve/MLV-123" },
  *   atributos: { material: "cerámica", ml: { category_id: "MLV45777" } },
  *   item_id_ml: "MLV1234567890",
@@ -31,6 +33,7 @@
  */
 
 const db = require("./db");
+const img = require("./producto-imagenes-urls");
 
 module.exports = {
   insertProducto: db.insertProducto,
@@ -43,4 +46,6 @@ module.exports = {
   deleteProducto: db.deleteProducto,
   normalizeProductoAtributosJson: db.normalizeProductoAtributosJson,
   normalizeProductoUrlsJson: db.normalizeProductoUrlsJson,
+  buildProductoImagenesUrls: img.buildProductoImagenesUrls,
+  enrichProductoConImagenesUrls: img.enrichProductoConImagenesUrls,
 };

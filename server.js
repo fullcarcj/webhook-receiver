@@ -157,6 +157,7 @@ const {
   deleteProducto,
   dbPath,
 } = require("./db");
+const { enrichProductoConImagenesUrls, buildProductoImagenesUrls } = require("./producto-imagenes-urls");
 
 const PORT = process.env.PORT || 3001;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
@@ -1222,7 +1223,7 @@ const server = http.createServer(async (req, res) => {
         buyers_ml:
           "GET /buyers?k=ADMIN_SECRET (ml_buyers: nombre_apellido, pref_entrega, observaciones texto libre, actualizacion ISO). POST/PUT JSON buyer_id + campos opcionales (cabecera X-Admin-Secret alternativa)",
         inventario_productos:
-          "GET|POST|PUT|DELETE /inventario-productos?k=ADMIN_SECRET — productos (cod_producto, marca_producto, aplicacion_extendida, ubicacion, urls JSONB, atributos JSONB, item_id_ml). Ver productos-inventario.js",
+          "GET|POST|PUT|DELETE /inventario-productos?k=ADMIN_SECRET — productos (imagenes_cantidad 0–9 + PRODUCT_IMAGE_BASE_URL → imagenes_urls; urls JSONB; item_id_ml). Ver productos-inventario.js",
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         mensajes_whatsapp_tipo_e:
@@ -2157,7 +2158,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const row = upsert ? await upsertProductoBySku(body) : await insertProducto(body);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: true, producto: row }));
+        res.end(JSON.stringify({ ok: true, producto: enrichProductoConImagenesUrls(row) }));
       } catch (e) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
@@ -2198,7 +2199,7 @@ const server = http.createServer(async (req, res) => {
           return;
         }
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: true, producto: row }));
+        res.end(JSON.stringify({ ok: true, producto: enrichProductoConImagenesUrls(row) }));
       } catch (e) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
@@ -2266,7 +2267,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.searchParams.get("format") === "json") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, total: totalEnTabla, count: rows.length, items: rows }));
+      res.end(
+        JSON.stringify({
+          ok: true,
+          total: totalEnTabla,
+          count: rows.length,
+          items: rows.map((r) => enrichProductoConImagenesUrls(r)),
+        })
+      );
       return;
     }
     const prodRows = rows
@@ -2295,6 +2303,12 @@ const server = http.createServer(async (req, res) => {
                   : String(r.aplicacion_extendida)
               )
             : "—";
+        const imgN = r.imagenes_cantidad != null ? Number(r.imagenes_cantidad) : 0;
+        const imgUrls = buildProductoImagenesUrls(r.sku, imgN);
+        const imgCell =
+          imgUrls.length > 0
+            ? `${escapeHtml(String(imgN))} · <a href="${escapeAttr(imgUrls[0])}" target="_blank" rel="noopener noreferrer" class="muted">1ª</a>`
+            : escapeHtml(String(imgN));
         return `<tr>
   <td>${escapeHtml(r.id)}</td>
   <td>${escapeHtml(r.sku)}</td>
@@ -2304,6 +2318,7 @@ const server = http.createServer(async (req, res) => {
   <td class="muted" style="max-width:220px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(r.descripcion)}</td>
   <td class="muted" style="max-width:200px;font-size:0.78rem;white-space:pre-wrap;word-break:break-word;">${appExt}</td>
   <td>${escapeHtml(r.ubicacion)}</td>
+  <td class="muted" style="font-size:0.72rem;">${imgCell}</td>
   <td>${escapeHtml(r.stock)}</td>
   <td>${escapeHtml(r.precio_usd)}</td>
   <td>${escapeHtml(r.oem)}</td>
@@ -2338,10 +2353,10 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Inventario (productos)</h1>
-  <p class="lead"><strong>${totalEnTabla}</strong> en tabla · mostrando <strong>${rows.length}</strong>. Campos: <code>cod_producto</code>, <code>marca_producto</code>, <code>aplicacion_extendida</code>, <code>ubicacion</code>, <code>urls</code> (JSON: ml, web, catálogo, etc.). ML: <code>item_id_ml</code> = id publicación. JSON: <code>?format=json</code>. POST o <code>?upsert=1</code>. PUT <code>id</code> + campos. DELETE <code>?id=</code>.</p>
+  <p class="lead"><strong>${totalEnTabla}</strong> en tabla · mostrando <strong>${rows.length}</strong>. Imágenes: <code>imagenes_cantidad</code> (0–9) + env <code>PRODUCT_IMAGE_BASE_URL</code> → <code>{base}/{sku}_{1..n}.webp</code>. <code>urls</code> JSON opcional (ml, web). ML: <code>item_id_ml</code>. JSON: <code>?format=json</code> incluye <code>imagenes_urls</code>. POST / PUT / upsert.</p>
   <table>
-    <thead><tr><th>id</th><th>sku</th><th>cod_producto</th><th>marca_producto</th><th>proveedor</th><th>descripcion</th><th>aplicacion_extendida</th><th>ubicacion</th><th>stock</th><th>precio_usd</th><th>oem</th><th>ref_1</th><th>ref_2</th><th>ref_3</th><th>atributos</th><th>urls</th><th>item_id_ml</th><th>created_at</th><th>updated_at</th></tr></thead>
-    <tbody>${prodRows || '<tr><td colspan="19">Sin registros.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>sku</th><th>cod_producto</th><th>marca_producto</th><th>proveedor</th><th>descripcion</th><th>aplicacion_extendida</th><th>ubicacion</th><th>imagenes</th><th>stock</th><th>precio_usd</th><th>oem</th><th>ref_1</th><th>ref_2</th><th>ref_3</th><th>atributos</th><th>urls</th><th>item_id_ml</th><th>created_at</th><th>updated_at</th></tr></thead>
+    <tbody>${prodRows || '<tr><td colspan="20">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

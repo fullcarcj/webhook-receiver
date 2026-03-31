@@ -555,12 +555,14 @@ async function runSchemaAndSeed() {
       ubicacion TEXT,
       atributos JSONB NOT NULL DEFAULT '{}'::jsonb,
       urls JSONB NOT NULL DEFAULT '{}'::jsonb,
+      imagenes_cantidad SMALLINT NOT NULL DEFAULT 0,
       item_id_ml TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       CONSTRAINT uq_productos_sku UNIQUE (sku),
       CONSTRAINT chk_productos_stock CHECK (stock >= 0),
-      CONSTRAINT chk_productos_precio CHECK (precio_usd IS NULL OR precio_usd >= 0)
+      CONSTRAINT chk_productos_precio CHECK (precio_usd IS NULL OR precio_usd >= 0),
+      CONSTRAINT chk_productos_imagenes_cantidad CHECK (imagenes_cantidad >= 0 AND imagenes_cantidad <= 9)
     )`,
     `CREATE INDEX IF NOT EXISTS idx_productos_oem ON productos (oem) WHERE oem IS NOT NULL`,
     `CREATE INDEX IF NOT EXISTS idx_productos_ref_1 ON productos (ref_1) WHERE ref_1 IS NOT NULL`,
@@ -615,6 +617,7 @@ async function runSchemaAndSeed() {
   await migrateMlWhatsappTipoFConfig();
   await migrateProductosUpdatedAtTrigger();
   await migrateProductosSolomotorColumns();
+  await migrateProductosImagenesCantidad();
 }
 
 /**
@@ -644,6 +647,27 @@ async function migrateProductosSolomotorColumns() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_productos_urls_gin ON productos USING GIN (urls)`);
   } catch (e) {
     console.error("[db] migrate productos solomotor columns:", e.message);
+  }
+}
+
+/** Columna imagenes_cantidad (0–9): cuántas imágenes `{PRODUCT_IMAGE_BASE_URL}/{sku}_{n}.webp`. */
+async function migrateProductosImagenesCantidad() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'productos'`
+    );
+    if (rows.length === 0) return;
+    await pool.query(
+      `ALTER TABLE productos ADD COLUMN IF NOT EXISTS imagenes_cantidad SMALLINT NOT NULL DEFAULT 0`
+    );
+    await pool.query(`ALTER TABLE productos DROP CONSTRAINT IF EXISTS chk_productos_imagenes_cantidad`);
+    await pool.query(
+      `ALTER TABLE productos ADD CONSTRAINT chk_productos_imagenes_cantidad
+       CHECK (imagenes_cantidad >= 0 AND imagenes_cantidad <= 9)`
+    );
+  } catch (e) {
+    console.error("[db] migrate productos imagenes_cantidad:", e.message);
   }
 }
 
@@ -2503,17 +2527,26 @@ function patchMarcaProducto(patch, cur) {
   return cur.marca_producto != null ? cur.marca_producto : null;
 }
 
+function parseImagenesCantidad(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(9, Math.max(0, Math.floor(n)));
+}
+
 async function insertProducto(row) {
   await ensureSchema();
   const sku = row.sku != null ? String(row.sku).trim() : "";
   if (!sku) throw new Error("sku obligatorio");
   const atributos = normalizeProductoAtributosJson(row.atributos);
   const urls = normalizeProductoUrlsJson(row.urls);
+  const imagenesCant = parseImagenesCantidad(
+    row.imagenes_cantidad !== undefined ? row.imagenes_cantidad : row.imagenes
+  );
   const { rows } = await pool.query(
     `INSERT INTO productos (
        sku, cod_producto, marca_producto, proveedor, descripcion, stock, precio_usd,
-       oem, ref_1, ref_2, ref_3, aplicacion_extendida, ubicacion, atributos, urls, item_id_ml
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16)
+       oem, ref_1, ref_2, ref_3, aplicacion_extendida, ubicacion, atributos, urls, imagenes_cantidad, item_id_ml
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16, $17)
      RETURNING *`,
     [
       sku.slice(0, 120),
@@ -2531,6 +2564,7 @@ async function insertProducto(row) {
       row.ubicacion != null ? String(row.ubicacion) : null,
       JSON.stringify(atributos),
       JSON.stringify(urls),
+      imagenesCant,
       row.item_id_ml != null ? String(row.item_id_ml).trim().slice(0, 64) : null,
     ]
   );
@@ -2543,11 +2577,14 @@ async function upsertProductoBySku(row) {
   if (!sku) throw new Error("sku obligatorio");
   const atributos = normalizeProductoAtributosJson(row.atributos);
   const urls = normalizeProductoUrlsJson(row.urls);
+  const imagenesCant = parseImagenesCantidad(
+    row.imagenes_cantidad !== undefined ? row.imagenes_cantidad : row.imagenes
+  );
   const { rows } = await pool.query(
     `INSERT INTO productos (
        sku, cod_producto, marca_producto, proveedor, descripcion, stock, precio_usd,
-       oem, ref_1, ref_2, ref_3, aplicacion_extendida, ubicacion, atributos, urls, item_id_ml
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16)
+       oem, ref_1, ref_2, ref_3, aplicacion_extendida, ubicacion, atributos, urls, imagenes_cantidad, item_id_ml
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16, $17)
      ON CONFLICT (sku) DO UPDATE SET
        cod_producto = EXCLUDED.cod_producto,
        marca_producto = EXCLUDED.marca_producto,
@@ -2563,6 +2600,7 @@ async function upsertProductoBySku(row) {
        ubicacion = EXCLUDED.ubicacion,
        atributos = EXCLUDED.atributos,
        urls = EXCLUDED.urls,
+       imagenes_cantidad = EXCLUDED.imagenes_cantidad,
        item_id_ml = EXCLUDED.item_id_ml
      RETURNING *`,
     [
@@ -2581,6 +2619,7 @@ async function upsertProductoBySku(row) {
       row.ubicacion != null ? String(row.ubicacion) : null,
       JSON.stringify(atributos),
       JSON.stringify(urls),
+      imagenesCant,
       row.item_id_ml != null ? String(row.item_id_ml).trim().slice(0, 64) : null,
     ]
   );
@@ -2676,6 +2715,10 @@ async function updateProducto(id, patch) {
       patch.urls !== undefined
         ? normalizeProductoUrlsJson(patch.urls)
         : normalizeProductoUrlsJson(cur.urls),
+    imagenes_cantidad:
+      patch.imagenes_cantidad !== undefined || patch.imagenes !== undefined
+        ? parseImagenesCantidad(patch.imagenes_cantidad !== undefined ? patch.imagenes_cantidad : patch.imagenes)
+        : parseImagenesCantidad(cur.imagenes_cantidad),
     item_id_ml:
       patch.item_id_ml !== undefined
         ? patch.item_id_ml != null
@@ -2687,8 +2730,8 @@ async function updateProducto(id, patch) {
     `UPDATE productos SET
        sku = $1, cod_producto = $2, marca_producto = $3, proveedor = $4, descripcion = $5, stock = $6, precio_usd = $7,
        oem = $8, ref_1 = $9, ref_2 = $10, ref_3 = $11, aplicacion_extendida = $12, ubicacion = $13,
-       atributos = $14::jsonb, urls = $15::jsonb, item_id_ml = $16
-     WHERE id = $17
+       atributos = $14::jsonb, urls = $15::jsonb, imagenes_cantidad = $16, item_id_ml = $17
+     WHERE id = $18
      RETURNING *`,
     [
       next.sku,
@@ -2706,6 +2749,7 @@ async function updateProducto(id, patch) {
       next.ubicacion,
       JSON.stringify(next.atributos),
       JSON.stringify(next.urls),
+      next.imagenes_cantidad,
       next.item_id_ml,
       pid,
     ]

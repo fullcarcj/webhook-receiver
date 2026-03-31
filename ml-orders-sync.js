@@ -1,9 +1,12 @@
 /**
  * Descarga órdenes por cuenta vía GET /orders/search (filtro order.status).
- * Uso: node ml-orders-sync.js [--user=ML_USER_ID] [--all] [--status=paid,cancelled] [--max-pages=N]
+ * Uso: node ml-orders-sync.js [--user=ML_USER_ID] [--all] [--status=paid,cancelled] [--max-pages=N] [--today]
+ * --today: solo órdenes con date_created en el día calendario actual (ML: order.date_created.from/to).
+ *   Zona: ML_ORDERS_SYNC_TZ (def. America/Caracas). Desfase: ML_ORDERS_SYNC_TODAY_OFFSET_MINUTES (def. -240 = UTC-4).
  * En Windows, si `npm run sync-orders -- --all` no pasa el flag, usa: npm run sync-orders-all
  *   o: node ml-orders-sync.js --all   o env ML_ORDERS_SYNC_ALL=1
  * Env: ML_ORDERS_SYNC_STATUSES  ML_ORDERS_SYNC_MAX_PAGES  ML_ORDERS_SYNC_PAGE_DELAY_MS
+ *      ML_ORDERS_SYNC_TODAY=1 equivale a --today
  * Requiere DATABASE_URL, cuenta en ml_accounts y token válido.
  */
 require("./load-env-local");
@@ -24,20 +27,64 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r));
 }
 
+/** YYYY-MM-DD en la zona indicada (p. ej. America/Caracas). */
+function calendarYmdInTimeZone(timeZone) {
+  const tz = timeZone && String(timeZone).trim() ? String(timeZone).trim() : "America/Caracas";
+  return new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date());
+}
+
+/**
+ * ML docs: order.date_created.from / order.date_created.to (ISO con offset).
+ * Usamos el día calendario en ML_ORDERS_SYNC_TZ y el offset en minutos (Venezuela -240).
+ */
+function orderDateCreatedRangeToday(options = {}) {
+  const tz =
+    options.timeZone != null && String(options.timeZone).trim() !== ""
+      ? String(options.timeZone).trim()
+      : process.env.ML_ORDERS_SYNC_TZ && String(process.env.ML_ORDERS_SYNC_TZ).trim() !== ""
+        ? String(process.env.ML_ORDERS_SYNC_TZ).trim()
+        : "America/Caracas";
+  const offsetMinRaw =
+    options.offsetMinutes != null
+      ? Number(options.offsetMinutes)
+      : process.env.ML_ORDERS_SYNC_TODAY_OFFSET_MINUTES != null &&
+          String(process.env.ML_ORDERS_SYNC_TODAY_OFFSET_MINUTES).trim() !== ""
+        ? Number(process.env.ML_ORDERS_SYNC_TODAY_OFFSET_MINUTES)
+        : -240;
+  const offsetMin = Number.isFinite(offsetMinRaw) ? offsetMinRaw : -240;
+  const ymd = calendarYmdInTimeZone(tz);
+  const sign = offsetMin <= 0 ? "-" : "+";
+  const abs = Math.abs(offsetMin);
+  const oh = Math.floor(abs / 60);
+  const om = abs % 60;
+  const offStr = `${sign}${String(oh).padStart(2, "0")}:${String(om).padStart(2, "0")}`;
+  return {
+    from: `${ymd}T00:00:00.000${offStr}`,
+    to: `${ymd}T23:59:59.999${offStr}`,
+    ymd,
+    timeZone: tz,
+  };
+}
+
 /**
  * @param {number} mlUserId - id vendedor (seller en ML = ml_user_id)
  * @param {number} offset
  * @param {number} limit
  * @param {string[]} statuses
  * @param {boolean} [withSort]
+ * @param {{ from: string, to: string } | null} [dateCreatedRange] - order.date_created ML
  */
-function ordersSearchPath(mlUserId, offset, limit, statuses, withSort = true) {
+function ordersSearchPath(mlUserId, offset, limit, statuses, withSort = true, dateCreatedRange = null) {
   const p = new URLSearchParams();
   p.set("seller", String(mlUserId));
   p.set("offset", String(Math.max(0, offset)));
   p.set("limit", String(Math.min(PAGE_LIMIT, Math.max(1, limit))));
   for (const s of statuses) {
     if (s && String(s).trim()) p.append("order.status", String(s).trim());
+  }
+  if (dateCreatedRange && dateCreatedRange.from && dateCreatedRange.to) {
+    p.set("order.date_created.from", String(dateCreatedRange.from));
+    p.set("order.date_created.to", String(dateCreatedRange.to));
   }
   if (withSort) {
     p.set("sort", "date_desc");
@@ -47,7 +94,7 @@ function ordersSearchPath(mlUserId, offset, limit, statuses, withSort = true) {
 
 /**
  * @param {number} mlUserId
- * @param {{ statuses?: string[], maxPages?: number, pageDelayMs?: number }} [options]
+ * @param {{ statuses?: string[], maxPages?: number, pageDelayMs?: number, dateCreatedRange?: { from: string, to: string } | null }} [options]
  */
 async function syncOrdersForMlUser(mlUserId, options = {}) {
   const mlUid = Number(mlUserId);
@@ -73,6 +120,13 @@ async function syncOrdersForMlUser(mlUserId, options = {}) {
       : process.env.ML_ORDERS_SYNC_PAGE_DELAY_MS || 350
   );
 
+  const dateCreatedRange =
+    options.dateCreatedRange != null &&
+    options.dateCreatedRange.from &&
+    options.dateCreatedRange.to
+      ? { from: String(options.dateCreatedRange.from), to: String(options.dateCreatedRange.to) }
+      : null;
+
   let upserted = 0;
   let pages = 0;
   let offset = 0;
@@ -90,7 +144,7 @@ async function syncOrdersForMlUser(mlUserId, options = {}) {
         };
       }
 
-      const path = ordersSearchPath(mlUid, offset, PAGE_LIMIT, statuses, useSort);
+      const path = ordersSearchPath(mlUid, offset, PAGE_LIMIT, statuses, useSort, dateCreatedRange);
       const res = await mercadoLibreFetchForUser(mlUid, path);
 
       if (!res.ok && useSort && res.status === 400) {
@@ -165,11 +219,17 @@ function parseArgs(argv) {
   let maxPages =
     process.env.ML_ORDERS_SYNC_MAX_PAGES != null ? Number(process.env.ML_ORDERS_SYNC_MAX_PAGES) : null;
   let statuses = null;
+  let today =
+    process.env.ML_ORDERS_SYNC_TODAY === "1" ||
+    process.env.ML_ORDERS_SYNC_TODAY === "true" ||
+    process.env.ML_ORDERS_SYNC_TODAY === "yes";
   const cleaned = argv.map((a) => String(a).replace(/^\uFEFF/, "").trim());
   for (const a of cleaned) {
     const lower = a.toLowerCase();
     if (lower === "--all" || lower === "-a" || lower === "/all") {
       all = true;
+    } else if (lower === "--today" || lower === "-t") {
+      today = true;
     } else if (a.startsWith("--user=")) {
       const n = Number(a.slice(7));
       if (Number.isFinite(n) && n > 0) userId = n;
@@ -180,11 +240,11 @@ function parseArgs(argv) {
       statuses = parseStatusesArg(a.slice(9));
     }
   }
-  return { userId, all, maxPages, statuses };
+  return { userId, all, maxPages, statuses, today };
 }
 
 async function main() {
-  const { userId, all, maxPages, statuses } = parseArgs(process.argv.slice(2));
+  const { userId, all, maxPages, statuses, today } = parseArgs(process.argv.slice(2));
 
   if (!process.env.DATABASE_URL || !String(process.env.DATABASE_URL).trim()) {
     console.error("[ml-orders-sync] DATABASE_URL no definida.");
@@ -210,6 +270,15 @@ async function main() {
   const opts = {};
   if (maxPages != null && Number.isFinite(maxPages)) opts.maxPages = maxPages;
   if (statuses != null && statuses.length) opts.statuses = statuses;
+  if (today) {
+    const r = orderDateCreatedRangeToday();
+    opts.dateCreatedRange = { from: r.from, to: r.to };
+    console.log(
+      "[ml-orders-sync] Solo día %s (%s): order.date_created.from / .to",
+      r.ymd,
+      r.timeZone
+    );
+  }
 
   console.log(
     "[ml-orders-sync] Estados: %s",
@@ -245,4 +314,6 @@ if (require.main === module) {
 module.exports = {
   syncOrdersForMlUser,
   ordersSearchPath,
+  orderDateCreatedRangeToday,
+  calendarYmdInTimeZone,
 };

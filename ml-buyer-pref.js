@@ -46,6 +46,20 @@ function normalizeNombreApellido(v) {
 
 const CAMBIO_DATOS_MAX = 4000;
 
+const OBSERVACIONES_MAX = 8000;
+
+/**
+ * Notas operativas en ml_buyers.observaciones (zona delivery, fallos WhatsApp/JID, preferencias, etc.).
+ * @param {unknown} v
+ * @returns {string|null}
+ */
+function normalizeBuyerObservaciones(v) {
+  if (v == null || v === "") return null;
+  const s = String(v).trim();
+  if (s === "") return null;
+  return s.length > OBSERVACIONES_MAX ? s.slice(0, OBSERVACIONES_MAX) : s;
+}
+
 /**
  * Texto libre para ml_buyers.cambio_datos (columna lógica Cambio_datos).
  * @param {unknown} v
@@ -73,5 +87,6 @@ module.exports = {
   normalizeBuyerPrefEntrega,
   normalizeCambioDatos,
   normalizeNombreApellido,
+  normalizeBuyerObservaciones,
   resolvePrefEntregaForUpsert,
 };

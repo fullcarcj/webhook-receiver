@@ -36,6 +36,7 @@ const {
   BUYER_PREF_ENTREGA_VALUES,
   normalizeCambioDatos,
   normalizeNombreApellido,
+  normalizeBuyerObservaciones,
 } = require("./ml-buyer-pref");
 const { fetchVentasDetalleAndStore } = require("./ml-ventas-detalle-fetch");
 const {
@@ -1206,7 +1207,7 @@ const server = http.createServer(async (req, res) => {
         borrar_snapshots_ventas_detalle_ve:
           "DELETE /admin/ventas-detalle-web (cabecera X-Admin-Secret) vacía ml_ventas_detalle_web (GET detalle .ve con cookies)",
         buyers_ml:
-          "GET /buyers?k=ADMIN_SECRET (ml_buyers: nombre_apellido, pref_entrega default Pickup, actualizacion ISO). POST/PUT JSON buyer_id + campos opcionales (cabecera X-Admin-Secret alternativa)",
+          "GET /buyers?k=ADMIN_SECRET (ml_buyers: nombre_apellido, pref_entrega, observaciones texto libre, actualizacion ISO). POST/PUT JSON buyer_id + campos opcionales (cabecera X-Admin-Secret alternativa)",
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         mensajes_whatsapp_tipo_e:
@@ -1263,7 +1264,7 @@ const server = http.createServer(async (req, res) => {
         listing_change_ack:
           "GET|POST /listing-change-ack?k=ADMIN_SECRET — tabla ml_listing_change_ack: marcar ítem procesado (action: activate|add_stock|pause|delete|dismiss). POST JSON { ml_user_id, item_id, action, note?, webhook_log_id? }",
         ordenes_ml:
-          "GET /ordenes-ml?k=ADMIN_SECRET — ml_orders (descarga: npm run sync-orders | npm run sync-orders-all); feedback detalle: npm run sync-order-feedback | sync-order-feedback-all; ?cuenta= ?status= ?format=json; status ML típicos en raíz JSON bajo ordenes_estados_ml",
+          "GET /ordenes-ml?k=ADMIN_SECRET — ml_orders (descarga: npm run sync-orders | sync-orders-all | sync-orders-today-all solo día actual); feedback detalle: npm run sync-order-feedback | sync-order-feedback-all; ?cuenta= ?status= ?format=json; status ML típicos en raíz JSON bajo ordenes_estados_ml",
         mensajes_pack_orden:
           "GET /mensajes-pack-orden?k=ADMIN_SECRET — ml_order_pack_messages (sync: npm run sync-pack-messages); sin ml_user_id: elige cuenta; ?ml_user_id= & opcional &order_id= &limit= ; ?format=json",
         ordenes_estados_ml: ML_ORDER_STATUSES_KNOWN,
@@ -1907,6 +1908,12 @@ const server = http.createServer(async (req, res) => {
           row.cambio_datos = normalizeCambioDatos(body.cambio_datos);
         }
       }
+      if (Object.prototype.hasOwnProperty.call(body, "observaciones")) {
+        row.observaciones =
+          body.observaciones === null || String(body.observaciones).trim() === ""
+            ? null
+            : normalizeBuyerObservaciones(body.observaciones);
+      }
       try {
         await upsertMlBuyer(row);
         if (needPrefClear) await updateMlBuyerPhones(buyerId, { pref_entrega: null });
@@ -1985,6 +1992,13 @@ const server = http.createServer(async (req, res) => {
             ? null
             : normalizeNombreApellido(body.nombre_apellido);
       }
+      if (body.observaciones !== undefined) {
+        if (body.observaciones === null || String(body.observaciones).trim() === "") {
+          patch.observaciones = null;
+        } else {
+          patch.observaciones = normalizeBuyerObservaciones(body.observaciones);
+        }
+      }
       try {
         const buyer = await updateMlBuyerPhones(buyerId, patch);
         if (!buyer) {
@@ -2049,6 +2063,9 @@ const server = http.createServer(async (req, res) => {
           const cdRaw = r.cambio_datos != null ? String(r.cambio_datos) : "";
           const cdShort =
             cdRaw.length > 120 ? `${escapeHtml(cdRaw.slice(0, 120))}…` : escapeHtml(cdRaw);
+          const obsRaw = r.observaciones != null ? String(r.observaciones) : "";
+          const obsShort =
+            obsRaw.length > 160 ? `${escapeHtml(obsRaw.slice(0, 160))}…` : escapeHtml(obsRaw);
           return `<tr>
   <td>${escapeHtml(r.buyer_id)}</td>
   <td>${escapeHtml(r.nickname)}</td>
@@ -2057,6 +2074,7 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.phone_2)}</td>
   <td>${escapeHtml(r.pref_entrega)}</td>
   <td class="muted" style="max-width:280px;white-space:pre-wrap;word-break:break-word;">${cdShort || "—"}</td>
+  <td class="muted" style="max-width:320px;white-space:pre-wrap;word-break:break-word;" title="Notas operativas (delivery, WhatsApp/JID, etc.)">${obsShort || "—"}</td>
   <td class="muted">${escapeHtml(r.actualizacion)}</td>
   <td class="muted">${escapeHtml(r.created_at)}</td>
   <td class="muted">${escapeHtml(r.updated_at)}</td>
@@ -2074,7 +2092,7 @@ const server = http.createServer(async (req, res) => {
     body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
     h1 { font-size: 1.25rem; font-weight: 600; }
     p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
-    table { border-collapse: collapse; width: 100%; max-width: 960px; margin-top: 1rem; font-size: 0.85rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 1280px; margin-top: 1rem; font-size: 0.85rem; }
     th, td { border: 1px solid #38444d; padding: 0.45rem 0.55rem; text-align: left; vertical-align: top; }
     th { background: #1e2732; }
     tr:nth-child(even) td { background: #192734; }
@@ -2083,10 +2101,10 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Compradores (ml_buyers)</h1>
-  <p class="lead"><strong>${totalEnTabla}</strong> fila(s) en total en la tabla. Mostrando <strong>${rows.length}</strong> en esta vista (orden por última actualización; <code>?limit=</code> hasta 2000). <code>pref_entrega</code> por defecto <code>Pickup</code> si no viene en el webhook. <code>actualizacion</code> = última modificación (ISO). JSON: <code>?format=json</code> incluye <code>total</code> y <code>count</code> (filas devueltas).</p>
+  <p class="lead"><strong>${totalEnTabla}</strong> fila(s) en total en la tabla. Mostrando <strong>${rows.length}</strong> en esta vista (orden por última actualización; <code>?limit=</code> hasta 2000). <code>pref_entrega</code> por defecto <code>Pickup</code> si no viene en el webhook. <code>observaciones</code>: notas (zona delivery, errores WhatsApp/JID, etc.). POST/PUT JSON <code>observaciones</code>. <code>actualizacion</code> = última modificación (ISO). JSON: <code>?format=json</code> incluye <code>total</code> y <code>count</code> (filas devueltas).</p>
   <table>
-    <thead><tr><th>buyer_id</th><th>nickname</th><th>nombre y apellido</th><th>phone_1</th><th>phone_2</th><th>pref_entrega</th><th>cambio_datos</th><th>actualizacion</th><th>created_at</th><th>updated_at</th></tr></thead>
-    <tbody>${buyerRows || '<tr><td colspan="10">No hay compradores guardados.</td></tr>'}</tbody>
+    <thead><tr><th>buyer_id</th><th>nickname</th><th>nombre y apellido</th><th>phone_1</th><th>phone_2</th><th>pref_entrega</th><th>cambio_datos</th><th>observaciones</th><th>actualizacion</th><th>created_at</th><th>updated_at</th></tr></thead>
+    <tbody>${buyerRows || '<tr><td colspan="11">No hay compradores guardados.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;
@@ -3514,7 +3532,7 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Órdenes Mercado Libre</h1>
-  <p class="lead">Tabla <code>ml_orders</code>: <code>npm run sync-orders</code> · todas las cuentas: <code>npm run sync-orders-all</code> (o <code>ML_ORDERS_SYNC_ALL=1</code>). JSON: <code>?format=json</code> · <code>?limit=</code> · <code>?cuenta=</code> · <code>?status=</code></p>
+  <p class="lead">Tabla <code>ml_orders</code>: <code>npm run sync-orders</code> · todas las cuentas: <code>npm run sync-orders-all</code> (o <code>ML_ORDERS_SYNC_ALL=1</code>) · solo órdenes creadas hoy (API ML <code>order.date_created</code>): <code>npm run sync-orders-today-all</code> (<code>--today</code>). JSON: <code>?format=json</code> · <code>?limit=</code> · <code>?cuenta=</code> · <code>?status=</code></p>
   <p class="lead">${filterNote}</p>
   <p class="lead">Filtros rápidos: <a href="${escapeAttr(ordQuery({ status: "confirmed" }))}">confirmed</a> · <a href="${escapeAttr(
     ordQuery({ status: "paid" })

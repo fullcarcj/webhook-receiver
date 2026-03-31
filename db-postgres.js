@@ -567,7 +567,6 @@ async function runSchemaAndSeed() {
     `CREATE INDEX IF NOT EXISTS idx_productos_ref_2 ON productos (ref_2) WHERE ref_2 IS NOT NULL`,
     `CREATE INDEX IF NOT EXISTS idx_productos_ref_3 ON productos (ref_3) WHERE ref_3 IS NOT NULL`,
     `CREATE INDEX IF NOT EXISTS idx_productos_atributos_gin ON productos USING GIN (atributos)`,
-    `CREATE INDEX IF NOT EXISTS idx_productos_urls_gin ON productos USING GIN (urls)`,
     `CREATE INDEX IF NOT EXISTS idx_productos_item_id_ml ON productos (item_id_ml) WHERE item_id_ml IS NOT NULL`,
   ];
   for (const sql of stmts) {

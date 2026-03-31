@@ -491,6 +491,12 @@ async function runSchemaAndSeed() {
       location_chat_text TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`,
+    `CREATE TABLE IF NOT EXISTS ml_whatsapp_tipo_f_config (
+      id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+      body_template TEXT,
+      follow_with_tipo_e BOOLEAN NOT NULL DEFAULT true,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
     `CREATE TABLE IF NOT EXISTS ml_whatsapp_wasender_log (
       id BIGSERIAL PRIMARY KEY,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -537,6 +543,10 @@ async function runSchemaAndSeed() {
     `INSERT INTO ml_whatsapp_tipo_e_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING`
   );
 
+  await pool.query(
+    `INSERT INTO ml_whatsapp_tipo_f_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING`
+  );
+
   await migratePostSaleAutoSendLogNonOrdersV2();
   await migratePostSaleAutoSendLogTopicOrdersV2Only();
   await migrateMlBuyersPrefEntrega();
@@ -554,6 +564,32 @@ async function runSchemaAndSeed() {
   await migrateMlRatingRequestSentMultiRow();
   await migrateMlWhatsappWasenderLogBuyerNullable();
   await migrateMlWhatsappWasenderLogTipoEStep();
+  await migrateMlWhatsappTipoFConfig();
+}
+
+/** Tabla editable para plantilla WhatsApp tipo F (pregunta → texto + opcional E×2). */
+async function migrateMlWhatsappTipoFConfig() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'ml_whatsapp_tipo_f_config'`
+    );
+    if (rows.length === 0) {
+      await pool.query(
+        `CREATE TABLE ml_whatsapp_tipo_f_config (
+        id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        body_template TEXT,
+        follow_with_tipo_e BOOLEAN NOT NULL DEFAULT true,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`
+      );
+      await pool.query(`INSERT INTO ml_whatsapp_tipo_f_config (id) VALUES (1)`);
+      console.log("[db] ml_whatsapp_tipo_f_config creada (migración)");
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[db] migrate ml_whatsapp_tipo_f_config:", e.message);
+  }
 }
 
 /** Columna tipo_e_step (1=imagen+caption, 2=ubicación Maps) para WhatsApp tipo E. */
@@ -1764,6 +1800,20 @@ async function getMlQuestionContextForWhatsapp(mlQuestionId) {
   return null;
 }
 
+/** True si ya hubo un envío Wasender tipo F exitoso para esta pregunta (evita duplicados por webhooks repetidos). */
+async function wasWhatsappTipoFSuccessForQuestion(mlQuestionId) {
+  await ensureSchema();
+  const qid = Number(mlQuestionId);
+  if (!Number.isFinite(qid) || qid <= 0) return false;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM ml_whatsapp_wasender_log
+     WHERE message_kind = 'F' AND ml_question_id = $1 AND outcome = 'success'
+     LIMIT 1`,
+    [qid]
+  );
+  return rows.length > 0;
+}
+
 async function upsertMlQuestionAnswered(row) {
   await ensureSchema();
   const qid = Number(row.ml_question_id);
@@ -1828,8 +1878,11 @@ async function listMlQuestionsPending(limit, maxAllowed) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   const { rows } = await pool.query(
-    `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, ia_auto_route_detail, created_at, updated_at
-     FROM ml_questions_pending ORDER BY id DESC LIMIT $1`,
+    `SELECT q.id, q.ml_question_id, q.ml_user_id, q.item_id, q.buyer_id, q.question_text, q.ml_status, q.date_created, q.raw_json, q.notification_id, q.ia_auto_route_detail, q.created_at, q.updated_at,
+            b.phone_1 AS buyer_phone_1, b.phone_2 AS buyer_phone_2
+     FROM ml_questions_pending q
+     LEFT JOIN ml_buyers b ON b.buyer_id = q.buyer_id
+     ORDER BY q.id DESC LIMIT $1`,
     [n]
   );
   return rows;
@@ -1865,8 +1918,11 @@ async function listMlQuestionsAnswered(limit, maxAllowed) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   const { rows } = await pool.query(
-    `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, date_created, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at, response_time_sec
-     FROM ml_questions_answered ORDER BY id DESC LIMIT $1`,
+    `SELECT q.id, q.ml_question_id, q.ml_user_id, q.item_id, q.buyer_id, q.question_text, q.answer_text, q.ml_status, q.date_created, q.raw_json, q.notification_id, q.pending_internal_id, q.answered_at, q.moved_at, q.created_at, q.updated_at, q.response_time_sec,
+            b.phone_1 AS buyer_phone_1, b.phone_2 AS buyer_phone_2
+     FROM ml_questions_answered q
+     LEFT JOIN ml_buyers b ON b.buyer_id = q.buyer_id
+     ORDER BY q.id DESC LIMIT $1`,
     [n]
   );
   return rows;
@@ -2651,8 +2707,9 @@ async function wasRatingRequestSentToBuyerToday(mlUserId, buyerId, dayStartIso, 
 }
 
 /**
- * Órdenes recientes donde el vendedor ya calificó (sale) y el comprador aún no (purchase pending),
- * y no se envió aún el recordatorio de calificación.
+ * Órdenes recientes donde el vendedor ya calificó positiva **concretada** (sale: rating positive y fulfilled true
+ * en ml_order_feedback) y el comprador aún no (purchase pending), y no se excedió el tope de envíos tipo C.
+ * No entran ventas con calificación positiva aún no concretada (p. ej. fulfilled false) ni neutral/negative.
  * Compra→nosotros pending: sin rating en ml_order_feedback (purchase), feedback_purchase_value NULL
  * y texto feedback_purchase NULL / vacío / 'pending' (alineado a feedback.purchase.rating pendiente en ML).
  * Ventana temporal: date_created >= sinceIso (p. ej. últimos 6 días vía ML_RATING_REQUEST_LOOKBACK_DAYS).
@@ -2706,17 +2763,12 @@ async function listMlOrdersEligibleForRatingRequest(
            AND r.buyer_id IS NOT NULL
            AND r.sent_at >= $3 AND r.sent_at < $4
        )
-       AND (
-         EXISTS (
-           SELECT 1 FROM ml_order_feedback f
-           WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
-             AND f.side = 'sale' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
-         )
-         OR (
-           o.feedback_sale IS NOT NULL
-           AND TRIM(o.feedback_sale) <> ''
-           AND LOWER(TRIM(o.feedback_sale)) <> 'pending'
-         )
+       AND EXISTS (
+         SELECT 1 FROM ml_order_feedback f
+         WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+           AND f.side = 'sale'
+           AND LOWER(TRIM(COALESCE(f.rating, ''))) = 'positive'
+           AND f.fulfilled IS TRUE
        )
        AND NOT EXISTS (
          SELECT 1 FROM ml_order_feedback f
@@ -2737,17 +2789,12 @@ async function listMlOrdersEligibleForRatingRequest(
        AND o.buyer_id IS NOT NULL
        AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
        AND (SELECT COUNT(*)::int FROM ml_rating_request_sent r WHERE r.order_id = o.order_id) < $4
-       AND (
-         EXISTS (
-           SELECT 1 FROM ml_order_feedback f
-           WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
-             AND f.side = 'sale' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
-         )
-         OR (
-           o.feedback_sale IS NOT NULL
-           AND TRIM(o.feedback_sale) <> ''
-           AND LOWER(TRIM(o.feedback_sale)) <> 'pending'
-         )
+       AND EXISTS (
+         SELECT 1 FROM ml_order_feedback f
+         WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+           AND f.side = 'sale'
+           AND LOWER(TRIM(COALESCE(f.rating, ''))) = 'positive'
+           AND f.fulfilled IS TRUE
        )
        AND NOT EXISTS (
          SELECT 1 FROM ml_order_feedback f
@@ -3325,6 +3372,40 @@ function dbPathDisplay() {
   }
 }
 
+/** Configuración editable de mensajes WhatsApp tipo F (una fila id=1). */
+async function getMlWhatsappTipoFConfig() {
+  await ensureSchema();
+  const { rows } = await pool.query(
+    `SELECT id, body_template, follow_with_tipo_e, updated_at
+     FROM ml_whatsapp_tipo_f_config WHERE id = 1`
+  );
+  return rows[0] || null;
+}
+
+async function upsertMlWhatsappTipoFConfig(row) {
+  await ensureSchema();
+  const body =
+    row.body_template != null && String(row.body_template).trim() !== ""
+      ? String(row.body_template)
+      : null;
+  const follow =
+    row.follow_with_tipo_e === false ||
+    row.follow_with_tipo_e === 0 ||
+    row.follow_with_tipo_e === "0" ||
+    row.follow_with_tipo_e === "false"
+      ? false
+      : true;
+  await pool.query(
+    `INSERT INTO ml_whatsapp_tipo_f_config (id, body_template, follow_with_tipo_e, updated_at)
+     VALUES (1, $1, $2, NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       body_template = EXCLUDED.body_template,
+       follow_with_tipo_e = EXCLUDED.follow_with_tipo_e,
+       updated_at = NOW()`,
+    [body, follow]
+  );
+}
+
 /** Configuración editable de mensajes WhatsApp tipo E (una fila id=1). */
 async function getMlWhatsappTipoEConfig() {
   await ensureSchema();
@@ -3444,6 +3525,53 @@ async function countMlWhatsappTipoECompletedPairsForPhoneSince(mlUserId, phoneE1
   return rows[0] ? Number(rows[0].c) : 0;
 }
 
+/** Envíos tipo E exitosos ligados a una pregunta (sin orden), p. ej. seguimiento tras tipo F. */
+async function countMlWhatsappTipoESuccessForQuestion(mlUserId, mlQuestionId) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const qid = mlQuestionId != null ? Number(mlQuestionId) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(qid) || qid <= 0) return 0;
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::bigint AS c FROM ml_whatsapp_wasender_log
+     WHERE message_kind = 'E' AND ml_user_id = $1 AND ml_question_id = $2 AND outcome = 'success'`,
+    [mlUid, qid]
+  );
+  return rows[0] ? Number(rows[0].c) : 0;
+}
+
+/**
+ * Pares completos tipo E (≥2 envíos exitos) al mismo destino en ventana, agrupados por pregunta
+ * (`order_id` nulo, `ml_question_id` presente).
+ */
+async function countMlWhatsappTipoECompletedPairsForPhoneSinceQuestion(
+  mlUserId,
+  phoneE164,
+  sinceIso
+) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const phone = phoneE164 != null ? String(phoneE164).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !phone || phone === "—") return 0;
+  const since =
+    sinceIso != null && String(sinceIso).trim() !== "" ? String(sinceIso).trim() : new Date(0).toISOString();
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::bigint AS c FROM (
+       SELECT ml_question_id
+       FROM ml_whatsapp_wasender_log
+       WHERE message_kind = 'E'
+         AND outcome = 'success'
+         AND ml_user_id = $1
+         AND phone_e164 = $2
+         AND created_at >= $3::timestamptz
+         AND ml_question_id IS NOT NULL
+    GROUP BY ml_question_id
+    HAVING COUNT(*) >= 2
+  ) sub`,
+    [mlUid, phone, since]
+  );
+  return rows[0] ? Number(rows[0].c) : 0;
+}
+
 async function getMlWasenderSettings() {
   await ensureSchema();
   const { rows } = await pool.query(
@@ -3520,13 +3648,39 @@ async function listMlWhatsappWasenderLog(limit, options = {}) {
   const cap = options.maxAllowed != null ? Number(options.maxAllowed) : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), Number.isFinite(cap) && cap > 0 ? cap : 2000);
   const kind = options.message_kind != null ? String(options.message_kind).toUpperCase() : "";
+  const oc =
+    options.outcome != null &&
+    String(options.outcome).trim() !== "" &&
+    String(options.outcome).toLowerCase() !== "all"
+      ? String(options.outcome).trim()
+      : null;
   if (kind === "E" || kind === "F") {
+    if (oc) {
+      const { rows } = await pool.query(
+        `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
+                phone_e164, phone_source, outcome, skip_reason, http_status,
+                wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+         FROM ml_whatsapp_wasender_log WHERE message_kind = $1 AND outcome = $2 ORDER BY id DESC LIMIT $3`,
+        [kind, oc, n]
+      );
+      return rows;
+    }
     const { rows } = await pool.query(
       `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
               phone_e164, phone_source, outcome, skip_reason, http_status,
               wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
        FROM ml_whatsapp_wasender_log WHERE message_kind = $1 ORDER BY id DESC LIMIT $2`,
       [kind, n]
+    );
+    return rows;
+  }
+  if (oc) {
+    const { rows } = await pool.query(
+      `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
+              phone_e164, phone_source, outcome, skip_reason, http_status,
+              wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+       FROM ml_whatsapp_wasender_log WHERE outcome = $1 ORDER BY id DESC LIMIT $2`,
+      [oc, n]
     );
     return rows;
   }
@@ -3596,6 +3750,10 @@ module.exports = {
   countMlWhatsappTipoECompletedPairsForPhoneSince,
   getMlWhatsappTipoEConfig,
   upsertMlWhatsappTipoEConfig,
+  getMlWhatsappTipoFConfig,
+  upsertMlWhatsappTipoFConfig,
+  countMlWhatsappTipoESuccessForQuestion,
+  countMlWhatsappTipoECompletedPairsForPhoneSinceQuestion,
   insertMlWhatsappWasenderLog,
   listMlWhatsappWasenderLog,
   upsertMlQuestionPending,
@@ -3603,6 +3761,7 @@ module.exports = {
   deleteMlQuestionPending,
   deleteAllMlQuestionsPending,
   getMlQuestionContextForWhatsapp,
+  wasWhatsappTipoFSuccessForQuestion,
   upsertMlQuestionAnswered,
   listMlQuestionsPending,
   hasMlQuestionsPending,

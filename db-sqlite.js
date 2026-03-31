@@ -129,6 +129,12 @@ db.exec(`
     location_chat_text TEXT,
     updated_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS ml_whatsapp_tipo_f_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    body_template TEXT,
+    follow_with_tipo_e INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS ml_whatsapp_wasender_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
@@ -392,6 +398,34 @@ try {
 } catch (e) {
   console.error("[db] seed ml_whatsapp_tipo_e_config:", e.message);
 }
+
+try {
+  db.prepare(
+    `INSERT OR IGNORE INTO ml_whatsapp_tipo_f_config (id, follow_with_tipo_e, updated_at) VALUES (1, 1, datetime('now'))`
+  ).run();
+} catch (e) {
+  console.error("[db] seed ml_whatsapp_tipo_f_config:", e.message);
+}
+
+(function migrateMlWhatsappTipoFConfig() {
+  try {
+    const t = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ml_whatsapp_tipo_f_config'").get();
+    if (!t) {
+      db.exec(
+        `CREATE TABLE ml_whatsapp_tipo_f_config (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          body_template TEXT,
+          follow_with_tipo_e INTEGER NOT NULL DEFAULT 1,
+          updated_at TEXT NOT NULL
+        )`
+      );
+      db.prepare(`INSERT OR IGNORE INTO ml_whatsapp_tipo_f_config (id, follow_with_tipo_e, updated_at) VALUES (1, 1, datetime('now'))`).run();
+      console.log("[db] ml_whatsapp_tipo_f_config creada (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_whatsapp_tipo_f_config:", e.message);
+  }
+})();
 
 (function migrateMlWhatsappWasenderLogTipoEStep() {
   try {
@@ -1586,8 +1620,11 @@ function listMlQuestionsPending(limit, maxAllowed) {
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   return db
     .prepare(
-      `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, ml_status, date_created, raw_json, notification_id, ia_auto_route_detail, created_at, updated_at
-       FROM ml_questions_pending ORDER BY id DESC LIMIT ?`
+      `SELECT q.id, q.ml_question_id, q.ml_user_id, q.item_id, q.buyer_id, q.question_text, q.ml_status, q.date_created, q.raw_json, q.notification_id, q.ia_auto_route_detail, q.created_at, q.updated_at,
+              b.phone_1 AS buyer_phone_1, b.phone_2 AS buyer_phone_2
+       FROM ml_questions_pending q
+       LEFT JOIN ml_buyers b ON b.buyer_id = q.buyer_id
+       ORDER BY q.id DESC LIMIT ?`
     )
     .all(n);
 }
@@ -1597,8 +1634,11 @@ function listMlQuestionsAnswered(limit, maxAllowed) {
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   return db
     .prepare(
-      `SELECT id, ml_question_id, ml_user_id, item_id, buyer_id, question_text, answer_text, ml_status, date_created, raw_json, notification_id, pending_internal_id, answered_at, moved_at, created_at, updated_at, response_time_sec
-       FROM ml_questions_answered ORDER BY id DESC LIMIT ?`
+      `SELECT q.id, q.ml_question_id, q.ml_user_id, q.item_id, q.buyer_id, q.question_text, q.answer_text, q.ml_status, q.date_created, q.raw_json, q.notification_id, q.pending_internal_id, q.answered_at, q.moved_at, q.created_at, q.updated_at, q.response_time_sec,
+              b.phone_1 AS buyer_phone_1, b.phone_2 AS buyer_phone_2
+       FROM ml_questions_answered q
+       LEFT JOIN ml_buyers b ON b.buyer_id = q.buyer_id
+       ORDER BY q.id DESC LIMIT ?`
     )
     .all(n);
 }
@@ -2121,17 +2161,12 @@ function listMlOrdersEligibleForRatingRequest(
                AND r.buyer_id IS NOT NULL
                AND r.sent_at >= ? AND r.sent_at < ?
            )
-           AND (
-             EXISTS (
-               SELECT 1 FROM ml_order_feedback f
-               WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
-                 AND f.side = 'sale' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
-             )
-             OR (
-               o.feedback_sale IS NOT NULL
-               AND TRIM(o.feedback_sale) <> ''
-               AND LOWER(TRIM(o.feedback_sale)) <> 'pending'
-             )
+           AND EXISTS (
+             SELECT 1 FROM ml_order_feedback f
+             WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+               AND f.side = 'sale'
+               AND LOWER(TRIM(COALESCE(f.rating, ''))) = 'positive'
+               AND f.fulfilled = 1
            )
            AND NOT EXISTS (
              SELECT 1 FROM ml_order_feedback f
@@ -2159,17 +2194,12 @@ function listMlOrdersEligibleForRatingRequest(
          AND o.buyer_id IS NOT NULL
          AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'invalid')
          AND (SELECT COUNT(*) FROM ml_rating_request_sent r WHERE r.order_id = o.order_id) < ?
-         AND (
-           EXISTS (
-             SELECT 1 FROM ml_order_feedback f
-             WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
-               AND f.side = 'sale' AND f.rating IS NOT NULL AND TRIM(f.rating) <> ''
-           )
-           OR (
-             o.feedback_sale IS NOT NULL
-             AND TRIM(o.feedback_sale) <> ''
-             AND LOWER(TRIM(o.feedback_sale)) <> 'pending'
-           )
+         AND EXISTS (
+           SELECT 1 FROM ml_order_feedback f
+           WHERE f.ml_user_id = o.ml_user_id AND f.order_id = o.order_id
+             AND f.side = 'sale'
+             AND LOWER(TRIM(COALESCE(f.rating, ''))) = 'positive'
+             AND f.fulfilled = 1
          )
          AND NOT EXISTS (
            SELECT 1 FROM ml_order_feedback f
@@ -2530,6 +2560,77 @@ function countMlWhatsappTipoECompletedPairsForPhoneSince(mlUserId, phoneE164, si
   return r && r.c != null ? Number(r.c) : 0;
 }
 
+function countMlWhatsappTipoESuccessForQuestion(mlUserId, mlQuestionId) {
+  const mlUid = Number(mlUserId);
+  const qid = mlQuestionId != null ? Number(mlQuestionId) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(qid) || qid <= 0) return 0;
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM ml_whatsapp_wasender_log
+       WHERE message_kind = 'E' AND ml_user_id = ? AND ml_question_id = ? AND outcome = 'success'`
+    )
+    .get(mlUid, qid);
+  return r && r.c != null ? Number(r.c) : 0;
+}
+
+function countMlWhatsappTipoECompletedPairsForPhoneSinceQuestion(mlUserId, phoneE164, sinceIso) {
+  const mlUid = Number(mlUserId);
+  const phone = phoneE164 != null ? String(phoneE164).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !phone || phone === "—") return 0;
+  const since =
+    sinceIso != null && String(sinceIso).trim() !== "" ? String(sinceIso).trim() : "1970-01-01T00:00:00.000Z";
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM (
+         SELECT ml_question_id
+         FROM ml_whatsapp_wasender_log
+         WHERE message_kind = 'E'
+           AND outcome = 'success'
+           AND ml_user_id = ?
+           AND phone_e164 = ?
+           AND created_at >= ?
+           AND ml_question_id IS NOT NULL
+         GROUP BY ml_question_id
+         HAVING COUNT(*) >= 2
+       ) sub`
+    )
+    .get(mlUid, phone, since);
+  return r && r.c != null ? Number(r.c) : 0;
+}
+
+function getMlWhatsappTipoFConfig() {
+  return (
+    db
+      .prepare(
+        `SELECT id, body_template, follow_with_tipo_e, updated_at
+         FROM ml_whatsapp_tipo_f_config WHERE id = 1`
+      )
+      .get() || null
+  );
+}
+
+function upsertMlWhatsappTipoFConfig(row) {
+  const body =
+    row.body_template != null && String(row.body_template).trim() !== ""
+      ? String(row.body_template)
+      : null;
+  const follow =
+    row.follow_with_tipo_e === false ||
+    row.follow_with_tipo_e === 0 ||
+    row.follow_with_tipo_e === "0" ||
+    row.follow_with_tipo_e === "false"
+      ? 0
+      : 1;
+  db.prepare(
+    `INSERT INTO ml_whatsapp_tipo_f_config (id, body_template, follow_with_tipo_e, updated_at)
+     VALUES (1, ?, ?, datetime('now'))
+     ON CONFLICT(id) DO UPDATE SET
+       body_template = excluded.body_template,
+       follow_with_tipo_e = excluded.follow_with_tipo_e,
+       updated_at = datetime('now')`
+  ).run(body, follow);
+}
+
 function getMlWhatsappTipoEConfig() {
   return (
     db
@@ -2674,7 +2775,23 @@ function listMlWhatsappWasenderLog(limit, options = {}) {
   const cap = options.maxAllowed != null ? Number(options.maxAllowed) : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), Number.isFinite(cap) && cap > 0 ? cap : 2000);
   const kind = options.message_kind != null ? String(options.message_kind).toUpperCase() : "";
+  const oc =
+    options.outcome != null &&
+    String(options.outcome).trim() !== "" &&
+    String(options.outcome).toLowerCase() !== "all"
+      ? String(options.outcome).trim()
+      : null;
   if (kind === "E" || kind === "F") {
+    if (oc) {
+      return db
+        .prepare(
+          `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
+                  phone_e164, phone_source, outcome, skip_reason, http_status,
+                  wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+           FROM ml_whatsapp_wasender_log WHERE message_kind = ? AND outcome = ? ORDER BY id DESC LIMIT ?`
+        )
+        .all(kind, oc, n);
+    }
     return db
       .prepare(
         `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
@@ -2683,6 +2800,16 @@ function listMlWhatsappWasenderLog(limit, options = {}) {
          FROM ml_whatsapp_wasender_log WHERE message_kind = ? ORDER BY id DESC LIMIT ?`
       )
       .all(kind, n);
+  }
+  if (oc) {
+    return db
+      .prepare(
+        `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
+                phone_e164, phone_source, outcome, skip_reason, http_status,
+                wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+         FROM ml_whatsapp_wasender_log WHERE outcome = ? ORDER BY id DESC LIMIT ?`
+      )
+      .all(oc, n);
   }
   return db
     .prepare(
@@ -2739,13 +2866,18 @@ module.exports = {
   upsertMlWasenderSettings,
   countMlWhatsappTipoESuccessForOrder,
   countMlWhatsappTipoECompletedPairsForPhoneSince,
+  countMlWhatsappTipoESuccessForQuestion,
+  countMlWhatsappTipoECompletedPairsForPhoneSinceQuestion,
   getMlWhatsappTipoEConfig,
   upsertMlWhatsappTipoEConfig,
+  getMlWhatsappTipoFConfig,
+  upsertMlWhatsappTipoFConfig,
   insertMlWhatsappWasenderLog,
   listMlWhatsappWasenderLog,
   upsertMlQuestionPending,
   getMlQuestionPendingByQuestionId,
   getMlQuestionContextForWhatsapp,
+  wasWhatsappTipoFSuccessForQuestion,
   deleteMlQuestionPending,
   upsertMlQuestionAnswered,
   listMlQuestionsPending,

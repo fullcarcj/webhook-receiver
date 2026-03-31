@@ -28,7 +28,8 @@
     "retiro-broadcast-afternoon": "node ml-retiro-broadcast.js --slot=afternoon",
     "retiro-broadcast-print-templates": "node ml-retiro-broadcast.js --print-templates",
     "whatsapp-tipo-e": "node ml-whatsapp-tipo-ef.js --tipo-e",
-    "whatsapp-tipo-f": "node ml-whatsapp-tipo-ef.js --tipo-f"
+    "whatsapp-tipo-f": "node ml-whatsapp-tipo-ef.js --tipo-f",
+    "test-wasender-hook": "node scripts/test-wasender-webhook.js"
   },
   "engines": {
     "node": ">=18"

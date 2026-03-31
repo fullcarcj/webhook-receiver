@@ -2,7 +2,13 @@
  * Mensajes WhatsApp vía Wasender (tipos E y F en `ml-message-types.js`).
  *
  * Tipo E — máximo **2** mensajes por **orden**: (1) imagen con leyenda de tienda; (2) **ubicación** (pin Maps + nombre/dirección + texto).
- * Tipo F — un mensaje de texto por pregunta (sin cambios de secuencia).
+ * Tipo F — texto por pregunta con datos del ítem MLV (`{{name}}`, `{{title}}`, `{{price}}` desde `ml_buyers`
+ * + GET `/items` o `ml_listings`). Plantilla editable en BD (`/mensajes-tipo-f-whatsapp`) o
+ * `ML_WHATSAPP_TIPO_F_BODY`. Tras F exitoso, opcionalmente los **dos pasos E** (imagen + ubicación) con
+ * `follow_with_tipo_e` o `ML_WHATSAPP_TIPO_F_FOLLOW_E=0` para desactivar.
+ *
+ * Webhook `questions` (server.js): con `ML_WHATSAPP_TIPO_F_ENABLED=1` se intenta F (+ opcional E) por
+ * pregunta UNANSWERED. Requiere Wasender y `ml_buyers` con teléfono. Dedup F: `ML_WHATSAPP_TIPO_F_SKIP_IF_SENT=0`.
  *
  * Env (tipo E): si un valor no está en BD (`ml_whatsapp_tipo_e_config`, editable en
  *   `/mensajes-tipo-e-whatsapp?k=ADMIN_SECRET`), se usa la variable de entorno y luego el default en código.
@@ -21,6 +27,8 @@
 require("./load-env-local");
 
 const db = require("./db");
+const { mercadoLibreGetForUser } = require("./oauth-token");
+const { listingRowFromMlItemApi } = require("./ml-listing-map");
 const { MESSAGE_TYPE_E, MESSAGE_TYPE_F } = require("./ml-message-types");
 const { sendWasenderTextMessage, sendWasenderImageMessage, sendWasenderLocationMessage } = require("./wasender-client");
 const { normalizePhoneToE164 } = require("./ml-whatsapp-phone");
@@ -58,8 +66,15 @@ CALLE COROMOTO QUINTA CRUZ MARIA EL RECREO QUINTA BLANCA DE REJAS NEGRAS CARACAS
 
 FULLCAR CJ CA`;
 
-const DEFAULT_TIPO_F =
-  "Hola, vimos tu consulta en Mercado Libre (pregunta #{{question_id}}). ¿En qué podemos ayudarte?";
+/** Plantilla por defecto (editable en BD `ml_whatsapp_tipo_f_config` o env `ML_WHATSAPP_TIPO_F_BODY`). Placeholders: {{name}} {{title}} {{price}} {{question_id}} {{item_id}} {{buyer_id}} {{seller_id}} — `price` incluye moneda (p. ej. `12,50 USD`). */
+const DEFAULT_TIPO_F_TEMPLATE = `Buenas Estimado *{{name}}* detectamos que ya eres cliente nuestro en *AUTOPARTES Y CARROCERIAS FULLCAR CJ*, te interesaría adquirir:
+
+*{{title}}* su precio es *{{price}}*.
+
+Puedes pasar por la tienda en horario comercial, tambien tenemos delivery, Saludos`;
+
+/** @deprecated usar DEFAULT_TIPO_F_TEMPLATE */
+const DEFAULT_TIPO_F = DEFAULT_TIPO_F_TEMPLATE;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -75,6 +90,104 @@ function tipoEWeeklyCapSinceIso() {
   const d = new Date();
   d.setTime(d.getTime() - getTipoEWeeklyCapWindowDays() * 24 * 60 * 60 * 1000);
   return d.toISOString();
+}
+
+function pickBuyerDisplayName(buyer) {
+  if (!buyer || typeof buyer !== "object") return "Cliente";
+  const n = buyer.nombre_apellido != null ? String(buyer.nombre_apellido).trim() : "";
+  if (n) return n.split(/\s+/).slice(0, 5).join(" ");
+  const nick = buyer.nickname != null ? String(buyer.nickname).trim() : "";
+  if (nick) return nick;
+  return "Cliente";
+}
+
+/** Precio para plantilla F (API ítem ML: price + currency_id). */
+function formatListingPriceForTipoF(price, currencyId) {
+  if (price == null || !Number.isFinite(Number(price))) return "—";
+  const p = Number(price);
+  const cur = currencyId != null ? String(currencyId).toUpperCase() : "";
+  if (cur === "USD") {
+    return `${p.toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`;
+  }
+  if (cur === "VES" || cur === "VEF") {
+    return `${Math.round(p).toLocaleString("es-VE")} ${cur}`;
+  }
+  return `${p.toLocaleString("es-VE")} ${cur || "USD"}`;
+}
+
+/**
+ * Título/precio/moneda desde BD `ml_listings` o GET /items/{id} (cachea con upsert).
+ * @returns {Promise<{ title: string, price: number|null, currency_id: string|null }>}
+ */
+async function fetchItemSnapshotForQuestion(mlUserId, itemIdStr) {
+  const iid = itemIdStr != null ? String(itemIdStr).trim() : "";
+  if (!iid) return { title: "—", price: null, currency_id: null };
+  const mlUid = Number(mlUserId);
+  let row = null;
+  try {
+    row = await db.getMlListingByItemId(mlUid, iid);
+  } catch (_) {
+    row = null;
+  }
+  if (row && row.title != null && row.price != null) {
+    return {
+      title: String(row.title),
+      price: row.price != null ? Number(row.price) : null,
+      currency_id: row.currency_id != null ? String(row.currency_id) : null,
+    };
+  }
+  try {
+    const path = `/items/${encodeURIComponent(iid)}`;
+    const data = await mercadoLibreGetForUser(mlUid, path);
+    if (data && typeof data === "object") {
+      const lr = listingRowFromMlItemApi(mlUid, data, {
+        http_status: 200,
+        fetched_at: new Date().toISOString(),
+      });
+      if (lr) await db.upsertMlListing(lr);
+      return {
+        title: data.title != null ? String(data.title) : "—",
+        price: data.price != null ? Number(data.price) : null,
+        currency_id: data.currency_id != null ? String(data.currency_id) : null,
+      };
+    }
+  } catch (e) {
+    console.error("[tipo F] GET items/%s: %s", iid, e.message || e);
+  }
+  if (row) {
+    return {
+      title: row.title != null ? String(row.title) : "—",
+      price: row.price != null ? Number(row.price) : null,
+      currency_id: row.currency_id != null ? String(row.currency_id) : null,
+    };
+  }
+  return { title: "—", price: null, currency_id: null };
+}
+
+async function resolveTipoFBodyTemplate(cliOverride) {
+  if (cliOverride != null && String(cliOverride).trim() !== "") return String(cliOverride).trim();
+  const envB = process.env.ML_WHATSAPP_TIPO_F_BODY;
+  if (envB != null && String(envB).trim() !== "") return String(envB).trim();
+  try {
+    const row = await db.getMlWhatsappTipoFConfig();
+    if (row && row.body_template != null && String(row.body_template).trim() !== "") {
+      return String(row.body_template).trim();
+    }
+  } catch (_) {
+    /* vacío */
+  }
+  return DEFAULT_TIPO_F_TEMPLATE;
+}
+
+async function resolveFollowTipoE() {
+  try {
+    const row = await db.getMlWhatsappTipoFConfig();
+    if (row && (row.follow_with_tipo_e === false || row.follow_with_tipo_e === 0)) return false;
+  } catch (_) {
+    /* default true */
+  }
+  if (process.env.ML_WHATSAPP_TIPO_F_FOLLOW_E === "0") return false;
+  return true;
 }
 
 function applyPlaceholders(template, vars) {
@@ -495,13 +608,293 @@ async function trySendWhatsappTipoEForOrder(args) {
 }
 
 /**
- * @param {{ mlUserId: number, mlQuestionId: number, text?: string }} args
+ * Tipo E (imagen + ubicación) tras una pregunta, sin orden: mismos pasos que `trySendWhatsappTipoEForOrder`.
+ * @param {{ mlUserId: number, buyerId: number, buyer: object, mlQuestionId: number, cfg: object, text?: string }} args
+ */
+async function trySendWhatsappTipoEForBuyer(args) {
+  const mlUserId = Number(args.mlUserId);
+  const buyerId = Number(args.buyerId);
+  const mlQuestionId = Number(args.mlQuestionId);
+  const buyer = args.buyer;
+  const cfg = args.cfg;
+  if (
+    !Number.isFinite(mlUserId) ||
+    mlUserId <= 0 ||
+    !Number.isFinite(buyerId) ||
+    buyerId <= 0 ||
+    !Number.isFinite(mlQuestionId) ||
+    mlQuestionId <= 0 ||
+    !buyer ||
+    !cfg
+  ) {
+    return { ok: false, outcome: "invalid_args", detail: "trySendWhatsappTipoEForBuyer: argumentos" };
+  }
+
+  const prevOk = await db.countMlWhatsappTipoESuccessForQuestion(mlUserId, mlQuestionId);
+  if (prevOk >= 2) {
+    await db.insertMlWhatsappWasenderLog({
+      message_kind: "E",
+      ml_user_id: mlUserId,
+      buyer_id: buyerId,
+      order_id: null,
+      ml_question_id: mlQuestionId,
+      phone_e164: "—",
+      outcome: "skipped",
+      skip_reason: "ya se enviaron 2 mensajes tipo E para esta pregunta",
+      text_preview: MESSAGE_TYPE_E,
+    });
+    return { ok: false, outcome: "already_complete", detail: "máximo 2 mensajes tipo E por pregunta" };
+  }
+
+  if (!cfg.enabled) {
+    return { ok: false, outcome: "disabled", detail: "Wasender desactivado" };
+  }
+
+  const picked = pickFirstPhoneE164(buyer, cfg.defaultCountryCode);
+  if (!picked) {
+    await db.insertMlWhatsappWasenderLog({
+      message_kind: "E",
+      ml_user_id: mlUserId,
+      buyer_id: buyerId,
+      order_id: null,
+      ml_question_id: mlQuestionId,
+      phone_e164: "—",
+      outcome: "skipped",
+      skip_reason: "phone_1 y phone_2 vacíos o no normalizables",
+      text_preview: MESSAGE_TYPE_E,
+    });
+    return { ok: false, outcome: "no_phone" };
+  }
+
+  const { e164, source } = picked;
+
+  if (
+    prevOk === 0 &&
+    process.env.ML_WHATSAPP_TIPO_E_WEEKLY_CAP !== "0" &&
+    process.env.ML_WHATSAPP_TIPO_E_WEEKLY_CAP !== "false"
+  ) {
+    const since = tipoEWeeklyCapSinceIso();
+    const pairsQ = await db.countMlWhatsappTipoECompletedPairsForPhoneSinceQuestion(mlUserId, e164, since);
+    if (pairsQ > 0) {
+      await db.insertMlWhatsappWasenderLog({
+        message_kind: "E",
+        ml_user_id: mlUserId,
+        buyer_id: buyerId,
+        order_id: null,
+        ml_question_id: mlQuestionId,
+        phone_e164: e164,
+        phone_source: source,
+        outcome: "skipped",
+        skip_reason: `tope semanal tipo E (pregunta, mismo E.164): ya hubo un par completo en los últimos ${getTipoEWeeklyCapWindowDays()} día(s)`,
+        text_preview: MESSAGE_TYPE_E,
+      });
+      return { ok: false, outcome: "weekly_cap_phone" };
+    }
+  }
+
+  const vars = {
+    order_id: "",
+    buyer_id: buyerId,
+    seller_id: mlUserId,
+    status: "",
+  };
+  const merged = await mergeTipoEConfig();
+  const loc2 = buildTipoELocationStep2(vars, args.text, merged);
+  const caption = merged.imageCaption.trim();
+  const imageUrl = merged.imageUrl.trim();
+  const delayMs = merged.delayMs;
+
+  function msgIdFrom(res) {
+    return res.json && res.json.data && res.json.data.msgId != null ? Number(res.json.data.msgId) : null;
+  }
+
+  if (prevOk === 0) {
+    if (!imageUrl) {
+      await db.insertMlWhatsappWasenderLog({
+        message_kind: "E",
+        ml_user_id: mlUserId,
+        buyer_id: buyerId,
+        order_id: null,
+        ml_question_id: mlQuestionId,
+        phone_e164: e164,
+        phone_source: source,
+        outcome: "skipped",
+        skip_reason: "ML_WHATSAPP_TIPO_E_IMAGE_URL no definida (requerida para el 1.er mensaje)",
+        text_preview: "[tipo E paso 1 imagen]",
+        tipo_e_step: 1,
+      });
+      return { ok: false, outcome: "no_image_url" };
+    }
+
+    const resImg = await sendWasenderImageMessage({
+      apiBaseUrl: cfg.apiBaseUrl,
+      apiKey: cfg.apiKey,
+      to: e164,
+      text: caption,
+      imageUrl,
+    });
+    const mid1 = msgIdFrom(resImg);
+    if (!resImg.ok) {
+      await db.insertMlWhatsappWasenderLog({
+        message_kind: "E",
+        ml_user_id: mlUserId,
+        buyer_id: buyerId,
+        order_id: null,
+        ml_question_id: mlQuestionId,
+        phone_e164: e164,
+        phone_source: source,
+        outcome: "api_error",
+        http_status: resImg.status,
+        wasender_msg_id: Number.isFinite(mid1) ? mid1 : null,
+        response_body: resImg.bodyText ? resImg.bodyText.slice(0, 8000) : null,
+        error_message: `paso 1 imagen HTTP ${resImg.status}`,
+        text_preview: caption.slice(0, 200),
+        tipo_e_step: 1,
+      });
+      return { ok: false, outcome: "api_error", step: 1 };
+    }
+    await db.insertMlWhatsappWasenderLog({
+      message_kind: "E",
+      ml_user_id: mlUserId,
+      buyer_id: buyerId,
+      order_id: null,
+      ml_question_id: mlQuestionId,
+      phone_e164: e164,
+      phone_source: source,
+      outcome: "success",
+      http_status: resImg.status,
+      wasender_msg_id: Number.isFinite(mid1) ? mid1 : null,
+      response_body: resImg.bodyText ? resImg.bodyText.slice(0, 8000) : null,
+      text_preview: caption.slice(0, 200),
+      tipo_e_step: 1,
+    });
+
+    if (delayMs > 0) await sleep(delayMs);
+
+    const resLoc = await sendWasenderLocationMessage({
+      apiBaseUrl: cfg.apiBaseUrl,
+      apiKey: cfg.apiKey,
+      to: e164,
+      latitude: loc2.latitude,
+      longitude: loc2.longitude,
+      name: loc2.name,
+      address: loc2.address,
+      text: loc2.text,
+    });
+    const mid2 = msgIdFrom(resLoc);
+    const locPreview = `${loc2.name} | ${loc2.address}`.slice(0, 200);
+    if (!resLoc.ok) {
+      await db.insertMlWhatsappWasenderLog({
+        message_kind: "E",
+        ml_user_id: mlUserId,
+        buyer_id: buyerId,
+        order_id: null,
+        ml_question_id: mlQuestionId,
+        phone_e164: e164,
+        phone_source: source,
+        outcome: "api_error",
+        http_status: resLoc.status,
+        wasender_msg_id: Number.isFinite(mid2) ? mid2 : null,
+        response_body: resLoc.bodyText ? resLoc.bodyText.slice(0, 8000) : null,
+        error_message: `paso 2 ubicación HTTP ${resLoc.status}`,
+        text_preview: locPreview,
+        tipo_e_step: 2,
+      });
+      return { ok: false, outcome: "api_error", step: 2, partial: true };
+    }
+    await db.insertMlWhatsappWasenderLog({
+      message_kind: "E",
+      ml_user_id: mlUserId,
+      buyer_id: buyerId,
+      order_id: null,
+      ml_question_id: mlQuestionId,
+      phone_e164: e164,
+      phone_source: source,
+      outcome: "success",
+      http_status: resLoc.status,
+      wasender_msg_id: Number.isFinite(mid2) ? mid2 : null,
+      response_body: resLoc.bodyText ? resLoc.bodyText.slice(0, 8000) : null,
+      text_preview: locPreview,
+      tipo_e_step: 2,
+    });
+    return { ok: true, outcome: "sent_both", phone: e164, steps: [1, 2] };
+  }
+
+  if (prevOk === 1) {
+    const resLoc = await sendWasenderLocationMessage({
+      apiBaseUrl: cfg.apiBaseUrl,
+      apiKey: cfg.apiKey,
+      to: e164,
+      latitude: loc2.latitude,
+      longitude: loc2.longitude,
+      name: loc2.name,
+      address: loc2.address,
+      text: loc2.text,
+    });
+    const mid2 = msgIdFrom(resLoc);
+    const locPreview = `${loc2.name} | ${loc2.address}`.slice(0, 200);
+    if (!resLoc.ok) {
+      await db.insertMlWhatsappWasenderLog({
+        message_kind: "E",
+        ml_user_id: mlUserId,
+        buyer_id: buyerId,
+        order_id: null,
+        ml_question_id: mlQuestionId,
+        phone_e164: e164,
+        phone_source: source,
+        outcome: "api_error",
+        http_status: resLoc.status,
+        wasender_msg_id: Number.isFinite(mid2) ? mid2 : null,
+        response_body: resLoc.bodyText ? resLoc.bodyText.slice(0, 8000) : null,
+        error_message: `paso 2 ubicación HTTP ${resLoc.status}`,
+        text_preview: locPreview,
+        tipo_e_step: 2,
+      });
+      return { ok: false, outcome: "api_error", step: 2 };
+    }
+    await db.insertMlWhatsappWasenderLog({
+      message_kind: "E",
+      ml_user_id: mlUserId,
+      buyer_id: buyerId,
+      order_id: null,
+      ml_question_id: mlQuestionId,
+      phone_e164: e164,
+      phone_source: source,
+      outcome: "success",
+      http_status: resLoc.status,
+      wasender_msg_id: Number.isFinite(mid2) ? mid2 : null,
+      response_body: resLoc.bodyText ? resLoc.bodyText.slice(0, 8000) : null,
+      text_preview: locPreview,
+      tipo_e_step: 2,
+    });
+    return { ok: true, outcome: "sent_step2_only", phone: e164, steps: [2] };
+  }
+
+  return { ok: false, outcome: "unexpected", detail: `prevOk=${prevOk}` };
+}
+
+/**
+ * @param {{ mlUserId: number, mlQuestionId: number, text?: string }} args — `text` fuerza plantilla F (CLI); si no, BD/env/default.
  */
 async function trySendWhatsappTipoFForQuestion(args) {
   const mlUserId = Number(args.mlUserId);
   const mlQuestionId = Number(args.mlQuestionId);
   if (!Number.isFinite(mlUserId) || mlUserId <= 0 || !Number.isFinite(mlQuestionId) || mlQuestionId <= 0) {
     return { ok: false, outcome: "invalid_args", detail: "mlUserId o mlQuestionId inválido" };
+  }
+
+  if (process.env.ML_WHATSAPP_TIPO_F_SKIP_IF_SENT !== "0") {
+    try {
+      if (await db.wasWhatsappTipoFSuccessForQuestion(mlQuestionId)) {
+        return {
+          ok: false,
+          outcome: "already_sent",
+          detail: "tipo F ya enviado con éxito para esta pregunta",
+        };
+      }
+    } catch (_) {
+      /* no bloquear envío */
+    }
   }
 
   const cfg = await resolveWasenderRuntimeConfig();
@@ -552,15 +945,20 @@ async function trySendWhatsappTipoFForQuestion(args) {
     return { ok: false, outcome: "no_buyer" };
   }
 
-  const bodyTemplate = args.text != null ? String(args.text) : process.env.ML_WHATSAPP_TIPO_F_BODY || DEFAULT_TIPO_F;
+  const bodyTemplate = await resolveTipoFBodyTemplate(args.text != null ? String(args.text) : null);
+  const itemSnap = await fetchItemSnapshotForQuestion(mlUserId, q.item_id || "");
+  const priceStr = formatListingPriceForTipoF(itemSnap.price, itemSnap.currency_id);
   const text = applyPlaceholders(bodyTemplate, {
+    name: pickBuyerDisplayName(buyer),
+    title: itemSnap.title || "—",
+    price: priceStr,
     question_id: mlQuestionId,
     item_id: q.item_id || "",
     buyer_id: buyerId,
     seller_id: mlUserId,
   });
 
-  return sendWhatsappToBuyerPhones({
+  const fRes = await sendWhatsappToBuyerPhones({
     messageKind: "F",
     mlUserId,
     buyerId,
@@ -570,6 +968,27 @@ async function trySendWhatsappTipoFForQuestion(args) {
     text,
     cfg,
   });
+
+  if (!fRes.ok) return { ...fRes, tipo_e_followup: null };
+
+  const followE = await resolveFollowTipoE();
+  if (!followE) {
+    return { ...fRes, tipo_e_followup: { skipped: true, reason: "follow_with_tipo_e desactivado" } };
+  }
+
+  const merged = await mergeTipoEConfig();
+  if (merged.delayMs > 0) await sleep(merged.delayMs);
+
+  const eRes = await trySendWhatsappTipoEForBuyer({
+    mlUserId,
+    buyerId,
+    buyer,
+    mlQuestionId,
+    cfg,
+    text: args.tipo_e_location_text != null ? String(args.tipo_e_location_text) : undefined,
+  });
+
+  return { ...fRes, tipo_e_followup: eRes };
 }
 
 async function sendWhatsappToBuyerPhones({
@@ -672,10 +1091,12 @@ module.exports = {
   FULLCAR_MAPS_URL,
   FULLCAR_LOCATION_NAME,
   FULLCAR_LOCATION_ADDRESS,
+  DEFAULT_TIPO_F_TEMPLATE,
   mergeTipoEConfig,
   buildTipoELocationStep2,
   resolveWasenderRuntimeConfig,
   trySendWhatsappTipoEForOrder,
+  trySendWhatsappTipoEForBuyer,
   trySendWhatsappTipoFForQuestion,
   applyPlaceholders,
 };

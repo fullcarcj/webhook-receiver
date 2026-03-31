@@ -59,8 +59,10 @@ const {
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
 const { renderWhatsappTipoEPage } = require("./whatsapp-tipo-e-html");
+const { renderWhatsappTipoFPage } = require("./whatsapp-tipo-f-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
 const { maybeProcessInternalOrderMessageForTipoE } = require("./ml-whatsapp-internal-order-message");
+const { trySendWhatsappTipoFForQuestion } = require("./ml-whatsapp-tipo-ef");
 const { appendWasenderWebhookNdjsonLine } = require("./wasender-webhook-log");
 const { wasenderWebhookSignatureOk } = require("./wasender-webhook-signature");
 const {
@@ -139,6 +141,9 @@ const {
   listMlRatingRequestLog,
   getMlWhatsappTipoEConfig,
   upsertMlWhatsappTipoEConfig,
+  getMlWhatsappTipoFConfig,
+  upsertMlWhatsappTipoFConfig,
+  listMlWhatsappWasenderLog,
   dbPath,
 } = require("./db");
 
@@ -208,6 +213,10 @@ function isWhatsappTipoEConfigPath(pathname) {
   return pathname === "/mensajes-tipo-e-whatsapp" || pathname === "/mensajes-tipo-e-whatsapp/";
 }
 
+function isWhatsappTipoFConfigPath(pathname) {
+  return pathname === "/mensajes-tipo-f-whatsapp" || pathname === "/mensajes-tipo-f-whatsapp/";
+}
+
 function isPostSaleEnviosPath(pathname) {
   return pathname === "/envios-postventa" || pathname === "/envios-postventa/";
 }
@@ -224,6 +233,11 @@ function isRecordatoriosCalificacionPath(pathname) {
 /** Log unificado mensajes tipo A/B/C (tabla ml_message_kind_send_log). */
 function isEnviosTiposAbcPath(pathname) {
   return pathname === "/envios-tipos-abc" || pathname === "/envios-tipos-abc/";
+}
+
+/** Log envíos Wasender tipo E / F (`ml_whatsapp_wasender_log`). */
+function isEnviosWhatsappTipoEPath(pathname) {
+  return pathname === "/envios-whatsapp-tipo-e" || pathname === "/envios-whatsapp-tipo-e/";
 }
 
 function isVentasDetalleWebPath(pathname) {
@@ -391,6 +405,20 @@ function parseJsonBody(req) {
     });
     req.on("error", reject);
   });
+}
+
+/** Respuesta 400 cuando el cuerpo no es JSON (incluye `detail` para depurar). */
+function respondJsonBodyParseError(res, err) {
+  res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(
+    JSON.stringify({
+      ok: false,
+      error: "body debe ser JSON",
+      detail: err && err.message ? String(err.message) : null,
+      hint:
+        "En PowerShell usá curl.exe (no el alias curl) o Invoke-RestMethod con -ContentType application/json; ver npm run test-wasender-hook",
+    })
+  );
 }
 
 /**
@@ -891,6 +919,22 @@ function scheduleTopicFetchFromWebhook(body) {
                         }),
                       });
                     }
+                    if (process.env.ML_WHATSAPP_TIPO_F_ENABLED === "1") {
+                      const qidF = row.ml_question_id;
+                      const uidF = mlUserId;
+                      setImmediate(() => {
+                        trySendWhatsappTipoFForQuestion({
+                          mlUserId: uidF,
+                          mlQuestionId: Number(qidF),
+                        }).catch((err) =>
+                          console.error(
+                            "[whatsapp tipo F] ml_question_id=%s %s",
+                            qidF,
+                            err && err.message ? err.message : err
+                          )
+                        );
+                      });
+                    }
                   } else {
                     /** Otros estados (p. ej. UNDER_REVIEW): no mantener en pending. */
                     await deleteMlQuestionPending(row.ml_question_id);
@@ -1141,7 +1185,7 @@ const server = http.createServer(async (req, res) => {
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         mensajes_whatsapp_tipo_e:
-          "GET|POST /mensajes-tipo-e-whatsapp?k=ADMIN_SECRET (crear/editar/guardar config WhatsApp tipo E en ml_whatsapp_tipo_e_config; JSON en POST; ?format=json en GET)",
+          "GET|POST /mensajes-tipo-e-whatsapp?k=ADMIN_SECRET (config tipo E en ml_whatsapp_tipo_e_config) · GET|POST /mensajes-tipo-f-whatsapp?k=ADMIN_SECRET (plantilla tipo F + seguir con E×2) · GET /envios-whatsapp-tipo-e?k=ADMIN_SECRET (log envíos Wasender E/F en ml_whatsapp_wasender_log; ?kind=e|f|all & outcome=…)",
         envio_auto_postventa:
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:
@@ -2153,6 +2197,74 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Configuración mensajes WhatsApp tipo F (`ml_whatsapp_tipo_f_config`). */
+  if (isWhatsappTipoFConfigPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Tipo F WhatsApp</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Tipo F WhatsApp</title><p>Acceso denegado. Usa <code>/mensajes-tipo-f-whatsapp?k=TU_CLAVE</code>.</p>"
+      );
+      return;
+    }
+
+    if (req.method === "POST") {
+      let body;
+      try {
+        body = await parseJsonBody(req);
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        return;
+      }
+      try {
+        await upsertMlWhatsappTipoFConfig(body);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    if (req.method === "GET") {
+      let row;
+      try {
+        row = await getMlWhatsappTipoFConfig();
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+        return;
+      }
+      if (url.searchParams.get("format") === "json") {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, config: row }));
+        return;
+      }
+      const html = renderWhatsappTipoFPage(row, {
+        escapeHtml,
+        escapeAttr,
+        escapeTextareaContent,
+      }, { k });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
+      return;
+    }
+
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "metodo no permitido" }));
+    return;
+  }
+
   /** Reintento manual de envío post-venta (misma lógica que el webhook). */
   if (req.method === "POST" && url.pathname === "/envios-postventa/retry") {
     const adminSecret = process.env.ADMIN_SECRET;
@@ -2384,11 +2496,15 @@ const server = http.createServer(async (req, res) => {
     const navAnswered = tabla === "answered" ? "active" : "";
     const tableHead =
       tabla === "answered"
-        ? "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>respuesta</th><th>status</th><th>date_created</th><th>Δs</th><th>answered_at</th></tr></thead>"
-        : "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>pregunta</th><th>status</th><th>date_created</th><th>updated_at</th><th>ia_auto_route_detail</th></tr></thead>";
+        ? "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>phone_1</th><th>phone_2</th><th>pregunta</th><th>respuesta</th><th>status</th><th>date_created</th><th>Δs</th><th>answered_at</th></tr></thead>"
+        : "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>phone_1</th><th>phone_2</th><th>pregunta</th><th>status</th><th>date_created</th><th>updated_at</th><th>ia_auto_route_detail</th></tr></thead>";
+    function buyerPhoneCell(val) {
+      if (val == null || String(val).trim() === "") return "—";
+      return escapeHtml(String(val));
+    }
     const tableRows =
       rows.length === 0
-        ? `<tr><td colspan="${tabla === "answered" ? 11 : 10}">Sin registros.</td></tr>`
+        ? `<tr><td colspan="${tabla === "answered" ? 13 : 12}">Sin registros.</td></tr>`
         : tabla === "answered"
           ? rows
               .map((r) => {
@@ -2414,6 +2530,8 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.ml_user_id)}</td>
   <td>${escapeHtml(r.item_id)}</td>
   <td>${escapeHtml(r.buyer_id)}</td>
+  <td class="muted mono">${buyerPhoneCell(r.buyer_phone_1)}</td>
+  <td class="muted mono">${buyerPhoneCell(r.buyer_phone_2)}</td>
   <td class="muted">${qt}</td>
   <td class="muted">${at}</td>
   <td>${escapeHtml(r.ml_status)}</td>
@@ -2444,6 +2562,8 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.ml_user_id)}</td>
   <td>${escapeHtml(r.item_id)}</td>
   <td>${escapeHtml(r.buyer_id)}</td>
+  <td class="muted mono">${buyerPhoneCell(r.buyer_phone_1)}</td>
+  <td class="muted mono">${buyerPhoneCell(r.buyer_phone_2)}</td>
   <td class="muted">${qt}</td>
   <td>${escapeHtml(r.ml_status)}</td>
   <td class="muted" title="date_created de la pregunta (API ML)">${qdcP}</td>
@@ -2475,7 +2595,7 @@ const server = http.createServer(async (req, res) => {
   <p class="lead">Tabla <code>${tabla === "answered" ? "ml_questions_answered" : "ml_questions_pending"}</code> · ${rows.length} fila(s). JSON: <code>?format=json</code> · <code>?tabla=pending</code> o <code>?tabla=answered</code></p>
   ${
     tabla === "pending"
-      ? `<p class="lead"><strong>Cómo funciona (3 pasos):</strong> (1) webhook <code>questions</code> + GET del recurso. (2) Si UNANSWERED y <code>ML_QUESTIONS_IA_AUTO_ENABLED=1</code> → intento inmediato <code>POST /answers</code> (plantilla aleatoria); si no o si falla el envío → pending. (3) Si la pregunta queda respondida en ML → fila en <code>ml_questions_answered</code> y se borra de pending. Con <code>ML_WEBHOOK_FETCH_RESOURCE=1</code> y automático activo se intenta <code>POST /answers</code> sin depender de horario. La columna <code>ia_auto_route_detail</code> documenta por qué sigue en pending.</p>
+      ? `<p class="lead"><strong>Cómo funciona (3 pasos):</strong> (1) webhook <code>questions</code> + GET del recurso. (2) Si UNANSWERED y <code>ML_QUESTIONS_IA_AUTO_ENABLED=1</code> → intento inmediato <code>POST /answers</code> (plantilla aleatoria); si no o si falla el envío → pending. (3) Si la pregunta queda respondida en ML → fila en <code>ml_questions_answered</code> y se borra de pending. Con <code>ML_WEBHOOK_FETCH_RESOURCE=1</code> y automático activo se intenta <code>POST /answers</code> sin depender de horario. La columna <code>ia_auto_route_detail</code> documenta por qué sigue en pending. WhatsApp tipo F (Wasender): <code>ML_WHATSAPP_TIPO_F_ENABLED=1</code> + <code>WASENDER_*</code>; ver <code>ml-whatsapp-tipo-ef.js</code>.</p>
   <p class="lead">Para <strong>borrar todas las filas pending</strong> en esta base (solo copia local; las preguntas siguen en ML): <code>DELETE /admin/ml-questions-pending</code> con cabecera <code>X-Admin-Secret</code> (mismo valor que variable de entorno).</p>
   <p class="lead">Si en Mercado Libre ya está <strong>respondida</strong> y aquí sigue en pending: la BD está desactualizada. <a href="${escapeAttr(preguntasMlSyncPendingUrl())}">Sincronizar pending con la API</a> (JSON; recargá esta página después).</p>
   <p class="lead">Si <strong>no</strong> responde automático: en el servidor (p. ej. Render) tenés que definir las mismas variables que <code>ML_QUESTIONS_IA_AUTO_*</code> y <code>ML_WEBHOOK_FETCH_RESOURCE=1</code> que en tu <code>oauth-env.json</code> local. <a href="${escapeAttr(preguntasMlIaStatusUrl())}">Estado IA (modo / prueba)</a> · <a href="${escapeAttr(preguntasMlIaRetryUrl())}">Reintentar POST /answers sobre pending</a> · <a href="${escapeAttr(preguntasMlIaLogUrl())}">Log (errores API / excepciones)</a>. Las reglas IA son <strong>globales</strong> para todo el servidor; cada fila usa el <code>user_id</code> del <strong>vendedor</strong> de esa notificación (multicuenta). Cada vendedor debe tener token en <code>ml_accounts</code>; si el número no coincide o falta la cuenta, el POST falla para esa pregunta.</p>`
@@ -3881,6 +4001,145 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Log envíos WhatsApp Wasender tipo E / F (`ml_whatsapp_wasender_log`). */
+  if (req.method === "GET" && isEnviosWhatsappTipoEPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Envíos WhatsApp E/F</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Envíos WhatsApp E/F</title><p>Acceso denegado. <code>/envios-whatsapp-tipo-e?k=…</code></p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    const kindRaw = (url.searchParams.get("kind") || "e").trim().toLowerCase();
+    const validKinds = new Set(["e", "f", "all"]);
+    const curKind = validKinds.has(kindRaw) ? kindRaw : "e";
+    const outcomeRaw = (url.searchParams.get("outcome") || "all").trim().toLowerCase();
+    const validOutcomes = new Set(["all", "success", "skipped", "api_error"]);
+    const curOutcome = validOutcomes.has(outcomeRaw) ? outcomeRaw : "all";
+    const outcomeOpt = curOutcome === "all" ? null : curOutcome;
+    const listOpts = { maxAllowed: 2000, outcome: outcomeOpt };
+    if (curKind === "e") listOpts.message_kind = "E";
+    else if (curKind === "f") listOpts.message_kind = "F";
+    let rows;
+    try {
+      rows = await listMlWhatsappWasenderLog(lim, listOpts);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          kind: curKind,
+          outcome: curOutcome,
+          count: rows.length,
+          items: rows,
+        })
+      );
+      return;
+    }
+    const kForLinks = k;
+    const limForLinks = lim && String(lim).trim() !== "" ? String(lim) : "";
+    function waQuery(kindKey, outcomeKey) {
+      const p = new URLSearchParams();
+      p.set("k", kForLinks);
+      if (limForLinks) p.set("limit", limForLinks);
+      if (kindKey && kindKey !== "e") p.set("kind", kindKey);
+      if (outcomeKey && outcomeKey !== "all") p.set("outcome", outcomeKey);
+      return `/envios-whatsapp-tipo-e?${p.toString()}`;
+    }
+    const kindNav = ["e", "f", "all"]
+      .map((kindKey) => {
+        const active = curKind === kindKey ? ' class="active"' : "";
+        const label =
+          kindKey === "e" ? "E (imagen+ubicación)" : kindKey === "f" ? "F (pregunta)" : "E + F";
+        return `<a href="${escapeAttr(waQuery(kindKey, curOutcome))}"${active}>${escapeHtml(label)}</a>`;
+      })
+      .join("\n    ");
+    const outcomeNav = ["all", "success", "skipped", "api_error"]
+      .map((outKey) => {
+        const active = curOutcome === outKey ? ' class="active"' : "";
+        return `<a href="${escapeAttr(waQuery(curKind, outKey))}"${active}>${escapeHtml(outKey)}</a>`;
+      })
+      .join("\n    ");
+    function fmtWaCreated(r) {
+      const t = r.created_at;
+      if (t instanceof Date) return t.toISOString();
+      return t != null ? String(t) : "—";
+    }
+    const tableRows = rows
+      .map((r) => {
+        const prev =
+          r.text_preview && String(r.text_preview).length > 120
+            ? `${escapeHtml(String(r.text_preview).slice(0, 120))}…`
+            : escapeHtml(r.text_preview || "—");
+        return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td class="muted">${escapeHtml(fmtWaCreated(r))}</td>
+  <td><strong>${escapeHtml(r.message_kind)}</strong></td>
+  <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.buyer_id)}</td>
+  <td>${escapeHtml(r.order_id)}</td>
+  <td>${escapeHtml(r.ml_question_id)}</td>
+  <td>${escapeHtml(r.phone_e164)}</td>
+  <td>${escapeHtml(r.tipo_e_step)}</td>
+  <td>${escapeHtml(r.outcome)}</td>
+  <td>${escapeHtml(r.skip_reason)}</td>
+  <td>${escapeHtml(r.http_status)}</td>
+  <td>${prev}</td>
+</tr>`;
+      })
+      .join("");
+    const htmlWa = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Log WhatsApp tipo E / F</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 1400px; margin-top: 1rem; font-size: 0.78rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.75rem; }
+    .filter-nav { margin-top: 0.75rem; line-height: 1.8; font-size: 0.85rem; }
+    .filter-nav a { color: #1d9bf0; text-decoration: none; margin-right: 0.35rem; }
+    .filter-nav a:hover { text-decoration: underline; }
+    .filter-nav a.active { font-weight: 600; color: #e7e9ea; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Log envíos WhatsApp Wasender (tipo E y F)</h1>
+  <p class="lead">Tabla <code>ml_whatsapp_wasender_log</code> · E = imagen + ubicación por orden · F = texto por pregunta. ${rows.length} fila(s). JSON: <code>?format=json</code> · <code>?kind=e|f|all</code> · <code>?outcome=success|skipped|api_error|all</code></p>
+  <nav class="filter-nav" aria-label="Tipo"><span class="muted">Tipo:</span> ${kindNav}</nav>
+  <nav class="filter-nav" aria-label="Outcome"><span class="muted">Outcome:</span> ${outcomeNav}</nav>
+  <table>
+    <thead><tr><th>id</th><th>created_at</th><th>kind</th><th>ml_user_id</th><th>buyer_id</th><th>order_id</th><th>ml_question_id</th><th>phone_e164</th><th>tipo_e_step</th><th>outcome</th><th>skip_reason</th><th>http</th><th>text_preview</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="13">Sin registros.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(htmlWa);
+    return;
+  }
+
   /** Log envíos recordatorio calificación (ml_rating_request_log; job rating-request-daily). */
   if (req.method === "GET" && isRecordatoriosCalificacionPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
@@ -4109,8 +4368,7 @@ const server = http.createServer(async (req, res) => {
     try {
       body = await parseJsonBody(req);
     } catch (e) {
-      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+      respondJsonBodyParseError(res, e);
       return;
     }
     body = unwrapJsonBodyIfNeeded(body);
@@ -4158,8 +4416,7 @@ const server = http.createServer(async (req, res) => {
       body = await parseJsonBody(req);
       body = unwrapJsonBodyIfNeeded(body);
     } catch (e) {
-      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+      respondJsonBodyParseError(res, e);
       return;
     }
     await handleWasenderWebhookPost(req, res, body, "path");
@@ -4654,6 +4911,8 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
     console.log(`WhatsApp tipo E (config): http://localhost:${PORT}/mensajes-tipo-e-whatsapp?k=TU_ADMIN_SECRET`);
+    console.log(`WhatsApp tipo F (config): http://localhost:${PORT}/mensajes-tipo-f-whatsapp?k=TU_ADMIN_SECRET`);
+    console.log(`Log WhatsApp Wasender E/F: http://localhost:${PORT}/envios-whatsapp-tipo-e?k=TU_ADMIN_SECRET`);
     console.log(`Log envíos post-venta: http://localhost:${PORT}/envios-postventa?k=TU_ADMIN_SECRET`);
     console.log(`Log tipos A/B/C (unificado): http://localhost:${PORT}/envios-tipos-abc?k=TU_ADMIN_SECRET`);
     console.log(
@@ -4672,7 +4931,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /wasender-webhooks /fetches /buyers /mensajes-postventa /mensajes-tipo-e-whatsapp /envios-postventa /envios-tipos-abc /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /wasender-webhooks /fetches /buyers /mensajes-postventa /mensajes-tipo-e-whatsapp /mensajes-tipo-f-whatsapp /envios-whatsapp-tipo-e /envios-postventa /envios-tipos-abc /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

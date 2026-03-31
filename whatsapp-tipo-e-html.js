@@ -41,7 +41,7 @@ function renderWhatsappTipoEPage(row, esc) {
 </head>
 <body>
   <h1>WhatsApp tipo E (orden recibida)</h1>
-  <p class="lead">Una sola configuración en <code>ml_whatsapp_tipo_e_config</code>. Si un campo queda vacío al guardar, se borra en BD y en el envío se usan variables de entorno o valores por defecto del servidor. Placeholders paso 2: <code>{{order_id}}</code> <code>{{buyer_id}}</code> <code>{{seller_id}}</code> <code>{{status}}</code> <code>{{maps_url}}</code>. Última actualización: <strong>${updatedAt}</strong>.</p>
+  <p class="lead">Una sola configuración en <code>ml_whatsapp_tipo_e_config</code>. Si un campo queda vacío al guardar, se borra en BD y en el envío se usan variables de entorno o valores por defecto del servidor. Placeholders paso 2: <code>{{order_id}}</code> <code>{{buyer_id}}</code> <code>{{seller_id}}</code> <code>{{status}}</code> <code>{{maps_url}}</code>. Mensajes tipo F (pregunta + opcional E×2): <code>/mensajes-tipo-f-whatsapp?k=…</code>. Última actualización: <strong>${updatedAt}</strong>.</p>
 
   <section>
     <h2>Paso 1 — Imagen</h2>

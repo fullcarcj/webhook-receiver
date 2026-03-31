@@ -2,7 +2,9 @@
  * MENSAJE TIPO C (`MESSAGE_TYPE_C` en ml-message-types.js): recordatorio para que el comprador califique.
  *
  * Job diario (cron): envía un mensaje post-venta pidiendo calificación al comprador
- * solo si vos ya calificaste (lado sale) y la calificación compra→nosotros está **pending**
+ * solo si tu calificación venta→comprador (lado sale) es **positiva y concretada** en ml_order_feedback
+ * (rating positive y fulfilled true; no aplica a positiva aún no concretada ni a neutral/negative),
+ * la calificación compra→nosotros está **pending**
  * (sin rating: feedback_purchase_value IS NULL y texto pending/vacío; sin fila purchase con rating en ml_order_feedback),
  * y la orden tiene date_created dentro de la ventana (ML_RATING_REQUEST_LOOKBACK_DAYS).
  *

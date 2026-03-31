@@ -40,7 +40,12 @@ async function processFilemakerTipoGPost(body) {
   const n = normalizePayloadKeys(body);
   const orderId = parsePositiveId(n.orden_id ?? n.order_id);
   const buyerId = parsePositiveId(n.buyer_id ?? n.byer_id);
-  const phoneRaw = n.phone != null ? String(n.phone).trim() : "";
+  const phoneRaw =
+    n.phone != null
+      ? String(n.phone).trim()
+      : n.phone_1 != null
+        ? String(n.phone_1).trim()
+        : "";
   const tipoRetiroRaw =
     n.tipo_de_retiro ??
     n.tipo_retiro ??

@@ -1621,7 +1621,13 @@ function listMlQuestionsPending(limit, maxAllowed) {
   return db
     .prepare(
       `SELECT q.id, q.ml_question_id, q.ml_user_id, q.item_id, q.buyer_id, q.question_text, q.ml_status, q.date_created, q.raw_json, q.notification_id, q.ia_auto_route_detail, q.created_at, q.updated_at,
-              b.phone_1 AS buyer_phone_1, b.phone_2 AS buyer_phone_2
+              b.phone_1 AS buyer_phone_1, b.phone_2 AS buyer_phone_2,
+              CASE WHEN EXISTS (
+                SELECT 1 FROM ml_whatsapp_wasender_log w
+                WHERE w.ml_question_id = q.ml_question_id
+                  AND w.message_kind = 'F'
+                  AND w.outcome = 'success'
+              ) THEN 'enviado' ELSE 'pendiente' END AS whatsapp_tipo_f
        FROM ml_questions_pending q
        LEFT JOIN ml_buyers b ON b.buyer_id = q.buyer_id
        ORDER BY q.id DESC LIMIT ?`

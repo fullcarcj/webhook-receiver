@@ -1873,13 +1873,22 @@ async function upsertMlQuestionAnswered(row) {
   return rows[0] ? Number(rows[0].id) : null;
 }
 
+/**
+ * Lista pending; incluye `whatsapp_tipo_f`: `enviado` si existe log Wasender tipo F con outcome success para esa pregunta, si no `pendiente`.
+ */
 async function listMlQuestionsPending(limit, maxAllowed) {
   await ensureSchema();
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 100, 1), cap);
   const { rows } = await pool.query(
     `SELECT q.id, q.ml_question_id, q.ml_user_id, q.item_id, q.buyer_id, q.question_text, q.ml_status, q.date_created, q.raw_json, q.notification_id, q.ia_auto_route_detail, q.created_at, q.updated_at,
-            b.phone_1 AS buyer_phone_1, b.phone_2 AS buyer_phone_2
+            b.phone_1 AS buyer_phone_1, b.phone_2 AS buyer_phone_2,
+            CASE WHEN EXISTS (
+              SELECT 1 FROM ml_whatsapp_wasender_log w
+              WHERE w.ml_question_id = q.ml_question_id
+                AND w.message_kind = 'F'
+                AND w.outcome = 'success'
+            ) THEN 'enviado' ELSE 'pendiente' END AS whatsapp_tipo_f
      FROM ml_questions_pending q
      LEFT JOIN ml_buyers b ON b.buyer_id = q.buyer_id
      ORDER BY q.id DESC LIMIT $1`,

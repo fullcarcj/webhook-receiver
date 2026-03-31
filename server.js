@@ -2497,14 +2497,14 @@ const server = http.createServer(async (req, res) => {
     const tableHead =
       tabla === "answered"
         ? "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>phone_1</th><th>phone_2</th><th>pregunta</th><th>respuesta</th><th>status</th><th>date_created</th><th>Δs</th><th>answered_at</th></tr></thead>"
-        : "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>phone_1</th><th>phone_2</th><th>pregunta</th><th>status</th><th>date_created</th><th>updated_at</th><th>ia_auto_route_detail</th></tr></thead>";
+        : "<thead><tr><th>id</th><th>ml_question_id</th><th>user_id</th><th>item_id</th><th>buyer_id</th><th>phone_1</th><th>phone_2</th><th>pregunta</th><th>status</th><th>tipo F WhatsApp</th><th>date_created</th><th>updated_at</th><th>ia_auto_route_detail</th></tr></thead>";
     function buyerPhoneCell(val) {
       if (val == null || String(val).trim() === "") return "—";
       return escapeHtml(String(val));
     }
     const tableRows =
       rows.length === 0
-        ? `<tr><td colspan="${tabla === "answered" ? 13 : 12}">Sin registros.</td></tr>`
+        ? `<tr><td colspan="13">Sin registros.</td></tr>`
         : tabla === "answered"
           ? rows
               .map((r) => {
@@ -2556,6 +2556,10 @@ const server = http.createServer(async (req, res) => {
                   rawIa.trim() !== ""
                     ? `${escapeHtml(rawIa.length > 140 ? `${rawIa.slice(0, 140)}…` : rawIa)}`
                     : "—";
+                const wf =
+                  r.whatsapp_tipo_f === "enviado"
+                    ? '<span title="Hay envío tipo F con éxito en ml_whatsapp_wasender_log">enviado</span>'
+                    : '<span title="Aún no hay envío tipo F con éxito">pendiente</span>';
                 return `<tr>
   <td>${escapeHtml(r.id)}</td>
   <td>${escapeHtml(r.ml_question_id)}</td>
@@ -2566,6 +2570,7 @@ const server = http.createServer(async (req, res) => {
   <td class="muted mono">${buyerPhoneCell(r.buyer_phone_2)}</td>
   <td class="muted">${qt}</td>
   <td>${escapeHtml(r.ml_status)}</td>
+  <td class="muted">${wf}</td>
   <td class="muted" title="date_created de la pregunta (API ML)">${qdcP}</td>
   <td class="muted">${escapeHtml(r.updated_at)}</td>
   <td class="muted mono" title="${escapeAttr(rawIa)}">${iaPreview}</td>

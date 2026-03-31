@@ -60,6 +60,7 @@ const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
 const { renderWhatsappTipoEPage } = require("./whatsapp-tipo-e-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
+const { maybeProcessInternalOrderMessageForTipoE } = require("./ml-whatsapp-internal-order-message");
 const {
   getAccessToken,
   getAccessTokenForMlUser,
@@ -943,6 +944,11 @@ function scheduleTopicFetchFromWebhook(body) {
               resource: resourceStr,
               notificationId: notifId,
             }).catch((e) => console.error("[post-sale]", e.message));
+            maybeProcessInternalOrderMessageForTipoE({
+              mlUserId,
+              parsed,
+              resourceStr,
+            }).catch((e) => console.error("[whatsapp tipo E internal]", e.message));
           });
         }
 

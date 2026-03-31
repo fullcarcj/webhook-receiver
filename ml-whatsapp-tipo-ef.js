@@ -10,6 +10,12 @@
  *   ML_WHATSAPP_TIPO_E_IMAGE_URL, ML_WHATSAPP_TIPO_E_IMAGE_CAPTION, ML_WHATSAPP_TIPO_E_DELAY_MS
  *   ML_WHATSAPP_TIPO_E_LOCATION_LAT / _LNG, _NAME, _ADDRESS, ML_WHATSAPP_TIPO_E_MAPS_URL
  *   ML_WHATSAPP_TIPO_E_LOCATION_TEXT — leyenda paso 2 ({{order_id}} {{maps_url}} …)
+ *
+ * Tope semanal por **destino** (E.164): no repetir el **par** (pasos 1+2) al **mismo celular** si ya hubo
+ * un par completo exitoso a ese número en la ventana (por defecto 7 días). No aplica por comprador ni por
+ * orden distinta con otro número: si el cliente cambia el celular en la orden y el nuevo destino normaliza
+ * a otro E.164, el historial del número anterior no bloquea.
+ * ML_WHATSAPP_TIPO_E_WEEKLY_CAP=0 lo desactiva. ML_WHATSAPP_TIPO_E_WEEKLY_CAP_DAYS — días (default 7).
  */
 
 require("./load-env-local");
@@ -57,6 +63,18 @@ const DEFAULT_TIPO_F =
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function getTipoEWeeklyCapWindowDays() {
+  const n = Number(process.env.ML_WHATSAPP_TIPO_E_WEEKLY_CAP_DAYS ?? 7);
+  if (!Number.isFinite(n) || n < 1) return 7;
+  return Math.min(31, Math.floor(n));
+}
+
+function tipoEWeeklyCapSinceIso() {
+  const d = new Date();
+  d.setTime(d.getTime() - getTipoEWeeklyCapWindowDays() * 24 * 60 * 60 * 1000);
+  return d.toISOString();
 }
 
 function applyPlaceholders(template, vars) {
@@ -168,6 +186,7 @@ function buildTipoELocationStep2(vars, argsTextOverride, merged) {
   };
 }
 
+/** Primer teléfono normalizable. El tope semanal tipo E usa solo el E.164 de destino (no buyer_id). */
 function pickFirstPhoneE164(buyer, defaultCountryCode) {
   const phones = [
     { raw: buyer.phone_1, source: "phone_1" },
@@ -268,6 +287,38 @@ async function trySendWhatsappTipoEForOrder(args) {
   }
 
   const { e164, source } = picked;
+
+  if (
+    prevOk === 0 &&
+    process.env.ML_WHATSAPP_TIPO_E_WEEKLY_CAP !== "0" &&
+    process.env.ML_WHATSAPP_TIPO_E_WEEKLY_CAP !== "false"
+  ) {
+    const since = tipoEWeeklyCapSinceIso();
+    const pairsThisWindow = await db.countMlWhatsappTipoECompletedPairsForPhoneSince(
+      mlUserId,
+      e164,
+      since
+    );
+    if (pairsThisWindow > 0) {
+      await db.insertMlWhatsappWasenderLog({
+        message_kind: "E",
+        ml_user_id: mlUserId,
+        buyer_id: buyerId,
+        order_id: orderId,
+        phone_e164: e164,
+        phone_source: source,
+        outcome: "skipped",
+        skip_reason: `tope semanal tipo E (mismo celular / E.164): ya hubo un par completo a este destino en los últimos ${getTipoEWeeklyCapWindowDays()} día(s)`,
+        text_preview: MESSAGE_TYPE_E,
+      });
+      return {
+        ok: false,
+        outcome: "weekly_cap_phone",
+        detail: "máximo un par tipo E por destino (E.164) en la ventana; otro celular no cuenta",
+      };
+    }
+  }
+
   const vars = {
     order_id: orderId,
     buyer_id: buyerId,

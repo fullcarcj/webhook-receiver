@@ -1,0 +1,142 @@
+/**
+ * Mensajes internos de orden (tag `internal` en ML): si el texto incluye un móvil VE `04#########`,
+ * guardar en ml_buyers (phone_1 → phone_2 → sustituir phone_1) e invocar envío tipo E (2 mensajes por orden).
+ *
+ * ML_INTERNAL_ORDER_MESSAGE_TAG — tag API a considerar (default: internal).
+ * ML_WHATSAPP_TIPO_E_INTERNAL_MESSAGE=0 — desactiva este flujo.
+ */
+
+const db = require("./db");
+const { extractOrderIdFromMessage } = require("./ml-pack-extract");
+const { extractBuyerIdForPostSale } = require("./ml-buyer-extract");
+const { trySendWhatsappTipoEForOrder } = require("./ml-whatsapp-tipo-ef");
+
+function internalTagFromEnv() {
+  const t = (process.env.ML_INTERNAL_ORDER_MESSAGE_TAG || "internal").trim().toLowerCase();
+  return t || "internal";
+}
+
+function isInternalOrderMessageTag(parsed, resourceStr) {
+  const want = internalTagFromEnv();
+  const check = (t) => t != null && String(t).trim().toLowerCase() === want;
+  if (parsed && typeof parsed === "object") {
+    if (check(parsed.tag)) return true;
+    if (check(parsed.message_type)) return true;
+    if (check(parsed.type)) return true;
+    const msg = parsed.message;
+    if (msg && typeof msg === "object" && check(msg.tag)) return true;
+  }
+  const rs = resourceStr != null ? String(resourceStr) : "";
+  if (!rs) return false;
+  const esc = want.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`[?&]tag=${esc}(?:&|$)`, "i");
+  if (re.test(rs)) return true;
+  try {
+    if (re.test(decodeURIComponent(rs))) return true;
+  } catch (_) {
+    /* ignore */
+  }
+  return false;
+}
+
+function extractMessageTextFromMlMessagePayload(data) {
+  if (!data || typeof data !== "object") return "";
+  const parts = [];
+  const push = (v) => {
+    if (v == null) return;
+    if (typeof v === "string") {
+      const t = v.trim();
+      if (t) parts.push(t);
+    } else if (typeof v === "object" && v.text != null) {
+      push(String(v.text));
+    }
+  };
+  push(data.text);
+  push(data.body);
+  push(data.plain_text);
+  const msg = data.message;
+  if (typeof msg === "string") push(msg);
+  else if (msg && typeof msg === "object") push(msg.text);
+  return parts.join("\n");
+}
+
+/** @returns {string|null} primer match 04 + 9 dígitos (11 caracteres). */
+function extractFirstMobile04(text) {
+  if (!text || typeof text !== "string") return null;
+  const m = text.match(/\b04\d{9}\b/);
+  return m ? m[0] : null;
+}
+
+function isPhoneSlotEmpty(p) {
+  return p == null || String(p).trim() === "";
+}
+
+/**
+ * phone_1 vacío → phone_1; si no, phone_2 vacío → phone_2; si ambos llenos → sustituye phone_1.
+ */
+async function applyExtractedPhoneToBuyer(buyerId, digits11) {
+  const row = await db.getMlBuyer(buyerId);
+  if (!row) {
+    await db.upsertMlBuyer({ buyer_id: buyerId, phone_1: digits11, phone_2: null });
+    return;
+  }
+  if (isPhoneSlotEmpty(row.phone_1)) {
+    await db.updateMlBuyerPhones(buyerId, { phone_1: digits11 });
+  } else if (isPhoneSlotEmpty(row.phone_2)) {
+    await db.updateMlBuyerPhones(buyerId, { phone_2: digits11 });
+  } else {
+    await db.updateMlBuyerPhones(buyerId, { phone_1: digits11 });
+  }
+}
+
+/**
+ * @param {{ mlUserId: number, parsed: object, resourceStr?: string }} args
+ */
+async function maybeProcessInternalOrderMessageForTipoE(args) {
+  const off = process.env.ML_WHATSAPP_TIPO_E_INTERNAL_MESSAGE;
+  if (off === "0" || off === "false" || off === "off") {
+    return { skipped: true, reason: "disabled_env" };
+  }
+
+  const parsed = args.parsed;
+  if (!parsed || typeof parsed !== "object") {
+    return { skipped: true, reason: "no_payload" };
+  }
+
+  if (!isInternalOrderMessageTag(parsed, args.resourceStr)) {
+    return { skipped: true, reason: "not_internal" };
+  }
+
+  const orderId = extractOrderIdFromMessage(parsed);
+  const text = extractMessageTextFromMlMessagePayload(parsed);
+  const phone = extractFirstMobile04(text);
+  if (!orderId || !phone) {
+    return { skipped: true, reason: "no_order_or_phone" };
+  }
+
+  const buyerId = extractBuyerIdForPostSale(parsed, args.mlUserId);
+  if (!buyerId) {
+    return { skipped: true, reason: "no_buyer_id" };
+  }
+
+  await applyExtractedPhoneToBuyer(buyerId, phone);
+
+  const r = await trySendWhatsappTipoEForOrder({
+    mlUserId: args.mlUserId,
+    orderId,
+  });
+  return {
+    ok: r.ok === true,
+    outcome: r.outcome,
+    detail: r.detail,
+    order_id: orderId,
+    buyer_id: buyerId,
+  };
+}
+
+module.exports = {
+  maybeProcessInternalOrderMessageForTipoE,
+  isInternalOrderMessageTag,
+  extractFirstMobile04,
+  extractMessageTextFromMlMessagePayload,
+};

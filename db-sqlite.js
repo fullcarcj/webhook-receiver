@@ -2505,6 +2505,31 @@ function countMlWhatsappTipoESuccessForOrder(mlUserId, orderId) {
   return r && r.c != null ? Number(r.c) : 0;
 }
 
+function countMlWhatsappTipoECompletedPairsForPhoneSince(mlUserId, phoneE164, sinceIso) {
+  const mlUid = Number(mlUserId);
+  const phone = phoneE164 != null ? String(phoneE164).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !phone || phone === "—") return 0;
+  const since =
+    sinceIso != null && String(sinceIso).trim() !== "" ? String(sinceIso).trim() : "1970-01-01T00:00:00.000Z";
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM (
+         SELECT order_id
+         FROM ml_whatsapp_wasender_log
+         WHERE message_kind = 'E'
+           AND outcome = 'success'
+           AND ml_user_id = ?
+           AND phone_e164 = ?
+           AND created_at >= ?
+           AND order_id IS NOT NULL
+         GROUP BY order_id
+         HAVING COUNT(*) >= 2
+       ) sub`
+    )
+    .get(mlUid, phone, since);
+  return r && r.c != null ? Number(r.c) : 0;
+}
+
 function getMlWhatsappTipoEConfig() {
   return (
     db
@@ -2713,6 +2738,7 @@ module.exports = {
   getMlWasenderSettings,
   upsertMlWasenderSettings,
   countMlWhatsappTipoESuccessForOrder,
+  countMlWhatsappTipoECompletedPairsForPhoneSince,
   getMlWhatsappTipoEConfig,
   upsertMlWhatsappTipoEConfig,
   insertMlWhatsappWasenderLog,

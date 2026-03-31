@@ -3364,6 +3364,36 @@ async function countMlWhatsappTipoESuccessForOrder(mlUserId, orderId) {
   return rows[0] ? Number(rows[0].c) : 0;
 }
 
+/**
+ * Cuántas órdenes distintas tienen ya **par completo** (≥2 envíos tipo E exitosos) al mismo **destino**
+ * (`phone_e164`) desde `since` (ISO). No usa buyer_id: si el cliente cambia de celular y el nuevo E.164
+ * es distinto, el conteo del número anterior no aplica.
+ */
+async function countMlWhatsappTipoECompletedPairsForPhoneSince(mlUserId, phoneE164, sinceIso) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  const phone = phoneE164 != null ? String(phoneE164).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !phone || phone === "—") return 0;
+  const since =
+    sinceIso != null && String(sinceIso).trim() !== "" ? String(sinceIso).trim() : new Date(0).toISOString();
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::bigint AS c FROM (
+       SELECT order_id
+       FROM ml_whatsapp_wasender_log
+       WHERE message_kind = 'E'
+         AND outcome = 'success'
+         AND ml_user_id = $1
+         AND phone_e164 = $2
+         AND created_at >= $3::timestamptz
+         AND order_id IS NOT NULL
+       GROUP BY order_id
+       HAVING COUNT(*) >= 2
+     ) sub`,
+    [mlUid, phone, since]
+  );
+  return rows[0] ? Number(rows[0].c) : 0;
+}
+
 async function getMlWasenderSettings() {
   await ensureSchema();
   const { rows } = await pool.query(
@@ -3511,6 +3541,7 @@ module.exports = {
   getMlWasenderSettings,
   upsertMlWasenderSettings,
   countMlWhatsappTipoESuccessForOrder,
+  countMlWhatsappTipoECompletedPairsForPhoneSince,
   getMlWhatsappTipoEConfig,
   upsertMlWhatsappTipoEConfig,
   insertMlWhatsappWasenderLog,

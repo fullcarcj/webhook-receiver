@@ -4,6 +4,7 @@
  * Copia oauth-env.json.example -> oauth-env.json y rellena (no subas oauth-env.json a git).
  * ML_COOKIES_DIR: carpeta para cookies web por cuenta ({ml_user_id}.txt); ver ml-cookies-path.js.
  * DATABASE_URL: obligatoria para la app; PostgreSQL (Render, Neon, local, etc.).
+ * Wasender webhooks: WASENDER_WEBHOOK_SECRET o WASENDER_X_WEBHOOK_SIGNATURE (= cabecera X-Webhook-Signature); ver wasender-webhook-signature.js.
  * Postgres remoto suele exigir TLS: la app activa ssl en el cliente salvo localhost o PGSSLMODE=disable.
  */
 const fs = require("fs");

@@ -1,4 +1,5 @@
 {
+  "WASENDER_WEBHOOK_SECRET": "mismo_valor_que_webhook_secret_en_panel_wasender",
   "ADMIN_SECRET": "clave_secreta_para_vistas_admin_recordatorios_y_cuentas",
   "DATABASE_URL": "postgresql://USUARIO:CLAVE@HOST:5432/NOMBRE_BD?sslmode=require",
   "ML_WEBHOOK_FETCH_RESOURCE": "1",

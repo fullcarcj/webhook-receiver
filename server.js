@@ -62,6 +62,7 @@ const { renderWhatsappTipoEPage } = require("./whatsapp-tipo-e-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
 const { maybeProcessInternalOrderMessageForTipoE } = require("./ml-whatsapp-internal-order-message");
 const { appendWasenderWebhookNdjsonLine } = require("./wasender-webhook-log");
+const { wasenderWebhookSignatureOk } = require("./wasender-webhook-signature");
 const {
   getAccessToken,
   getAccessTokenForMlUser,
@@ -507,24 +508,71 @@ function logWebhook(body, req) {
   console.log("[webhook]", line);
 }
 
-/** Wasender: si `WASENDER_WEBHOOK_SECRET` está definido, exige cabecera `X-Webhook-Signature` idéntica. */
-function wasenderWebhookSignatureOk(req) {
-  const secret = process.env.WASENDER_WEBHOOK_SECRET;
-  if (secret == null || String(secret).trim() === "") {
-    return { ok: true, skipped: true };
-  }
-  const sig = req.headers["x-webhook-signature"];
-  return {
-    ok: sig != null && String(sig).trim() === String(secret).trim(),
-    skipped: false,
-  };
-}
-
 function extractWasenderEvent(body) {
   if (body != null && typeof body === "object" && !Array.isArray(body) && body.event != null) {
     return String(body.event);
   }
   return null;
+}
+
+/**
+ * POST /webhook compartido con ML: Wasender trae `event` (p. ej. messages.update) y no usa
+ * `topic`/`resource` como las notificaciones ML. Opcional: cabecera X-Webhook-Signature si no hay `event`.
+ */
+function isWasenderWebhookPayload(body, req) {
+  const hasSig =
+    req.headers["x-webhook-signature"] != null &&
+    String(req.headers["x-webhook-signature"]).trim() !== "";
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  if (body.topic != null && String(body.topic).trim() !== "") return false;
+  if (body.resource != null && String(body.resource).trim() !== "") return false;
+  const ev = body.event;
+  if (typeof ev === "string" && ev.trim() !== "") return true;
+  return hasSig;
+}
+
+/**
+ * @param {import("http").IncomingMessage} req
+ * @param {import("http").ServerResponse} res
+ * @param {object} body — ya parseado y unwrap
+ * @param {string} [sourceLabel] — "webhook" | "path" para logs
+ */
+async function handleWasenderWebhookPost(req, res, body, sourceLabel) {
+  const src = sourceLabel || "wasender";
+  const sigCheck = wasenderWebhookSignatureOk(req);
+  if (!sigCheck.ok) {
+    res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "firma inválida (X-Webhook-Signature)" }));
+    return;
+  }
+  const sigHeader =
+    req.headers["x-webhook-signature"] != null
+      ? String(req.headers["x-webhook-signature"]).slice(0, 500)
+      : null;
+  const event = extractWasenderEvent(body);
+  const payloadStr = JSON.stringify(body);
+  let id = null;
+  try {
+    id = await insertWasenderWebhookEvent({
+      event,
+      payload: payloadStr,
+      x_webhook_signature: sigHeader,
+      signature_ok: sigCheck.skipped ? null : true,
+    });
+  } catch (e) {
+    console.error("[db] wasender_webhook no guardado:", e.message);
+  }
+  appendWasenderWebhookNdjsonLine({
+    time: new Date().toISOString(),
+    id,
+    event,
+    ip: req.socket.remoteAddress,
+    source: src,
+    payload: body,
+  });
+  console.log("[wasender-webhook] id=%s event=%s source=%s", id, event, src);
+  res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ ok: true, received: true, id }));
 }
 
 /** Extrae item_id desde resource de webhook (path /items/… o id suelto). */
@@ -1081,7 +1129,7 @@ const server = http.createServer(async (req, res) => {
         hooks_recibidos:
           "GET /hooks?k=ADMIN_SECRET (webhook_events: cada POST /webhook guarda JSON; POST /reg también)",
         wasender_webhook:
-          "POST rutas Wasender (distintas de /webhook de ML): default /wasender-webhook + alias /api/wasender/webhook (WASENDER_WEBHOOK_PATH, WASENDER_WEBHOOK_ALIASES) — wasender_webhook_events; GET /wasender-webhooks?k=ADMIN_SECRET",
+          "Wasender puede usar el mismo POST que ML: /webhook (cuerpo con event Wasender, sin topic/resource ML) o rutas dedicadas /wasender-webhook, /api/wasender/webhook — wasender_webhook_events; GET /wasender-webhooks?k=ADMIN_SECRET",
         topic_fetches_ml:
           "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1). Solo si body.topic es exactamente orders_feedback: tras GET /orders/{id}/feedback se actualizan ml_order_feedback y feedback_* en ml_orders (no se infiere el topic desde el resource)",
         borrar_todos_los_fetches:
@@ -1515,11 +1563,11 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Webhooks Wasender API</h1>
-  <p class="lead">${items.length} registro(s). <strong>POST Wasender</strong> (no confundir con <code>${escapeHtml(
+  <p class="lead">${items.length} registro(s). <strong>Wasender</strong> puede entrar por el mismo <code>${escapeHtml(
       WEBHOOK_PATH
-    )}</code> de Mercado Libre). Rutas aceptadas: <code>${escapeHtml(
+    )}</code> que Mercado Libre (JSON con <code>event</code>, sin <code>topic</code>/<code>resource</code> ML) o por rutas dedicadas: <code>${escapeHtml(
       Array.from(getWasenderWebhookPostPaths()).join(", ")
-    )}</code>. Tabla <code>wasender_webhook_events</code>. NDJSON: <code>wasender-webhook.log</code> (<code>WASENDER_WEBHOOK_LOG_FILE=0</code> desactiva). Firma: <code>WASENDER_WEBHOOK_SECRET</code> + <code>X-Webhook-Signature</code>. Alias extra: <code>WASENDER_WEBHOOK_ALIASES</code> (coma) o vacío para solo la principal.</p>
+    )}</code>. Tabla <code>wasender_webhook_events</code>. NDJSON: <code>wasender-webhook.log</code>. Firma: env <code>WASENDER_WEBHOOK_SECRET</code> o <code>WASENDER_X_WEBHOOK_SIGNATURE</code> (mismo valor que el Webhook Secret del panel) → cabecera <code>X-Webhook-Signature</code>.</p>
   <p class="lead"><strong>Qué permite tener los hooks (según documentación Wasender):</strong></p>
   <ul class="potential">
     <li><strong>Mensajes</strong> — entrantes/salientes (<code>messages.received</code>, <code>messages.upsert</code>), <strong>estados</strong> entregado/leído (<code>messages.update</code>), borrados, reacciones; enlazar con <code>msgId</code> de envíos API.</li>
@@ -4065,6 +4113,11 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
       return;
     }
+    body = unwrapJsonBodyIfNeeded(body);
+    if (isWasenderWebhookPayload(body, req)) {
+      await handleWasenderWebhookPost(req, res, body, "webhook");
+      return;
+    }
 
     logWebhook(body, req);
 
@@ -4098,7 +4151,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  /** Webhooks Wasender API (sesión WhatsApp): guarda JSON en `wasender_webhook_events` + NDJSON opcional. */
+  /** Webhooks Wasender API (alias de ruta; mismo handler que POST /webhook cuando detecta Wasender). */
   if (req.method === "POST" && matchesWasenderWebhookPostPath(url.pathname)) {
     let body;
     try {
@@ -4109,39 +4162,7 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
       return;
     }
-    const sigCheck = wasenderWebhookSignatureOk(req);
-    if (!sigCheck.ok) {
-      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: false, error: "firma inválida (X-Webhook-Signature)" }));
-      return;
-    }
-    const sigHeader =
-      req.headers["x-webhook-signature"] != null
-        ? String(req.headers["x-webhook-signature"]).slice(0, 500)
-        : null;
-    const event = extractWasenderEvent(body);
-    const payloadStr = JSON.stringify(body);
-    let id = null;
-    try {
-      id = await insertWasenderWebhookEvent({
-        event,
-        payload: payloadStr,
-        x_webhook_signature: sigHeader,
-        signature_ok: sigCheck.skipped ? null : true,
-      });
-    } catch (e) {
-      console.error("[db] wasender_webhook no guardado:", e.message);
-    }
-    appendWasenderWebhookNdjsonLine({
-      time: new Date().toISOString(),
-      id,
-      event,
-      ip: req.socket.remoteAddress,
-      payload: body,
-    });
-    console.log("[wasender-webhook] id=%s event=%s", id, event);
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: true, received: true, id }));
+    await handleWasenderWebhookPost(req, res, body, "path");
     return;
   }
 
@@ -4559,7 +4580,9 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`Escuchando en http://localhost:${PORT} (todas las interfaces, para tunel loclx/ngrok)`);
   console.log(`Webhook POST: http://localhost:${PORT}${WEBHOOK_PATH}`);
   console.log(
-    `Wasender webhook POST (≠ ML ${WEBHOOK_PATH}): ${Array.from(getWasenderWebhookPostPaths())
+    `Wasender webhook: mismo POST que ML ${WEBHOOK_PATH} (detección por cuerpo) o dedicadas: ${Array.from(
+      getWasenderWebhookPostPaths()
+    )
       .map((p) => `http://localhost:${PORT}${p}`)
       .join(" · ")}`
   );

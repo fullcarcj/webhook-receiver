@@ -31,13 +31,16 @@
     "retiro-broadcast-print-templates": "node ml-retiro-broadcast.js --print-templates",
     "whatsapp-tipo-e": "node ml-whatsapp-tipo-ef.js --tipo-e",
     "whatsapp-tipo-f": "node ml-whatsapp-tipo-ef.js --tipo-f",
-    "test-wasender-hook": "node scripts/test-wasender-webhook.js"
+    "test-wasender-hook": "node scripts/test-wasender-webhook.js",
+    "process-lote-images": "node scripts/process-lote-imagenes-solomotor.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
-    "pg": "^8.13.1"
+    "p-limit": "^6.2.0",
+    "pg": "^8.13.1",
+    "sharp": "^0.33.5"
   }
 }

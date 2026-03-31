@@ -3,5 +3,6 @@ oauth-env.json
 ml-token.json
 data/
 log.txt
+wasender-webhook.log
 node_modules/
 programa_dos/

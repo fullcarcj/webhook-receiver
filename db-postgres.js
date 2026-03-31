@@ -76,6 +76,16 @@ async function runSchemaAndSeed() {
       resource TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_webhook_events_id ON webhook_events(id)`,
+    `CREATE TABLE IF NOT EXISTS wasender_webhook_events (
+      id BIGSERIAL PRIMARY KEY,
+      received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      event TEXT,
+      payload TEXT NOT NULL,
+      x_webhook_signature TEXT,
+      signature_ok BOOLEAN
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_wasender_webhook_received ON wasender_webhook_events(received_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_wasender_webhook_event ON wasender_webhook_events(event)`,
     `CREATE TABLE IF NOT EXISTS ml_accounts (
       ml_user_id BIGINT PRIMARY KEY,
       refresh_token TEXT NOT NULL,
@@ -956,6 +966,46 @@ async function insertWebhook(payloadObj) {
     [received_at, payload, topic, resource]
   );
   return Number(rows[0].id);
+}
+
+/**
+ * Webhooks entrantes de Wasender API (eventos de sesión WhatsApp).
+ * @param {{ event?: string|null, payload: string, x_webhook_signature?: string|null, signature_ok?: boolean|null }} row
+ */
+async function insertWasenderWebhookEvent(row) {
+  await ensureSchema();
+  const payload = row.payload != null ? String(row.payload) : "";
+  const event = row.event != null ? String(row.event).slice(0, 512) : null;
+  const xSig =
+    row.x_webhook_signature != null ? String(row.x_webhook_signature).slice(0, 500) : null;
+  let sigOk = null;
+  if (row.signature_ok === true || row.signature_ok === false) sigOk = row.signature_ok;
+  const { rows } = await pool.query(
+    `INSERT INTO wasender_webhook_events (event, payload, x_webhook_signature, signature_ok)
+     VALUES ($1, $2, $3, $4) RETURNING id`,
+    [event, payload, xSig, sigOk]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+async function listWasenderWebhookEvents(limit, maxAllowed) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 50, 1), cap);
+  const { rows } = await pool.query(
+    `SELECT id, received_at, event, payload, x_webhook_signature, signature_ok
+     FROM wasender_webhook_events ORDER BY id DESC LIMIT $1`,
+    [n]
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    received_at:
+      r.received_at instanceof Date ? r.received_at.toISOString() : String(r.received_at),
+    event: r.event,
+    x_webhook_signature: r.x_webhook_signature,
+    signature_ok: r.signature_ok,
+    data: JSON.parse(r.payload),
+  }));
 }
 
 async function listWebhooks(limit, maxAllowed) {
@@ -3494,6 +3544,8 @@ module.exports = {
   insertWebhook,
   listWebhooks,
   deleteWebhooks,
+  insertWasenderWebhookEvent,
+  listWasenderWebhookEvents,
   get dbPath() {
     return dbPathDisplay();
   },

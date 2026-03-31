@@ -61,6 +61,7 @@ const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
 const { renderWhatsappTipoEPage } = require("./whatsapp-tipo-e-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
 const { maybeProcessInternalOrderMessageForTipoE } = require("./ml-whatsapp-internal-order-message");
+const { appendWasenderWebhookNdjsonLine } = require("./wasender-webhook-log");
 const {
   getAccessToken,
   getAccessTokenForMlUser,
@@ -78,6 +79,8 @@ const {
   insertWebhook,
   listWebhooks,
   deleteWebhooks,
+  insertWasenderWebhookEvent,
+  listWasenderWebhookEvents,
   upsertMlAccount,
   listMlAccounts,
   setMlAccountCookiesNetscape,
@@ -140,6 +143,30 @@ const {
 
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
+/** POST Wasender API: eventos de sesión WhatsApp (independiente de {@link WEBHOOK_PATH} de Mercado Libre). */
+const WASENDER_WEBHOOK_PATH = process.env.WASENDER_WEBHOOK_PATH || "/wasender-webhook";
+/**
+ * Rutas POST adicionales para el mismo handler Wasender (coma-separadas).
+ * Vacío explícito = solo la ruta principal. Si la variable no existe, se añade el alias típico de docs.
+ */
+function getWasenderWebhookPostPaths() {
+  const set = new Set();
+  set.add(WASENDER_WEBHOOK_PATH);
+  const extra = process.env.WASENDER_WEBHOOK_ALIASES;
+  const raw =
+    extra !== undefined ? String(extra) : "/api/wasender/webhook";
+  if (raw.trim() === "" || raw.trim() === "-") return set;
+  for (const p of raw.split(",")) {
+    const t = p.trim();
+    if (t) set.add(t);
+  }
+  return set;
+}
+
+function matchesWasenderWebhookPostPath(pathname) {
+  return pathname != null && getWasenderWebhookPostPaths().has(pathname);
+}
+
 const REG_PATH = process.env.REG_PATH || "/reg";
 /** GET al resource del webhook y guarda respuesta en tabla ml_topic_fetches (requiere cuenta en ml_accounts). */
 const ML_WEBHOOK_FETCH_RESOURCE = process.env.ML_WEBHOOK_FETCH_RESOURCE === "1";
@@ -158,6 +185,10 @@ function isCuentasPath(pathname) {
 
 function isHooksPath(pathname) {
   return pathname === "/hooks" || pathname === "/hooks/";
+}
+
+function isWasenderWebhooksPath(pathname) {
+  return pathname === "/wasender-webhooks" || pathname === "/wasender-webhooks/";
 }
 
 function isFetchesPath(pathname) {
@@ -474,6 +505,26 @@ function logWebhook(body, req) {
     _id: body._id,
   });
   console.log("[webhook]", line);
+}
+
+/** Wasender: si `WASENDER_WEBHOOK_SECRET` está definido, exige cabecera `X-Webhook-Signature` idéntica. */
+function wasenderWebhookSignatureOk(req) {
+  const secret = process.env.WASENDER_WEBHOOK_SECRET;
+  if (secret == null || String(secret).trim() === "") {
+    return { ok: true, skipped: true };
+  }
+  const sig = req.headers["x-webhook-signature"];
+  return {
+    ok: sig != null && String(sig).trim() === String(secret).trim(),
+    skipped: false,
+  };
+}
+
+function extractWasenderEvent(body) {
+  if (body != null && typeof body === "object" && !Array.isArray(body) && body.event != null) {
+    return String(body.event);
+  }
+  return null;
 }
 
 /** Extrae item_id desde resource de webhook (path /items/… o id suelto). */
@@ -1029,6 +1080,8 @@ const server = http.createServer(async (req, res) => {
           "GET /cuentas?k=ADMIN_SECRET (lista cuentas; mismo valor que variable ADMIN_SECRET)",
         hooks_recibidos:
           "GET /hooks?k=ADMIN_SECRET (webhook_events: cada POST /webhook guarda JSON; POST /reg también)",
+        wasender_webhook:
+          "POST rutas Wasender (distintas de /webhook de ML): default /wasender-webhook + alias /api/wasender/webhook (WASENDER_WEBHOOK_PATH, WASENDER_WEBHOOK_ALIASES) — wasender_webhook_events; GET /wasender-webhooks?k=ADMIN_SECRET",
         topic_fetches_ml:
           "GET /fetches?k=ADMIN_SECRET (orden por topic; ?topic=orders_v2 filtra; ML_WEBHOOK_FETCH_RESOURCE=1). Solo si body.topic es exactamente orders_feedback: tras GET /orders/{id}/feedback se actualizan ml_order_feedback y feedback_* en ml_orders (no se infiere el topic desde el resource)",
         borrar_todos_los_fetches:
@@ -1394,6 +1447,94 @@ const server = http.createServer(async (req, res) => {
 </html>`;
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(hooksHtml);
+    return;
+  }
+
+  /** Eventos Wasender API guardados en PostgreSQL (misma clave ADMIN_SECRET que /hooks). */
+  if (req.method === "GET" && isWasenderWebhooksPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Wasender webhooks</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Wasender webhooks</title><p>Acceso denegado. Usa <code>/wasender-webhooks?k=…</code>.</p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    let items;
+    try {
+      items = await listWasenderWebhookEvents(lim, 2000);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, count: items.length, items }));
+      return;
+    }
+    const hookRows = items
+      .map((row) => {
+        const preview = JSON.stringify(row.data).slice(0, 320);
+        return `<tr>
+  <td>${escapeHtml(row.id)}</td>
+  <td class="muted">${escapeHtml(row.received_at)}</td>
+  <td>${escapeHtml(row.event)}</td>
+  <td>${row.signature_ok === null ? "—" : row.signature_ok ? "sí" : "no"}</td>
+  <td><pre class="payload">${escapeHtml(preview)}${preview.length >= 320 ? "…" : ""}</pre></td>
+</tr>`;
+      })
+      .join("");
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Wasender webhooks</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
+    ul.potential { color: #8b98a5; font-size: 0.82rem; max-width: 900px; line-height: 1.45; }
+    table { border-collapse: collapse; width: 100%; max-width: 1400px; margin-top: 1rem; font-size: 0.78rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.8rem; }
+    pre.payload { margin: 0; max-height: 100px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+  </style>
+</head>
+<body>
+  <h1>Webhooks Wasender API</h1>
+  <p class="lead">${items.length} registro(s). <strong>POST Wasender</strong> (no confundir con <code>${escapeHtml(
+      WEBHOOK_PATH
+    )}</code> de Mercado Libre). Rutas aceptadas: <code>${escapeHtml(
+      Array.from(getWasenderWebhookPostPaths()).join(", ")
+    )}</code>. Tabla <code>wasender_webhook_events</code>. NDJSON: <code>wasender-webhook.log</code> (<code>WASENDER_WEBHOOK_LOG_FILE=0</code> desactiva). Firma: <code>WASENDER_WEBHOOK_SECRET</code> + <code>X-Webhook-Signature</code>. Alias extra: <code>WASENDER_WEBHOOK_ALIASES</code> (coma) o vacío para solo la principal.</p>
+  <p class="lead"><strong>Qué permite tener los hooks (según documentación Wasender):</strong></p>
+  <ul class="potential">
+    <li><strong>Mensajes</strong> — entrantes/salientes (<code>messages.received</code>, <code>messages.upsert</code>), <strong>estados</strong> entregado/leído (<code>messages.update</code>), borrados, reacciones; enlazar con <code>msgId</code> de envíos API.</li>
+    <li><strong>Sesión</strong> — conexión/desconexión, QR renovado; alertar si el número deja de estar enlazado.</li>
+    <li><strong>Chats / contactos / grupos</strong> — altas, mute, participantes (si aplica a tu flujo).</li>
+    <li><strong>Uso práctico</strong> — confirmar entrega de tipo E/F, automatizar respuestas a texto entrante, métricas, evitar doble envío cuando el usuario ya respondió por WhatsApp.</li>
+  </ul>
+  <table>
+    <thead><tr><th>id</th><th>Recibido</th><th>event</th><th>firma OK</th><th>payload (vista)</th></tr></thead>
+    <tbody>${hookRows || '<tr><td colspan="5">Sin registros.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
     return;
   }
 
@@ -3957,6 +4098,53 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Webhooks Wasender API (sesión WhatsApp): guarda JSON en `wasender_webhook_events` + NDJSON opcional. */
+  if (req.method === "POST" && matchesWasenderWebhookPostPath(url.pathname)) {
+    let body;
+    try {
+      body = await parseJsonBody(req);
+      body = unwrapJsonBodyIfNeeded(body);
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+      return;
+    }
+    const sigCheck = wasenderWebhookSignatureOk(req);
+    if (!sigCheck.ok) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "firma inválida (X-Webhook-Signature)" }));
+      return;
+    }
+    const sigHeader =
+      req.headers["x-webhook-signature"] != null
+        ? String(req.headers["x-webhook-signature"]).slice(0, 500)
+        : null;
+    const event = extractWasenderEvent(body);
+    const payloadStr = JSON.stringify(body);
+    let id = null;
+    try {
+      id = await insertWasenderWebhookEvent({
+        event,
+        payload: payloadStr,
+        x_webhook_signature: sigHeader,
+        signature_ok: sigCheck.skipped ? null : true,
+      });
+    } catch (e) {
+      console.error("[db] wasender_webhook no guardado:", e.message);
+    }
+    appendWasenderWebhookNdjsonLine({
+      time: new Date().toISOString(),
+      id,
+      event,
+      ip: req.socket.remoteAddress,
+      payload: body,
+    });
+    console.log("[wasender-webhook] id=%s event=%s", id, event);
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, received: true, id }));
+    return;
+  }
+
   /** Vacía todas las filas de ml_topic_fetches (Respuestas API /fetches). */
   if (url.pathname === "/admin/topic-fetches") {
     if (req.method === "DELETE") {
@@ -4371,6 +4559,11 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`Escuchando en http://localhost:${PORT} (todas las interfaces, para tunel loclx/ngrok)`);
   console.log(`Webhook POST: http://localhost:${PORT}${WEBHOOK_PATH}`);
   console.log(
+    `Wasender webhook POST (≠ ML ${WEBHOOK_PATH}): ${Array.from(getWasenderWebhookPostPaths())
+      .map((p) => `http://localhost:${PORT}${p}`)
+      .join(" · ")}`
+  );
+  console.log(
     `Registro (DB): POST|GET|DELETE http://localhost:${PORT}${REG_PATH} o .../reg.php`
   );
   if (forwards.length) {
@@ -4433,6 +4626,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`OAuth code→cuenta: POST http://localhost:${PORT}/admin/oauth-exchange (JSON code + X-Admin-Secret)`);
     console.log(`Cuentas (navegador): http://localhost:${PORT}/cuentas?k=TU_ADMIN_SECRET`);
     console.log(`Hooks guardados: http://localhost:${PORT}/hooks?k=TU_ADMIN_SECRET`);
+    console.log(`Wasender webhooks: http://localhost:${PORT}/wasender-webhooks?k=TU_ADMIN_SECRET`);
     console.log(`Fetches ML: http://localhost:${PORT}/fetches?k=TU_ADMIN_SECRET (ML_WEBHOOK_FETCH_RESOURCE=1)`);
     console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
@@ -4455,7 +4649,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /mensajes-tipo-e-whatsapp /envios-postventa /envios-tipos-abc /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /wasender-webhooks /fetches /buyers /mensajes-postventa /mensajes-tipo-e-whatsapp /envios-postventa /envios-tipos-abc /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

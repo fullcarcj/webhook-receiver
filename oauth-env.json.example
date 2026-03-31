@@ -4,6 +4,8 @@
   "FILEMAKER_INVENTARIO_PRODUCTOS_SECRET": "clave_post_filemaker_inventario_misma_idea_que_tipo_g",
   "FRONTEND_API_KEY": "clave_larga_solo_para_lectura_catalogo_vite",
   "FRONTEND_CORS_ORIGINS": "https://tu-app.onrender.com",
+  "FRONTEND_RATE_LIMIT_MAX": "120",
+  "FRONTEND_RATE_LIMIT_WINDOW_MS": "60000",
   "DATABASE_URL": "postgresql://USUARIO:CLAVE@HOST:5432/NOMBRE_BD?sslmode=require",
   "PRODUCT_IMAGE_FIREBASE_BUCKET": "webhook-receiver-b74d8.firebasestorage.app",
   "PRODUCT_IMAGE_OBJECT_PREFIX": "productos",

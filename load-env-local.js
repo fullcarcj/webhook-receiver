@@ -9,8 +9,10 @@
  * PRODUCT_IMAGE_EXT: extensión (default .webp).
  * FILEMAKER_INVENTARIO_PRODUCTOS_SECRET: POST desde FileMaker a /filemaker/inventario-productos o /mensajes-inventario-productos (mismo patrón que FILEMAKER_TIPO_G_SECRET).
  * firebase-key.json: service account para scripts (p. ej. npm run upload-firebase-webp); no subir a git.
- * FRONTEND_API_KEY: solo lectura catálogo GET /api/v1/catalog (cabecera X-API-KEY); no sustituye ADMIN_SECRET.
- * FRONTEND_CORS_ORIGINS: orígenes CORS extra (coma); localhost:5173 viene por defecto.
+ * FRONTEND_API_KEY: solo lectura GET /api/v1/catalog (cabecera X-API-KEY); no sustituye ADMIN_SECRET.
+ * FRONTEND_CORS_ORIGINS: orígenes CORS extra (coma); http://localhost:5173 viene por defecto.
+ * FRONTEND_RATE_LIMIT_MAX: peticiones por ventana e IP en /api/v1/catalog (default 120); 0 = sin límite.
+ * FRONTEND_RATE_LIMIT_WINDOW_MS: ventana en ms (default 60000). GET /api/v1/health no cuenta para el límite del catálogo.
  * Wasender webhooks: WASENDER_WEBHOOK_SECRET o WASENDER_X_WEBHOOK_SIGNATURE (= cabecera X-Webhook-Signature); ver wasender-webhook-signature.js.
  * Postgres remoto suele exigir TLS: la app activa ssl en el cliente salvo localhost o PGSSLMODE=disable.
  */

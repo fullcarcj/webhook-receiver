@@ -159,7 +159,7 @@ const {
   dbPath,
 } = require("./db");
 const { enrichProductoConImagenesUrls, buildProductoImagenesUrls } = require("./producto-imagenes-urls");
-const { handlePublicCatalogRequest } = require("./public-catalog-api");
+const { handlePublicFrontendRequest } = require("./public-frontend-api");
 
 const PORT = process.env.PORT || 3001;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
@@ -1204,7 +1204,7 @@ function scheduleTopicFetchFromWebhook(body) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
 
-  if (await handlePublicCatalogRequest(req, res, url)) {
+  if (await handlePublicFrontendRequest(req, res, url)) {
     return;
   }
 
@@ -1249,7 +1249,7 @@ const server = http.createServer(async (req, res) => {
         filemaker_inventario_productos:
           "POST /filemaker/inventario-productos o POST /mensajes-inventario-productos (JSON producto + FILEMAKER_INVENTARIO_PRODUCTOS_SECRET) — upsert tabla productos; GET inventario sigue en /inventario-productos?k=ADMIN_SECRET",
         catalogo_publico_frontend:
-          "GET /api/v1/catalog?search=&limit=50&offset=0 — cabecera X-API-KEY (=FRONTEND_API_KEY); CORS FRONTEND_CORS_ORIGINS; solo id, sku, nombre, precio_venta, stock (sin ADMIN_SECRET ni datos de proveedor)",
+          "API pública /api/v1: GET /api/v1 (índice), GET /api/v1/health, GET /api/v1/catalog?search=&limit=&offset= — catálogo con cabecera X-API-KEY (=FRONTEND_API_KEY); CORS FRONTEND_CORS_ORIGINS; rate limit FRONTEND_RATE_LIMIT_*; solo id, sku, nombre, precio_venta, stock",
         envio_auto_postventa:
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:
@@ -5451,11 +5451,10 @@ server.listen(PORT, "0.0.0.0", () => {
       "[config] FILEMAKER_INVENTARIO_PRODUCTOS_SECRET no definido: POST /filemaker/inventario-productos responde 503."
     );
   }
-  if (process.env.FRONTEND_API_KEY && String(process.env.FRONTEND_API_KEY).trim() !== "") {
-    console.log(
-      `Catálogo público (frontend): GET http://localhost:${PORT}/api/v1/catalog (cabecera X-API-KEY)`
-    );
-  } else {
+  console.log(
+    `API pública (frontend): GET http://localhost:${PORT}/api/v1 · /api/v1/health — catálogo: /api/v1/catalog + cabecera X-API-KEY (FRONTEND_API_KEY)`
+  );
+  if (!process.env.FRONTEND_API_KEY || String(process.env.FRONTEND_API_KEY).trim() === "") {
     console.log("[config] FRONTEND_API_KEY no definido: GET /api/v1/catalog responde 503.");
   }
   console.log(`Token (enmascarado): GET http://localhost:${PORT}/oauth/token-status`);

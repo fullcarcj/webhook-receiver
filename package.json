@@ -26,7 +26,9 @@
     "rating-request-print-message": "node ml-rating-request-daily.js --print-message",
     "retiro-broadcast-morning": "node ml-retiro-broadcast.js --slot=morning",
     "retiro-broadcast-afternoon": "node ml-retiro-broadcast.js --slot=afternoon",
-    "retiro-broadcast-print-templates": "node ml-retiro-broadcast.js --print-templates"
+    "retiro-broadcast-print-templates": "node ml-retiro-broadcast.js --print-templates",
+    "whatsapp-tipo-e": "node ml-whatsapp-tipo-ef.js --tipo-e",
+    "whatsapp-tipo-f": "node ml-whatsapp-tipo-ef.js --tipo-f"
   },
   "engines": {
     "node": ">=18"

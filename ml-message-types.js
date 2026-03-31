@@ -15,9 +15,17 @@ const MESSAGE_TYPE_C = "tipo_c_recordatorio_calificacion";
 /** Respuestas automáticas a preguntas de publicaciones (POST /answers, `ml-questions-ia-auto.js`). */
 const MESSAGE_TYPE_D = "tipo_d_preguntas_auto";
 
+/** WhatsApp (Wasender API): aviso al comprador identificado por orden (p. ej. oferta / compra); usa `ml_buyers.phone_1` y `phone_2`. Ver `ml-whatsapp-tipo-ef.js`. */
+const MESSAGE_TYPE_E = "tipo_e_whatsapp_orden";
+
+/** WhatsApp (Wasender API): mensaje al comprador identificado por pregunta ML (`ml_questions_*`); usa `ml_buyers.phone_1` y `phone_2`. Ver `ml-whatsapp-tipo-ef.js`. */
+const MESSAGE_TYPE_F = "tipo_f_whatsapp_pregunta";
+
 module.exports = {
   MESSAGE_TYPE_A,
   MESSAGE_TYPE_B,
   MESSAGE_TYPE_C,
   MESSAGE_TYPE_D,
+  MESSAGE_TYPE_E,
+  MESSAGE_TYPE_F,
 };

@@ -58,6 +58,7 @@ const {
 } = require("./ml-questions-ia-auto");
 const { enrichNicknameForFetches } = require("./ml-nickname-enrich");
 const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
+const { renderWhatsappTipoEPage } = require("./whatsapp-tipo-e-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
 const {
   getAccessToken,
@@ -131,6 +132,8 @@ const {
   countMlOrderPackMessagesForMlUser,
   countMlOrderPackMessagesForOrder,
   listMlRatingRequestLog,
+  getMlWhatsappTipoEConfig,
+  upsertMlWhatsappTipoEConfig,
   dbPath,
 } = require("./db");
 
@@ -166,6 +169,10 @@ function isBuyersPath(pathname) {
 
 function isPostSaleMessagesPath(pathname) {
   return pathname === "/mensajes-postventa" || pathname === "/mensajes-postventa/";
+}
+
+function isWhatsappTipoEConfigPath(pathname) {
+  return pathname === "/mensajes-tipo-e-whatsapp" || pathname === "/mensajes-tipo-e-whatsapp/";
 }
 
 function isPostSaleEnviosPath(pathname) {
@@ -1026,6 +1033,8 @@ const server = http.createServer(async (req, res) => {
           "GET /buyers?k=ADMIN_SECRET (ml_buyers: nombre_apellido, pref_entrega default Pickup, actualizacion ISO). POST/PUT JSON buyer_id + campos opcionales (cabecera X-Admin-Secret alternativa)",
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
+        mensajes_whatsapp_tipo_e:
+          "GET|POST /mensajes-tipo-e-whatsapp?k=ADMIN_SECRET (crear/editar/guardar config WhatsApp tipo E en ml_whatsapp_tipo_e_config; JSON en POST; ?format=json en GET)",
         envio_auto_postventa:
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:
@@ -1867,6 +1876,74 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const html = renderPostSaleMessagesPage(rows, {
+        escapeHtml,
+        escapeAttr,
+        escapeTextareaContent,
+      });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
+      return;
+    }
+
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "metodo no permitido" }));
+    return;
+  }
+
+  /** Configuración mensajes WhatsApp tipo E (`ml_whatsapp_tipo_e_config`). */
+  if (isWhatsappTipoEConfigPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Tipo E WhatsApp</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Tipo E WhatsApp</title><p>Acceso denegado. Usa <code>/mensajes-tipo-e-whatsapp?k=TU_CLAVE</code>.</p>"
+      );
+      return;
+    }
+
+    if (req.method === "POST") {
+      let body;
+      try {
+        body = await parseJsonBody(req);
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        return;
+      }
+      try {
+        await upsertMlWhatsappTipoEConfig(body);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    if (req.method === "GET") {
+      let row;
+      try {
+        row = await getMlWhatsappTipoEConfig();
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+        return;
+      }
+      if (url.searchParams.get("format") === "json") {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, config: row }));
+        return;
+      }
+      const html = renderWhatsappTipoEPage(row, {
         escapeHtml,
         escapeAttr,
         escapeTextareaContent,
@@ -4353,6 +4430,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Fetches ML: http://localhost:${PORT}/fetches?k=TU_ADMIN_SECRET (ML_WEBHOOK_FETCH_RESOURCE=1)`);
     console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
+    console.log(`WhatsApp tipo E (config): http://localhost:${PORT}/mensajes-tipo-e-whatsapp?k=TU_ADMIN_SECRET`);
     console.log(`Log envíos post-venta: http://localhost:${PORT}/envios-postventa?k=TU_ADMIN_SECRET`);
     console.log(`Log tipos A/B/C (unificado): http://localhost:${PORT}/envios-tipos-abc?k=TU_ADMIN_SECRET`);
     console.log(
@@ -4371,7 +4449,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /envios-postventa /envios-tipos-abc /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /fetches /buyers /mensajes-postventa /mensajes-tipo-e-whatsapp /envios-postventa /envios-tipos-abc /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

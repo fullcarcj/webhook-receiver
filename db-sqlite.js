@@ -109,6 +109,48 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_user ON ml_rating_request_log(ml_user_id);
   CREATE INDEX IF NOT EXISTS idx_ml_rating_request_log_order ON ml_rating_request_log(order_id);
 
+  CREATE TABLE IF NOT EXISTS ml_wasender_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    api_base_url TEXT NOT NULL DEFAULT 'https://www.wasenderapi.com',
+    default_phone_country_code TEXT NOT NULL DEFAULT '58',
+    is_enabled INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS ml_whatsapp_tipo_e_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    image_url TEXT,
+    image_caption TEXT,
+    delay_ms INTEGER,
+    location_lat REAL,
+    location_lng REAL,
+    location_name TEXT,
+    location_address TEXT,
+    location_maps_url TEXT,
+    location_chat_text TEXT,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS ml_whatsapp_wasender_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    message_kind TEXT NOT NULL CHECK (message_kind IN ('E','F')),
+    ml_user_id INTEGER,
+    buyer_id INTEGER,
+    order_id INTEGER,
+    ml_question_id INTEGER,
+    phone_e164 TEXT NOT NULL,
+    phone_source TEXT CHECK (phone_source IN ('phone_1','phone_2')),
+    outcome TEXT NOT NULL,
+    skip_reason TEXT,
+    http_status INTEGER,
+    wasender_msg_id INTEGER,
+    response_body TEXT,
+    error_message TEXT,
+    text_preview TEXT,
+    tipo_e_step INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_ml_wa_log_created ON ml_whatsapp_wasender_log(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_ml_wa_log_kind ON ml_whatsapp_wasender_log(message_kind);
+
   CREATE TABLE IF NOT EXISTS ml_post_sale_auto_send_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
@@ -333,6 +375,36 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_user_rating ON ml_order_feedback(ml_user_id, rating);
   CREATE INDEX IF NOT EXISTS idx_ml_order_feedback_date ON ml_order_feedback(date_created DESC);
 `);
+
+try {
+  db.prepare(
+    `INSERT OR IGNORE INTO ml_wasender_settings (id, api_base_url, default_phone_country_code, is_enabled, updated_at)
+     VALUES (1, 'https://www.wasenderapi.com', '58', 0, datetime('now'))`
+  ).run();
+} catch (e) {
+  console.error("[db] seed ml_wasender_settings:", e.message);
+}
+
+try {
+  db.prepare(
+    `INSERT OR IGNORE INTO ml_whatsapp_tipo_e_config (id, updated_at) VALUES (1, datetime('now'))`
+  ).run();
+} catch (e) {
+  console.error("[db] seed ml_whatsapp_tipo_e_config:", e.message);
+}
+
+(function migrateMlWhatsappWasenderLogTipoEStep() {
+  try {
+    const t = db.prepare("PRAGMA table_info(ml_whatsapp_wasender_log)").all();
+    const names = new Set(t.map((c) => c.name));
+    if (!names.has("tipo_e_step")) {
+      db.exec("ALTER TABLE ml_whatsapp_wasender_log ADD COLUMN tipo_e_step INTEGER");
+      console.log("[db] ml_whatsapp_wasender_log: columna tipo_e_step añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate ml_whatsapp_wasender_log tipo_e_step:", e.message);
+  }
+})();
 
 (function migratePostSalePackIdToOrderId() {
   try {
@@ -1424,6 +1496,26 @@ function getMlQuestionPendingByQuestionId(mlQuestionId) {
   );
 }
 
+function getMlQuestionContextForWhatsapp(mlQuestionId) {
+  const qid = Number(mlQuestionId);
+  if (!Number.isFinite(qid) || qid <= 0) return null;
+  const p = db
+    .prepare(
+      `SELECT ml_question_id, ml_user_id, buyer_id, item_id, question_text
+       FROM ml_questions_pending WHERE ml_question_id = ?`
+    )
+    .get(qid);
+  if (p) return { ...p, source: "pending" };
+  const a = db
+    .prepare(
+      `SELECT ml_question_id, ml_user_id, buyer_id, item_id, question_text
+       FROM ml_questions_answered WHERE ml_question_id = ?`
+    )
+    .get(qid);
+  if (a) return { ...a, source: "answered" };
+  return null;
+}
+
 function deleteMlQuestionPending(mlQuestionId) {
   const qid = Number(mlQuestionId);
   if (!Number.isFinite(qid) || qid <= 0) return 0;
@@ -1649,6 +1741,20 @@ function upsertMlOrder(row) {
   );
   const r = db.prepare("SELECT id FROM ml_orders WHERE ml_user_id = ? AND order_id = ?").get(mlUid, oid);
   return r && r.id != null ? Number(r.id) : null;
+}
+
+function getMlOrderByUserAndOrderId(mlUserId, orderId) {
+  const mlUid = Number(mlUserId);
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) return null;
+  return (
+    db
+      .prepare(
+        `SELECT id, ml_user_id, order_id, status, date_created, buyer_id, total_amount, currency_id
+         FROM ml_orders WHERE ml_user_id = ? AND order_id = ?`
+      )
+      .get(mlUid, oid) || null
+  );
 }
 
 function listMlOrdersByUser(mlUserId, limit, maxAllowed, options = {}) {
@@ -2386,6 +2492,183 @@ function listMlListingCountsByUser() {
     .all();
 }
 
+function countMlWhatsappTipoESuccessForOrder(mlUserId, orderId) {
+  const mlUid = Number(mlUserId);
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) return 0;
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM ml_whatsapp_wasender_log
+       WHERE message_kind = 'E' AND ml_user_id = ? AND order_id = ? AND outcome = 'success'`
+    )
+    .get(mlUid, oid);
+  return r && r.c != null ? Number(r.c) : 0;
+}
+
+function getMlWhatsappTipoEConfig() {
+  return (
+    db
+      .prepare(
+        `SELECT id, image_url, image_caption, delay_ms, location_lat, location_lng,
+                location_name, location_address, location_maps_url, location_chat_text, updated_at
+         FROM ml_whatsapp_tipo_e_config WHERE id = 1`
+      )
+      .get() || null
+  );
+}
+
+function upsertMlWhatsappTipoEConfig(row) {
+  const imageUrl = row.image_url != null && String(row.image_url).trim() !== "" ? String(row.image_url).trim() : null;
+  const imageCaption = row.image_caption != null ? String(row.image_caption) : null;
+  let delayMs = null;
+  if (row.delay_ms != null && String(row.delay_ms).trim() !== "") {
+    const n = Number(row.delay_ms);
+    if (Number.isFinite(n)) delayMs = Math.min(60000, Math.max(0, Math.floor(n)));
+  }
+  let lat = null;
+  if (row.location_lat != null && String(row.location_lat).trim() !== "") {
+    const n = Number(row.location_lat);
+    if (Number.isFinite(n)) lat = n;
+  }
+  let lng = null;
+  if (row.location_lng != null && String(row.location_lng).trim() !== "") {
+    const n = Number(row.location_lng);
+    if (Number.isFinite(n)) lng = n;
+  }
+  const locationName =
+    row.location_name != null && String(row.location_name).trim() !== ""
+      ? String(row.location_name).trim()
+      : null;
+  const locationAddress =
+    row.location_address != null && String(row.location_address).trim() !== ""
+      ? String(row.location_address).trim()
+      : null;
+  const locationMapsUrl =
+    row.location_maps_url != null && String(row.location_maps_url).trim() !== ""
+      ? String(row.location_maps_url).trim()
+      : null;
+  const locationChatText = row.location_chat_text != null ? String(row.location_chat_text) : null;
+  db.prepare(
+    `INSERT INTO ml_whatsapp_tipo_e_config (
+       id, image_url, image_caption, delay_ms, location_lat, location_lng,
+       location_name, location_address, location_maps_url, location_chat_text, updated_at
+     )
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(id) DO UPDATE SET
+       image_url = excluded.image_url,
+       image_caption = excluded.image_caption,
+       delay_ms = excluded.delay_ms,
+       location_lat = excluded.location_lat,
+       location_lng = excluded.location_lng,
+       location_name = excluded.location_name,
+       location_address = excluded.location_address,
+       location_maps_url = excluded.location_maps_url,
+       location_chat_text = excluded.location_chat_text,
+       updated_at = datetime('now')`
+  ).run(
+    imageUrl,
+    imageCaption,
+    delayMs,
+    lat,
+    lng,
+    locationName,
+    locationAddress,
+    locationMapsUrl,
+    locationChatText
+  );
+}
+
+function getMlWasenderSettings() {
+  return (
+    db
+      .prepare(
+        `SELECT id, api_base_url, default_phone_country_code, is_enabled, updated_at FROM ml_wasender_settings WHERE id = 1`
+      )
+      .get() || null
+  );
+}
+
+function upsertMlWasenderSettings(row) {
+  const url =
+    row.api_base_url != null && String(row.api_base_url).trim() !== ""
+      ? String(row.api_base_url).trim()
+      : "https://www.wasenderapi.com";
+  let cc =
+    row.default_phone_country_code != null ? String(row.default_phone_country_code).replace(/\D/g, "") : "58";
+  if (!cc) cc = "58";
+  const en = row.is_enabled === true || row.is_enabled === 1 || row.is_enabled === "1" ? 1 : 0;
+  db.prepare(
+    `INSERT INTO ml_wasender_settings (id, api_base_url, default_phone_country_code, is_enabled, updated_at)
+     VALUES (1, ?, ?, ?, datetime('now'))
+     ON CONFLICT(id) DO UPDATE SET
+       api_base_url = excluded.api_base_url,
+       default_phone_country_code = excluded.default_phone_country_code,
+       is_enabled = excluded.is_enabled,
+       updated_at = datetime('now')`
+  ).run(url, cc, en);
+}
+
+function insertMlWhatsappWasenderLog(row) {
+  const mk = row.message_kind != null ? String(row.message_kind).toUpperCase() : "";
+  if (mk !== "E" && mk !== "F") return null;
+  let bid = row.buyer_id != null ? Number(row.buyer_id) : null;
+  if (bid != null && (!Number.isFinite(bid) || bid <= 0)) bid = null;
+  const now = new Date().toISOString();
+  const stepRaw = row.tipo_e_step != null ? Number(row.tipo_e_step) : null;
+  const tipoEStep = stepRaw === 1 || stepRaw === 2 ? stepRaw : null;
+  const r = db
+    .prepare(
+      `INSERT INTO ml_whatsapp_wasender_log (
+         created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
+         phone_e164, phone_source, outcome, skip_reason, http_status,
+         wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    )
+    .run(
+      now,
+      mk,
+      row.ml_user_id != null ? Number(row.ml_user_id) : null,
+      bid,
+      row.order_id != null ? Number(row.order_id) : null,
+      row.ml_question_id != null ? Number(row.ml_question_id) : null,
+      String(row.phone_e164 || "").slice(0, 32),
+      row.phone_source != null ? String(row.phone_source) : null,
+      String(row.outcome || "unknown").slice(0, 64),
+      row.skip_reason != null ? String(row.skip_reason).slice(0, 500) : null,
+      row.http_status != null ? Number(row.http_status) : null,
+      row.wasender_msg_id != null ? Number(row.wasender_msg_id) : null,
+      row.response_body != null ? String(row.response_body).slice(0, 8000) : null,
+      row.error_message != null ? String(row.error_message).slice(0, 4000) : null,
+      row.text_preview != null ? String(row.text_preview).slice(0, 2000) : null,
+      tipoEStep
+    );
+  return r.lastInsertRowid != null ? Number(r.lastInsertRowid) : null;
+}
+
+function listMlWhatsappWasenderLog(limit, options = {}) {
+  const cap = options.maxAllowed != null ? Number(options.maxAllowed) : 2000;
+  const n = Math.min(Math.max(Number(limit) || 100, 1), Number.isFinite(cap) && cap > 0 ? cap : 2000);
+  const kind = options.message_kind != null ? String(options.message_kind).toUpperCase() : "";
+  if (kind === "E" || kind === "F") {
+    return db
+      .prepare(
+        `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
+                phone_e164, phone_source, outcome, skip_reason, http_status,
+                wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+         FROM ml_whatsapp_wasender_log WHERE message_kind = ? ORDER BY id DESC LIMIT ?`
+      )
+      .all(kind, n);
+  }
+  return db
+    .prepare(
+      `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
+              phone_e164, phone_source, outcome, skip_reason, http_status,
+              wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+       FROM ml_whatsapp_wasender_log ORDER BY id DESC LIMIT ?`
+    )
+    .all(n);
+}
+
 module.exports = {
   insertWebhook,
   listWebhooks,
@@ -2427,8 +2710,16 @@ module.exports = {
   insertMlVentasDetalleWeb,
   listMlVentasDetalleWeb,
   deleteAllMlVentasDetalleWeb,
+  getMlWasenderSettings,
+  upsertMlWasenderSettings,
+  countMlWhatsappTipoESuccessForOrder,
+  getMlWhatsappTipoEConfig,
+  upsertMlWhatsappTipoEConfig,
+  insertMlWhatsappWasenderLog,
+  listMlWhatsappWasenderLog,
   upsertMlQuestionPending,
   getMlQuestionPendingByQuestionId,
+  getMlQuestionContextForWhatsapp,
   deleteMlQuestionPending,
   upsertMlQuestionAnswered,
   listMlQuestionsPending,
@@ -2447,6 +2738,7 @@ module.exports = {
   insertMlListingChangeAck,
   listMlListingChangeAck,
   upsertMlOrder,
+  getMlOrderByUserAndOrderId,
   listMlOrdersByUser,
   listMlOrdersAll,
   updateMlOrderFeedbackSummary,

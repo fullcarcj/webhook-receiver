@@ -13,7 +13,8 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { createWriteStream } = require("fs");
-const pLimit = require("p-limit");
+const pLimitModule = require("p-limit");
+const pLimit = typeof pLimitModule === "function" ? pLimitModule : pLimitModule.default;
 const sharp = require("sharp");
 
 const DEFAULT_ORIGEN = String.raw`C:\Users\Javier\Desktop\lote20`;

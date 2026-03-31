@@ -2659,6 +2659,58 @@ async function countProductos() {
   return Number(rows[0].c);
 }
 
+/**
+ * Catálogo público (solo lectura): columnas mínimas. Búsqueda por subcadena en sku/descripcion (sin ILIKE wildcards del cliente).
+ */
+async function listProductosCatalogPublic(opts = {}) {
+  await ensureSchema();
+  const searchRaw = opts.search != null ? String(opts.search).trim().slice(0, 200) : "";
+  const limit = Math.min(Math.max(Number(opts.limit) || 50, 1), 200);
+  const offset = Math.max(Number(opts.offset) || 0, 0);
+
+  const params = [];
+  let whereSql = "";
+  if (searchRaw !== "") {
+    const needle = searchRaw.toLowerCase();
+    params.push(needle);
+    whereSql = `WHERE (
+      position($1 IN lower(sku)) > 0
+      OR position($1 IN lower(COALESCE(descripcion, ''))) > 0
+    )`;
+  }
+
+  const limitPh = params.length + 1;
+  const offsetPh = params.length + 2;
+  params.push(limit, offset);
+
+  const sql = `
+    SELECT id, sku, descripcion, precio_usd, stock
+    FROM productos
+    ${whereSql}
+    ORDER BY updated_at DESC NULLS LAST, id DESC
+    LIMIT $${limitPh} OFFSET $${offsetPh}
+  `;
+
+  const countSql = `SELECT COUNT(*)::bigint AS c FROM productos ${whereSql}`;
+  const countParams = searchRaw !== "" ? [params[0]] : [];
+
+  const [{ rows }, { rows: countRows }] = await Promise.all([
+    pool.query(sql, params),
+    pool.query(countSql, countParams),
+  ]);
+
+  const total = Number(countRows[0].c);
+  const items = rows.map((r) => ({
+    id: String(r.id),
+    sku: r.sku,
+    nombre: r.descripcion != null ? String(r.descripcion) : "",
+    precio_venta: r.precio_usd != null ? Number(r.precio_usd) : null,
+    stock: r.stock != null ? Number(r.stock) : 0,
+  }));
+
+  return { items, total, limit, offset };
+}
+
 async function updateProducto(id, patch) {
   await ensureSchema();
   const pid = Number(id);
@@ -4329,6 +4381,7 @@ module.exports = {
   getProductoBySku,
   listProductos,
   countProductos,
+  listProductosCatalogPublic,
   updateProducto,
   deleteProducto,
   listMlOrdersByUser,

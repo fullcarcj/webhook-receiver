@@ -1,5 +1,6 @@
 /**
  * Inventario de repuestos (`productos` en PostgreSQL vía `./db`).
+ * FileMaker: `POST /filemaker/inventario-productos` o `POST /mensajes-inventario-productos` con `FILEMAKER_INVENTARIO_PRODUCTOS_SECRET` (ver `ml-filemaker-inventario-productos.js`).
  *
  * **Mercado Libre (autopartes)** — contexto para mapear sin inflar columnas:
  * - Dominios por sitio (p. ej. `MLV-CARS_AND_VANS`, `MLA-CARS_AND_VANS`): discovery / categorías ML.

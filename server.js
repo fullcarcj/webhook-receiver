@@ -65,6 +65,7 @@ const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
 const { maybeProcessInternalOrderMessageForTipoE } = require("./ml-whatsapp-internal-order-message");
 const { trySendWhatsappTipoFForQuestion } = require("./ml-whatsapp-tipo-ef");
 const { processFilemakerTipoGPost } = require("./ml-filemaker-tipo-g");
+const { processFilemakerInventarioProductosPost } = require("./ml-filemaker-inventario-productos");
 const { appendWasenderWebhookNdjsonLine } = require("./wasender-webhook-log");
 const { wasenderWebhookSignatureOk } = require("./wasender-webhook-signature");
 const {
@@ -267,6 +268,16 @@ function isMensajesTipoGPath(pathname) {
   return pathname === "/mensajes-tipo-g" || pathname === "/mensajes-tipo-g/";
 }
 
+/** POST FileMaker: upsert producto en `productos` (`ml-filemaker-inventario-productos.js`). */
+function isFilemakerInventarioProductosPostPath(pathname) {
+  return pathname === "/filemaker/inventario-productos" || pathname === "/filemaker/inventario-productos/";
+}
+
+/** Alias POST: mismo JSON y `FILEMAKER_INVENTARIO_PRODUCTOS_SECRET` (como `/mensajes-tipo-g`). */
+function isMensajesInventarioProductosPath(pathname) {
+  return pathname === "/mensajes-inventario-productos" || pathname === "/mensajes-inventario-productos/";
+}
+
 function isVentasDetalleWebPath(pathname) {
   return pathname === "/ventas-detalle-web" || pathname === "/ventas-detalle-web/";
 }
@@ -337,7 +348,7 @@ function rejectAdminSecret(req, res) {
   return false;
 }
 
-/** Secreto POST `/filemaker/tipo-g`: `Authorization: Bearer`, cabecera `X-Filemaker-Secret` o `?secret=`. */
+/** Secreto POST FileMaker (`/filemaker/tipo-g`, `/mensajes-tipo-g`, `/filemaker/inventario-productos`, `/mensajes-inventario-productos`): `Authorization: Bearer`, `X-Filemaker-Secret` o `?secret=`. */
 function filemakerTipoGSecretFromRequest(req, url) {
   const auth = req.headers.authorization;
   if (auth && /^Bearer\s+/i.test(String(auth))) {
@@ -1230,6 +1241,8 @@ const server = http.createServer(async (req, res) => {
           "GET|POST /mensajes-tipo-e-whatsapp?k=ADMIN_SECRET (config tipo E en ml_whatsapp_tipo_e_config) · GET|POST /mensajes-tipo-f-whatsapp?k=ADMIN_SECRET (plantilla tipo F + seguir con E×2) · GET /envios-whatsapp-tipo-e?k=ADMIN_SECRET (log envíos Wasender E/F en ml_whatsapp_wasender_log; ?kind=e|f|all & outcome=…)",
         filemaker_tipo_g:
           "POST /filemaker/tipo-g o POST /mensajes-tipo-g (mismo JSON y FILEMAKER_TIPO_G_SECRET) — actualiza ml_buyers e intenta WhatsApp tipo E · GET /mensajes-tipo-g?k=ADMIN_SECRET (log ml_filemaker_tipo_g_log)",
+        filemaker_inventario_productos:
+          "POST /filemaker/inventario-productos o POST /mensajes-inventario-productos (JSON producto + FILEMAKER_INVENTARIO_PRODUCTOS_SECRET) — upsert tabla productos; GET inventario sigue en /inventario-productos?k=ADMIN_SECRET",
         envio_auto_postventa:
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:
@@ -1331,6 +1344,48 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(result.json));
     } catch (e) {
       console.error("[filemaker tipo G]", e);
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "internal_error", detail: e.message || String(e) }));
+    }
+    return;
+  }
+
+  /** FileMaker → upsert `productos`. Requiere `FILEMAKER_INVENTARIO_PRODUCTOS_SECRET`. Alias POST: `/mensajes-inventario-productos`. */
+  if (
+    req.method === "POST" &&
+    (isFilemakerInventarioProductosPostPath(url.pathname) || isMensajesInventarioProductosPath(url.pathname))
+  ) {
+    const expected = process.env.FILEMAKER_INVENTARIO_PRODUCTOS_SECRET;
+    if (!expected || String(expected).trim() === "") {
+      res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: "FILEMAKER_INVENTARIO_PRODUCTOS_SECRET no definido en el servidor",
+        })
+      );
+      return;
+    }
+    const provided = filemakerTipoGSecretFromRequest(req, url);
+    if (provided !== String(expected).trim()) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+      return;
+    }
+    let body;
+    try {
+      body = await parseJsonBody(req);
+    } catch (e) {
+      respondJsonBodyParseError(res, e);
+      return;
+    }
+    body = unwrapJsonBodyIfNeeded(body);
+    try {
+      const result = await processFilemakerInventarioProductosPost(body);
+      res.writeHead(result.httpStatus, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(result.json));
+    } catch (e) {
+      console.error("[filemaker inventario productos]", e);
       res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: false, error: "internal_error", detail: e.message || String(e) }));
     }
@@ -5376,6 +5431,18 @@ server.listen(PORT, "0.0.0.0", () => {
     );
   } else {
     console.log("[config] FILEMAKER_TIPO_G_SECRET no definido: POST /filemaker/tipo-g responde 503.");
+  }
+  if (
+    process.env.FILEMAKER_INVENTARIO_PRODUCTOS_SECRET &&
+    String(process.env.FILEMAKER_INVENTARIO_PRODUCTOS_SECRET).trim() !== ""
+  ) {
+    console.log(
+      `POST FileMaker inventario productos: http://localhost:${PORT}/filemaker/inventario-productos o http://localhost:${PORT}/mensajes-inventario-productos (FILEMAKER_INVENTARIO_PRODUCTOS_SECRET)`
+    );
+  } else {
+    console.log(
+      "[config] FILEMAKER_INVENTARIO_PRODUCTOS_SECRET no definido: POST /filemaker/inventario-productos responde 503."
+    );
   }
   console.log(`Token (enmascarado): GET http://localhost:${PORT}/oauth/token-status`);
 });

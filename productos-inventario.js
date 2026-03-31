@@ -1,5 +1,9 @@
 /**
- * Inventario de repuestos (`productos` en PostgreSQL vía `./db`).
+ * Inventario de repuestos — **fuente de verdad: tabla `productos` en PostgreSQL** (API, FileMaker, app iOS leen desde aquí).
+ * Por SKU se admiten **hasta 9** URLs de imagen vía `imagenes_cantidad` (0–9) + `PRODUCT_IMAGE_BASE_URL` / `PRODUCT_IMAGE_EXT`
+ * (respuesta JSON incluye `imagenes_urls`). Si las fotos están en Firebase, el prefijo base debe coincidir con la URL pública del bucket
+ * y los nombres `{sku}_{1..n}.webp` alineados con `scripts/upload-firebase-webp.js` / `urls_imagenes.json`. Opcional: `urls` JSONB para enlaces extra (ML, web).
+ *
  * FileMaker: `POST /filemaker/inventario-productos` o `POST /mensajes-inventario-productos` con `FILEMAKER_INVENTARIO_PRODUCTOS_SECRET` (ver `ml-filemaker-inventario-productos.js`).
  *
  * **Mercado Libre (autopartes)** — contexto para mapear sin inflar columnas:

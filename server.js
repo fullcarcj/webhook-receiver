@@ -1234,7 +1234,7 @@ const server = http.createServer(async (req, res) => {
         buyers_ml:
           "GET /buyers?k=ADMIN_SECRET (ml_buyers: nombre_apellido, pref_entrega, observaciones texto libre, actualizacion ISO). POST/PUT JSON buyer_id + campos opcionales (cabecera X-Admin-Secret alternativa)",
         inventario_productos:
-          "GET|POST|PUT|DELETE /inventario-productos?k=ADMIN_SECRET — productos (imagenes_cantidad 0–9 + PRODUCT_IMAGE_BASE_URL → imagenes_urls; urls JSONB; item_id_ml). Ver productos-inventario.js",
+          "GET|POST|PUT|DELETE /inventario-productos?k=ADMIN_SECRET — tabla productos (BD): hasta 9 imgs/SKU (imagenes_cantidad + PRODUCT_IMAGE_BASE_URL → imagenes_urls en JSON). Ver productos-inventario.js",
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         mensajes_whatsapp_tipo_e:

@@ -1,6 +1,7 @@
 /**
- * URLs de imágenes por SKU: prefijo en env + patrón `{sku}_{1..N}.ext` (N ≤ 9).
- * No usar DATABASE_URL (eso es PostgreSQL); usar PRODUCT_IMAGE_BASE_URL.
+ * Construye las URLs de imagen expuestas en la API a partir de **datos ya guardados en BD** (`sku`, `imagenes_cantidad`).
+ * Máximo **9** URLs por SKU (índices 1…N). El cliente iOS / inventario debe usar lo que devuelve la API (`imagenes_urls`), no inventar URLs fuera de este esquema.
+ * Prefijo: `PRODUCT_IMAGE_BASE_URL` (no confundir con `DATABASE_URL`). Patrón: `{base}/{sku}_{n}{ext}` alineable con subida masiva Firebase (`upload-firebase-webp`).
  */
 
 function normalizeImageBaseUrl(u) {

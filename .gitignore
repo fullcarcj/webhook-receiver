@@ -1,5 +1,6 @@
 oauth-credentials.ps1
 oauth-env.json
+firebase-key.json
 ml-token.json
 data/
 log.txt

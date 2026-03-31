@@ -147,6 +147,14 @@ const {
   upsertMlWhatsappTipoFConfig,
   listMlWhatsappWasenderLog,
   listFilemakerTipoGLog,
+  insertProducto,
+  upsertProductoBySku,
+  getProductoById,
+  getProductoBySku,
+  listProductos,
+  countProductos,
+  updateProducto,
+  deleteProducto,
   dbPath,
 } = require("./db");
 
@@ -206,6 +214,11 @@ function isFetchesPath(pathname) {
 
 function isBuyersPath(pathname) {
   return pathname === "/buyers" || pathname === "/buyers/";
+}
+
+/** Inventario local `productos` (repuestos; JSONB atributos + vínculo opcional item_id_ml ML). */
+function isInventarioProductosPath(pathname) {
+  return pathname === "/inventario-productos" || pathname === "/inventario-productos/";
 }
 
 function isPostSaleMessagesPath(pathname) {
@@ -1208,6 +1221,8 @@ const server = http.createServer(async (req, res) => {
           "DELETE /admin/ventas-detalle-web (cabecera X-Admin-Secret) vacía ml_ventas_detalle_web (GET detalle .ve con cookies)",
         buyers_ml:
           "GET /buyers?k=ADMIN_SECRET (ml_buyers: nombre_apellido, pref_entrega, observaciones texto libre, actualizacion ISO). POST/PUT JSON buyer_id + campos opcionales (cabecera X-Admin-Secret alternativa)",
+        inventario_productos:
+          "GET|POST|PUT|DELETE /inventario-productos?k=ADMIN_SECRET — productos (cod_producto, marca_producto, aplicacion_extendida, ubicacion, urls JSONB, atributos JSONB, item_id_ml). Ver productos-inventario.js",
         mensajes_postventa:
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         mensajes_whatsapp_tipo_e:
@@ -2110,6 +2125,228 @@ const server = http.createServer(async (req, res) => {
 </html>`;
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(buyersHtml);
+    return;
+  }
+
+  /** Inventario `productos` (Solomotor3k / repuestos; atributos JSONB; item_id_ml opcional = id ítem ML). */
+  if (isInventarioProductosPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    const authInv = adminSecret && (k === adminSecret || req.headers["x-admin-secret"] === adminSecret);
+
+    if (req.method === "POST") {
+      if (!adminSecret) {
+        res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
+        return;
+      }
+      if (!authInv) {
+        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+        return;
+      }
+      let body;
+      try {
+        body = unwrapJsonBodyIfNeeded(await parseJsonBody(req));
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        return;
+      }
+      const upsert = url.searchParams.get("upsert") === "1" || url.searchParams.get("upsert") === "true";
+      try {
+        const row = upsert ? await upsertProductoBySku(body) : await insertProducto(body);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, producto: row }));
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+      }
+      return;
+    }
+
+    if (req.method === "PUT") {
+      if (!adminSecret) {
+        res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
+        return;
+      }
+      if (!authInv) {
+        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+        return;
+      }
+      let body;
+      try {
+        body = unwrapJsonBodyIfNeeded(await parseJsonBody(req));
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "body debe ser JSON" }));
+        return;
+      }
+      const id = Number(body.id != null ? body.id : url.searchParams.get("id"));
+      if (!Number.isFinite(id) || id <= 0) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "id inválido (body.id o ?id=)" }));
+        return;
+      }
+      try {
+        const row = await updateProducto(id, body);
+        if (!row) {
+          res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "producto no encontrado" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, producto: row }));
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+      }
+      return;
+    }
+
+    if (req.method === "DELETE") {
+      if (!adminSecret) {
+        res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
+        return;
+      }
+      if (!authInv) {
+        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+        return;
+      }
+      const id = Number(url.searchParams.get("id"));
+      if (!Number.isFinite(id) || id <= 0) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "usa ?id=NUMERO" }));
+        return;
+      }
+      try {
+        const deleted = await deleteProducto(id);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, deleted: deleted > 0 }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message || String(e) }));
+      }
+      return;
+    }
+
+    if (req.method !== "GET") {
+      res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "método no permitido" }));
+      return;
+    }
+
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Inventario</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Inventario</title><p>Acceso denegado. <code>/inventario-productos?k=…</code></p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    let rows;
+    let totalEnTabla;
+    try {
+      [rows, totalEnTabla] = await Promise.all([listProductos(lim, 5000), countProductos()]);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, total: totalEnTabla, count: rows.length, items: rows }));
+      return;
+    }
+    const prodRows = rows
+      .map((r) => {
+        const codProd = r.cod_producto != null ? r.cod_producto : r.cod_marca_proveedor;
+        let attrPreview = "—";
+        try {
+          const s = JSON.stringify(r.atributos);
+          attrPreview =
+            s.length > 100 ? `${escapeHtml(s.slice(0, 100))}…` : escapeHtml(s);
+        } catch {
+          attrPreview = "—";
+        }
+        let urlsPreview = "—";
+        try {
+          const u = JSON.stringify(r.urls != null ? r.urls : {});
+          urlsPreview = u.length > 80 ? `${escapeHtml(u.slice(0, 80))}…` : escapeHtml(u);
+        } catch {
+          urlsPreview = "—";
+        }
+        const appExt =
+          r.aplicacion_extendida != null
+            ? escapeHtml(
+                String(r.aplicacion_extendida).length > 120
+                  ? `${String(r.aplicacion_extendida).slice(0, 120)}…`
+                  : String(r.aplicacion_extendida)
+              )
+            : "—";
+        return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td>${escapeHtml(r.sku)}</td>
+  <td>${escapeHtml(codProd)}</td>
+  <td>${escapeHtml(r.marca_producto)}</td>
+  <td>${escapeHtml(r.proveedor)}</td>
+  <td class="muted" style="max-width:220px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(r.descripcion)}</td>
+  <td class="muted" style="max-width:200px;font-size:0.78rem;white-space:pre-wrap;word-break:break-word;">${appExt}</td>
+  <td>${escapeHtml(r.ubicacion)}</td>
+  <td>${escapeHtml(r.stock)}</td>
+  <td>${escapeHtml(r.precio_usd)}</td>
+  <td>${escapeHtml(r.oem)}</td>
+  <td>${escapeHtml(r.ref_1)}</td>
+  <td>${escapeHtml(r.ref_2)}</td>
+  <td>${escapeHtml(r.ref_3)}</td>
+  <td class="muted" style="max-width:200px;font-size:0.75rem;">${attrPreview}</td>
+  <td class="muted" style="max-width:160px;font-size:0.72rem;">${urlsPreview}</td>
+  <td>${escapeHtml(r.item_id_ml)}</td>
+  <td class="muted">${escapeHtml(r.created_at)}</td>
+  <td class="muted">${escapeHtml(r.updated_at)}</td>
+</tr>`;
+      })
+      .join("");
+    const invHtml = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Inventario productos</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.85rem; margin-top: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 1400px; margin-top: 1rem; font-size: 0.78rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.4rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.72rem; }
+    code { font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <h1>Inventario (productos)</h1>
+  <p class="lead"><strong>${totalEnTabla}</strong> en tabla · mostrando <strong>${rows.length}</strong>. Campos: <code>cod_producto</code>, <code>marca_producto</code>, <code>aplicacion_extendida</code>, <code>ubicacion</code>, <code>urls</code> (JSON: ml, web, catálogo, etc.). ML: <code>item_id_ml</code> = id publicación. JSON: <code>?format=json</code>. POST o <code>?upsert=1</code>. PUT <code>id</code> + campos. DELETE <code>?id=</code>.</p>
+  <table>
+    <thead><tr><th>id</th><th>sku</th><th>cod_producto</th><th>marca_producto</th><th>proveedor</th><th>descripcion</th><th>aplicacion_extendida</th><th>ubicacion</th><th>stock</th><th>precio_usd</th><th>oem</th><th>ref_1</th><th>ref_2</th><th>ref_3</th><th>atributos</th><th>urls</th><th>item_id_ml</th><th>created_at</th><th>updated_at</th></tr></thead>
+    <tbody>${prodRows || '<tr><td colspan="19">Sin registros.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(invHtml);
     return;
   }
 
@@ -5090,6 +5327,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Wasender webhooks: http://localhost:${PORT}/wasender-webhooks?k=TU_ADMIN_SECRET`);
     console.log(`Fetches ML: http://localhost:${PORT}/fetches?k=TU_ADMIN_SECRET (ML_WEBHOOK_FETCH_RESOURCE=1)`);
     console.log(`Compradores ML: http://localhost:${PORT}/buyers?k=TU_ADMIN_SECRET`);
+    console.log(`Inventario productos: http://localhost:${PORT}/inventario-productos?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes post-venta: http://localhost:${PORT}/mensajes-postventa?k=TU_ADMIN_SECRET`);
     console.log(`WhatsApp tipo E (config): http://localhost:${PORT}/mensajes-tipo-e-whatsapp?k=TU_ADMIN_SECRET`);
     console.log(`WhatsApp tipo F (config): http://localhost:${PORT}/mensajes-tipo-f-whatsapp?k=TU_ADMIN_SECRET`);
@@ -5113,7 +5351,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /wasender-webhooks /fetches /buyers /mensajes-postventa /mensajes-tipo-e-whatsapp /mensajes-tipo-f-whatsapp /envios-whatsapp-tipo-e /envios-postventa /envios-tipos-abc /mensajes-tipo-g /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /wasender-webhooks /fetches /buyers /inventario-productos /mensajes-postventa /mensajes-tipo-e-whatsapp /mensajes-tipo-f-whatsapp /envios-whatsapp-tipo-e /envios-postventa /envios-tipos-abc /mensajes-tipo-g /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }

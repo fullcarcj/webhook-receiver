@@ -538,6 +538,37 @@ async function runSchemaAndSeed() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_fm_tipo_g_created ON ml_filemaker_tipo_g_log(created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_fm_tipo_g_order ON ml_filemaker_tipo_g_log(order_id)`,
+    `CREATE TABLE IF NOT EXISTS productos (
+      id BIGSERIAL PRIMARY KEY,
+      sku VARCHAR(120) NOT NULL,
+      cod_producto VARCHAR(255),
+      marca_producto VARCHAR(255),
+      proveedor VARCHAR(255),
+      descripcion TEXT,
+      stock INTEGER NOT NULL DEFAULT 0,
+      precio_usd NUMERIC(10, 2),
+      oem VARCHAR(255),
+      ref_1 VARCHAR(255),
+      ref_2 VARCHAR(255),
+      ref_3 VARCHAR(255),
+      aplicacion_extendida TEXT,
+      ubicacion TEXT,
+      atributos JSONB NOT NULL DEFAULT '{}'::jsonb,
+      urls JSONB NOT NULL DEFAULT '{}'::jsonb,
+      item_id_ml TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_productos_sku UNIQUE (sku),
+      CONSTRAINT chk_productos_stock CHECK (stock >= 0),
+      CONSTRAINT chk_productos_precio CHECK (precio_usd IS NULL OR precio_usd >= 0)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_productos_oem ON productos (oem) WHERE oem IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_productos_ref_1 ON productos (ref_1) WHERE ref_1 IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_productos_ref_2 ON productos (ref_2) WHERE ref_2 IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_productos_ref_3 ON productos (ref_3) WHERE ref_3 IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_productos_atributos_gin ON productos USING GIN (atributos)`,
+    `CREATE INDEX IF NOT EXISTS idx_productos_urls_gin ON productos USING GIN (urls)`,
+    `CREATE INDEX IF NOT EXISTS idx_productos_item_id_ml ON productos (item_id_ml) WHERE item_id_ml IS NOT NULL`,
   ];
   for (const sql of stmts) {
     await pool.query(sql);
@@ -583,6 +614,67 @@ async function runSchemaAndSeed() {
   await migrateMlWhatsappWasenderLogBuyerNullable();
   await migrateMlWhatsappWasenderLogTipoEStep();
   await migrateMlWhatsappTipoFConfig();
+  await migrateProductosUpdatedAtTrigger();
+  await migrateProductosSolomotorColumns();
+}
+
+/**
+ * Renombra cod_marca_proveedor → cod_producto y añade marca_producto, aplicacion_extendida, ubicacion, urls (JSONB).
+ */
+async function migrateProductosSolomotorColumns() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'productos'`
+    );
+    if (rows.length === 0) return;
+    const cols = new Set(rows.map((r) => r.column_name));
+    if (cols.has("cod_marca_proveedor") && !cols.has("cod_producto")) {
+      await pool.query(`ALTER TABLE productos RENAME COLUMN cod_marca_proveedor TO cod_producto`);
+      cols.delete("cod_marca_proveedor");
+      cols.add("cod_producto");
+    }
+    await pool.query(`ALTER TABLE productos ADD COLUMN IF NOT EXISTS cod_producto VARCHAR(255)`);
+    await pool.query(`ALTER TABLE productos ADD COLUMN IF NOT EXISTS marca_producto VARCHAR(255)`);
+    await pool.query(`ALTER TABLE productos ADD COLUMN IF NOT EXISTS aplicacion_extendida TEXT`);
+    await pool.query(`ALTER TABLE productos ADD COLUMN IF NOT EXISTS ubicacion TEXT`);
+    await pool.query(
+      `ALTER TABLE productos ADD COLUMN IF NOT EXISTS urls JSONB NOT NULL DEFAULT '{}'::jsonb`
+    );
+    await pool.query(`UPDATE productos SET urls = '{}'::jsonb WHERE urls IS NULL`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_productos_urls_gin ON productos USING GIN (urls)`);
+  } catch (e) {
+    console.error("[db] migrate productos solomotor columns:", e.message);
+  }
+}
+
+/** Trigger updated_at en inventario local (independiente de publicaciones ML). */
+async function migrateProductosUpdatedAtTrigger() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'productos'`
+    );
+    if (rows.length === 0) return;
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION productos_set_updated_at()
+      RETURNS TRIGGER AS $$
+      BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await pool.query(`DROP TRIGGER IF EXISTS trg_productos_updated_at ON productos`);
+    await pool.query(`
+      CREATE TRIGGER trg_productos_updated_at
+      BEFORE UPDATE ON productos
+      FOR EACH ROW
+      EXECUTE PROCEDURE productos_set_updated_at()
+    `);
+  } catch (e) {
+    console.error("[db] migrate productos trigger updated_at:", e.message);
+  }
 }
 
 /** Tabla editable para plantilla WhatsApp tipo F (pregunta → texto + opcional E×2). */
@@ -2344,6 +2436,292 @@ async function listFilemakerTipoGLog(limit, maxAllowed) {
   return rows;
 }
 
+/**
+ * Inventario local Solomotor3k / repuestos. `atributos` JSONB: medidas, dientes, material, y snapshot ML
+ * (dominio MLA-CARS_AND_VANS, category_id, array attributes con SELLER_SKU, etc.) sin fijar columnas nuevas.
+ * Vínculo opcional a publicación: `item_id_ml` = id de ítem ML (misma cadena que `ml_listings.item_id`).
+ */
+function normalizeProductoAtributosJson(v) {
+  if (v == null) return {};
+  if (typeof v === "object" && !Array.isArray(v)) return v;
+  if (typeof v === "string") {
+    try {
+      const j = JSON.parse(v);
+      return typeof j === "object" && j !== null && !Array.isArray(j) ? j : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+/** Permalinks y enlaces (ml, web, catálogo proveedor). Misma fila que producto; tabla hija solo si hace falta historial o muchas URLs por fuente. */
+function normalizeProductoUrlsJson(v) {
+  if (v == null) return {};
+  if (typeof v === "object" && !Array.isArray(v)) return v;
+  if (typeof v === "string") {
+    try {
+      const j = JSON.parse(v);
+      return typeof j === "object" && j !== null && !Array.isArray(j) ? j : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function pickCodProductoFromRow(row) {
+  const v = row.cod_producto ?? row.Cod_producto ?? row.cod_marca_proveedor;
+  if (v != null && String(v).trim() !== "") return String(v).slice(0, 255);
+  return null;
+}
+
+function pickMarcaProductoFromRow(row) {
+  const v = row.marca_producto ?? row.Marca_producto;
+  if (v != null && String(v).trim() !== "") return String(v).slice(0, 255);
+  return null;
+}
+
+function patchCodProducto(patch, cur) {
+  if (
+    patch.cod_producto !== undefined ||
+    patch.Cod_producto !== undefined ||
+    patch.cod_marca_proveedor !== undefined
+  ) {
+    const p = patch.cod_producto ?? patch.Cod_producto ?? patch.cod_marca_proveedor;
+    return p != null && String(p).trim() !== "" ? String(p).slice(0, 255) : null;
+  }
+  if (cur.cod_producto != null) return cur.cod_producto;
+  if (cur.cod_marca_proveedor != null) return String(cur.cod_marca_proveedor).slice(0, 255);
+  return null;
+}
+
+function patchMarcaProducto(patch, cur) {
+  if (patch.marca_producto !== undefined || patch.Marca_producto !== undefined) {
+    const p = patch.marca_producto ?? patch.Marca_producto;
+    return p != null && String(p).trim() !== "" ? String(p).slice(0, 255) : null;
+  }
+  return cur.marca_producto != null ? cur.marca_producto : null;
+}
+
+async function insertProducto(row) {
+  await ensureSchema();
+  const sku = row.sku != null ? String(row.sku).trim() : "";
+  if (!sku) throw new Error("sku obligatorio");
+  const atributos = normalizeProductoAtributosJson(row.atributos);
+  const urls = normalizeProductoUrlsJson(row.urls);
+  const { rows } = await pool.query(
+    `INSERT INTO productos (
+       sku, cod_producto, marca_producto, proveedor, descripcion, stock, precio_usd,
+       oem, ref_1, ref_2, ref_3, aplicacion_extendida, ubicacion, atributos, urls, item_id_ml
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16)
+     RETURNING *`,
+    [
+      sku.slice(0, 120),
+      pickCodProductoFromRow(row),
+      pickMarcaProductoFromRow(row),
+      row.proveedor != null ? String(row.proveedor).slice(0, 255) : null,
+      row.descripcion != null ? String(row.descripcion) : null,
+      row.stock != null ? Number(row.stock) : 0,
+      row.precio_usd != null && row.precio_usd !== "" ? Number(row.precio_usd) : null,
+      row.oem != null ? String(row.oem).slice(0, 255) : null,
+      row.ref_1 != null ? String(row.ref_1).slice(0, 255) : null,
+      row.ref_2 != null ? String(row.ref_2).slice(0, 255) : null,
+      row.ref_3 != null ? String(row.ref_3).slice(0, 255) : null,
+      row.aplicacion_extendida != null ? String(row.aplicacion_extendida) : null,
+      row.ubicacion != null ? String(row.ubicacion) : null,
+      JSON.stringify(atributos),
+      JSON.stringify(urls),
+      row.item_id_ml != null ? String(row.item_id_ml).trim().slice(0, 64) : null,
+    ]
+  );
+  return rows[0] || null;
+}
+
+async function upsertProductoBySku(row) {
+  await ensureSchema();
+  const sku = row.sku != null ? String(row.sku).trim() : "";
+  if (!sku) throw new Error("sku obligatorio");
+  const atributos = normalizeProductoAtributosJson(row.atributos);
+  const urls = normalizeProductoUrlsJson(row.urls);
+  const { rows } = await pool.query(
+    `INSERT INTO productos (
+       sku, cod_producto, marca_producto, proveedor, descripcion, stock, precio_usd,
+       oem, ref_1, ref_2, ref_3, aplicacion_extendida, ubicacion, atributos, urls, item_id_ml
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16)
+     ON CONFLICT (sku) DO UPDATE SET
+       cod_producto = EXCLUDED.cod_producto,
+       marca_producto = EXCLUDED.marca_producto,
+       proveedor = EXCLUDED.proveedor,
+       descripcion = EXCLUDED.descripcion,
+       stock = EXCLUDED.stock,
+       precio_usd = EXCLUDED.precio_usd,
+       oem = EXCLUDED.oem,
+       ref_1 = EXCLUDED.ref_1,
+       ref_2 = EXCLUDED.ref_2,
+       ref_3 = EXCLUDED.ref_3,
+       aplicacion_extendida = EXCLUDED.aplicacion_extendida,
+       ubicacion = EXCLUDED.ubicacion,
+       atributos = EXCLUDED.atributos,
+       urls = EXCLUDED.urls,
+       item_id_ml = EXCLUDED.item_id_ml
+     RETURNING *`,
+    [
+      sku.slice(0, 120),
+      pickCodProductoFromRow(row),
+      pickMarcaProductoFromRow(row),
+      row.proveedor != null ? String(row.proveedor).slice(0, 255) : null,
+      row.descripcion != null ? String(row.descripcion) : null,
+      row.stock != null ? Number(row.stock) : 0,
+      row.precio_usd != null && row.precio_usd !== "" ? Number(row.precio_usd) : null,
+      row.oem != null ? String(row.oem).slice(0, 255) : null,
+      row.ref_1 != null ? String(row.ref_1).slice(0, 255) : null,
+      row.ref_2 != null ? String(row.ref_2).slice(0, 255) : null,
+      row.ref_3 != null ? String(row.ref_3).slice(0, 255) : null,
+      row.aplicacion_extendida != null ? String(row.aplicacion_extendida) : null,
+      row.ubicacion != null ? String(row.ubicacion) : null,
+      JSON.stringify(atributos),
+      JSON.stringify(urls),
+      row.item_id_ml != null ? String(row.item_id_ml).trim().slice(0, 64) : null,
+    ]
+  );
+  return rows[0] || null;
+}
+
+async function getProductoById(id) {
+  await ensureSchema();
+  const n = Number(id);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const { rows } = await pool.query(`SELECT * FROM productos WHERE id = $1`, [n]);
+  return rows[0] || null;
+}
+
+async function getProductoBySku(sku) {
+  await ensureSchema();
+  const s = sku != null ? String(sku).trim() : "";
+  if (!s) return null;
+  const { rows } = await pool.query(`SELECT * FROM productos WHERE sku = $1`, [s.slice(0, 120)]);
+  return rows[0] || null;
+}
+
+async function listProductos(limit, maxAllowed) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 10000;
+  const n = Math.min(Math.max(Number(limit) || 200, 1), cap);
+  const { rows } = await pool.query(
+    `SELECT * FROM productos ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT $1`,
+    [n]
+  );
+  return rows;
+}
+
+async function countProductos() {
+  await ensureSchema();
+  const { rows } = await pool.query("SELECT COUNT(*)::bigint AS c FROM productos");
+  return Number(rows[0].c);
+}
+
+async function updateProducto(id, patch) {
+  await ensureSchema();
+  const pid = Number(id);
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  const cur = await getProductoById(pid);
+  if (!cur) return null;
+  const next = {
+    sku: patch.sku !== undefined ? String(patch.sku).trim().slice(0, 120) : cur.sku,
+    cod_producto: patchCodProducto(patch, cur),
+    marca_producto: patchMarcaProducto(patch, cur),
+    proveedor:
+      patch.proveedor !== undefined
+        ? patch.proveedor != null
+          ? String(patch.proveedor).slice(0, 255)
+          : null
+        : cur.proveedor,
+    descripcion:
+      patch.descripcion !== undefined
+        ? patch.descripcion != null
+          ? String(patch.descripcion)
+          : null
+        : cur.descripcion,
+    stock: patch.stock !== undefined ? Number(patch.stock) : cur.stock,
+    precio_usd:
+      patch.precio_usd !== undefined
+        ? patch.precio_usd === null || patch.precio_usd === ""
+          ? null
+          : Number(patch.precio_usd)
+        : cur.precio_usd,
+    oem: patch.oem !== undefined ? (patch.oem != null ? String(patch.oem).slice(0, 255) : null) : cur.oem,
+    ref_1:
+      patch.ref_1 !== undefined ? (patch.ref_1 != null ? String(patch.ref_1).slice(0, 255) : null) : cur.ref_1,
+    ref_2:
+      patch.ref_2 !== undefined ? (patch.ref_2 != null ? String(patch.ref_2).slice(0, 255) : null) : cur.ref_2,
+    ref_3:
+      patch.ref_3 !== undefined ? (patch.ref_3 != null ? String(patch.ref_3).slice(0, 255) : null) : cur.ref_3,
+    aplicacion_extendida:
+      patch.aplicacion_extendida !== undefined
+        ? patch.aplicacion_extendida != null
+          ? String(patch.aplicacion_extendida)
+          : null
+        : cur.aplicacion_extendida,
+    ubicacion:
+      patch.ubicacion !== undefined
+        ? patch.ubicacion != null
+          ? String(patch.ubicacion)
+          : null
+        : cur.ubicacion,
+    atributos:
+      patch.atributos !== undefined
+        ? normalizeProductoAtributosJson(patch.atributos)
+        : cur.atributos,
+    urls:
+      patch.urls !== undefined
+        ? normalizeProductoUrlsJson(patch.urls)
+        : normalizeProductoUrlsJson(cur.urls),
+    item_id_ml:
+      patch.item_id_ml !== undefined
+        ? patch.item_id_ml != null
+          ? String(patch.item_id_ml).trim().slice(0, 64)
+          : null
+        : cur.item_id_ml,
+  };
+  const { rows } = await pool.query(
+    `UPDATE productos SET
+       sku = $1, cod_producto = $2, marca_producto = $3, proveedor = $4, descripcion = $5, stock = $6, precio_usd = $7,
+       oem = $8, ref_1 = $9, ref_2 = $10, ref_3 = $11, aplicacion_extendida = $12, ubicacion = $13,
+       atributos = $14::jsonb, urls = $15::jsonb, item_id_ml = $16
+     WHERE id = $17
+     RETURNING *`,
+    [
+      next.sku,
+      next.cod_producto,
+      next.marca_producto,
+      next.proveedor,
+      next.descripcion,
+      next.stock,
+      next.precio_usd,
+      next.oem,
+      next.ref_1,
+      next.ref_2,
+      next.ref_3,
+      next.aplicacion_extendida,
+      next.ubicacion,
+      JSON.stringify(next.atributos),
+      JSON.stringify(next.urls),
+      next.item_id_ml,
+      pid,
+    ]
+  );
+  return rows[0] || null;
+}
+
+async function deleteProducto(id) {
+  await ensureSchema();
+  const pid = Number(id);
+  if (!Number.isFinite(pid) || pid <= 0) return 0;
+  const { rowCount } = await pool.query(`DELETE FROM productos WHERE id = $1`, [pid]);
+  return rowCount;
+}
+
 async function listMlOrdersByUser(mlUserId, limit, maxAllowed, options = {}) {
   await ensureSchema();
   const mlUid = Number(mlUserId);
@@ -3900,6 +4278,16 @@ module.exports = {
   getMlOrderByOrderId,
   insertFilemakerTipoGLog,
   listFilemakerTipoGLog,
+  normalizeProductoAtributosJson,
+  normalizeProductoUrlsJson,
+  insertProducto,
+  upsertProductoBySku,
+  getProductoById,
+  getProductoBySku,
+  listProductos,
+  countProductos,
+  updateProducto,
+  deleteProducto,
   listMlOrdersByUser,
   listMlOrdersAll,
   updateMlOrderFeedbackSummary,

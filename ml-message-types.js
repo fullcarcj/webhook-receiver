@@ -21,6 +21,12 @@ const MESSAGE_TYPE_E = "tipo_e_whatsapp_orden";
 /** WhatsApp (Wasender API): mensaje al comprador identificado por pregunta ML (`ml_questions_*`); usa `ml_buyers.phone_1` y `phone_2`. Ver `ml-whatsapp-tipo-ef.js`. */
 const MESSAGE_TYPE_F = "tipo_f_whatsapp_pregunta";
 
+/**
+ * Origen FileMaker: POST dedicado actualiza comprador y encadena tipo E (mismo envío Wasender que tipo E).
+ * Ver `ml-filemaker-tipo-g.js` y tabla `ml_filemaker_tipo_g_log`.
+ */
+const MESSAGE_TYPE_G = "tipo_g_filemaker_retiro";
+
 module.exports = {
   MESSAGE_TYPE_A,
   MESSAGE_TYPE_B,
@@ -28,4 +34,5 @@ module.exports = {
   MESSAGE_TYPE_D,
   MESSAGE_TYPE_E,
   MESSAGE_TYPE_F,
+  MESSAGE_TYPE_G,
 };

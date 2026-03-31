@@ -4,7 +4,7 @@
  *
  * Opcional: PORT=3050 node probar-local.js
  */
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 const base = `http://127.0.0.1:${PORT}`;
 
 async function main() {

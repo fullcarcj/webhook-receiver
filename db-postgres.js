@@ -521,6 +521,21 @@ async function runSchemaAndSeed() {
     `CREATE INDEX IF NOT EXISTS idx_ml_wa_log_buyer ON ml_whatsapp_wasender_log(buyer_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_wa_log_order ON ml_whatsapp_wasender_log(order_id)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_wa_log_question ON ml_whatsapp_wasender_log(ml_question_id)`,
+    `CREATE TABLE IF NOT EXISTS ml_filemaker_tipo_g_log (
+      id BIGSERIAL PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      order_id BIGINT,
+      buyer_id BIGINT,
+      ml_user_id BIGINT,
+      phone_in TEXT,
+      tipo_retiro TEXT,
+      outcome TEXT NOT NULL,
+      skip_reason TEXT,
+      tipo_e_detail TEXT,
+      request_json TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_fm_tipo_g_created ON ml_filemaker_tipo_g_log(created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_fm_tipo_g_order ON ml_filemaker_tipo_g_log(order_id)`,
   ];
   for (const sql of stmts) {
     await pool.query(sql);
@@ -2242,6 +2257,54 @@ async function getMlOrderByUserAndOrderId(mlUserId, orderId) {
   return rows[0] || null;
 }
 
+/**
+ * Orden por `order_id` ML (sin `ml_user_id`). Si hay varias cuentas con la misma orden, toma la fila más reciente por `updated_at`.
+ */
+async function getMlOrderByOrderId(orderId) {
+  await ensureSchema();
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(oid) || oid <= 0) return null;
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id, order_id, status, date_created, buyer_id, total_amount, currency_id
+     FROM ml_orders WHERE order_id = $1
+     ORDER BY updated_at DESC NULLS LAST, id DESC
+     LIMIT 1`,
+    [oid]
+  );
+  return rows[0] || null;
+}
+
+async function insertFilemakerTipoGLog(row) {
+  await ensureSchema();
+  const orderId = row.order_id != null ? Number(row.order_id) : null;
+  const buyerId = row.buyer_id != null ? Number(row.buyer_id) : null;
+  const mlUserId = row.ml_user_id != null ? Number(row.ml_user_id) : null;
+  const phoneIn = row.phone_in != null ? String(row.phone_in).slice(0, 2000) : null;
+  const tipoRetiro = row.tipo_retiro != null ? String(row.tipo_retiro).slice(0, 2000) : null;
+  const outcome = row.outcome != null ? String(row.outcome).slice(0, 200) : "unknown";
+  const skipReason = row.skip_reason != null ? String(row.skip_reason).slice(0, 4000) : null;
+  const tipoEDetail = row.tipo_e_detail != null ? String(row.tipo_e_detail).slice(0, 16000) : null;
+  const requestJson = row.request_json != null ? String(row.request_json).slice(0, 32000) : null;
+  const { rows } = await pool.query(
+    `INSERT INTO ml_filemaker_tipo_g_log (order_id, buyer_id, ml_user_id, phone_in, tipo_retiro, outcome, skip_reason, tipo_e_detail, request_json)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+    [orderId, buyerId, mlUserId, phoneIn, tipoRetiro, outcome, skipReason, tipoEDetail, requestJson]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+async function listFilemakerTipoGLog(limit, maxAllowed) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const n = Math.min(Math.max(Number(limit) || 200, 1), cap);
+  const { rows } = await pool.query(
+    `SELECT id, created_at, order_id, buyer_id, ml_user_id, phone_in, tipo_retiro, outcome, skip_reason, tipo_e_detail, request_json
+     FROM ml_filemaker_tipo_g_log ORDER BY id DESC LIMIT $1`,
+    [n]
+  );
+  return rows;
+}
+
 async function listMlOrdersByUser(mlUserId, limit, maxAllowed, options = {}) {
   await ensureSchema();
   const mlUid = Number(mlUserId);
@@ -3795,6 +3858,9 @@ module.exports = {
   listMlListingChangeAck,
   upsertMlOrder,
   getMlOrderByUserAndOrderId,
+  getMlOrderByOrderId,
+  insertFilemakerTipoGLog,
+  listFilemakerTipoGLog,
   listMlOrdersByUser,
   listMlOrdersAll,
   updateMlOrderFeedbackSummary,

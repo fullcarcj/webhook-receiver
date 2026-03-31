@@ -17,7 +17,7 @@ Write-Host "`n--- Prueba de conexion OAuth (Mercado Libre) ---`n" -ForegroundCol
 node "$root\test-conexion.js"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$port = if ($env:PORT) { $env:PORT } else { "3000" }
+$port = if ($env:PORT) { $env:PORT } else { "3001" }
     Write-Host "`n--- Opcional: servidor en marcha? token enmascarado (puerto $port) ---`n" -ForegroundColor DarkGray
 try {
     $r = Invoke-RestMethod -Uri "http://127.0.0.1:$port/oauth/token-status" -Method Get -TimeoutSec 3

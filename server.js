@@ -63,6 +63,7 @@ const { renderWhatsappTipoFPage } = require("./whatsapp-tipo-f-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
 const { maybeProcessInternalOrderMessageForTipoE } = require("./ml-whatsapp-internal-order-message");
 const { trySendWhatsappTipoFForQuestion } = require("./ml-whatsapp-tipo-ef");
+const { processFilemakerTipoGPost } = require("./ml-filemaker-tipo-g");
 const { appendWasenderWebhookNdjsonLine } = require("./wasender-webhook-log");
 const { wasenderWebhookSignatureOk } = require("./wasender-webhook-signature");
 const {
@@ -144,10 +145,11 @@ const {
   getMlWhatsappTipoFConfig,
   upsertMlWhatsappTipoFConfig,
   listMlWhatsappWasenderLog,
+  listFilemakerTipoGLog,
   dbPath,
 } = require("./db");
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
 /** POST Wasender API: eventos de sesión WhatsApp (independiente de {@link WEBHOOK_PATH} de Mercado Libre). */
 const WASENDER_WEBHOOK_PATH = process.env.WASENDER_WEBHOOK_PATH || "/wasender-webhook";
@@ -240,6 +242,16 @@ function isEnviosWhatsappTipoEPath(pathname) {
   return pathname === "/envios-whatsapp-tipo-e" || pathname === "/envios-whatsapp-tipo-e/";
 }
 
+/** POST FileMaker: actualizar buyer + encadenar tipo E (`ml-filemaker-tipo-g.js`). */
+function isFilemakerTipoGPostPath(pathname) {
+  return pathname === "/filemaker/tipo-g" || pathname === "/filemaker/tipo-g/";
+}
+
+/** Tipo G: GET log (`ml_filemaker_tipo_g_log`, ?k=ADMIN_SECRET) · POST mismo cuerpo que `/filemaker/tipo-g` (FILEMAKER_TIPO_G_SECRET). */
+function isMensajesTipoGPath(pathname) {
+  return pathname === "/mensajes-tipo-g" || pathname === "/mensajes-tipo-g/";
+}
+
 function isVentasDetalleWebPath(pathname) {
   return pathname === "/ventas-detalle-web" || pathname === "/ventas-detalle-web/";
 }
@@ -308,6 +320,19 @@ function rejectAdminSecret(req, res) {
     return true;
   }
   return false;
+}
+
+/** Secreto POST `/filemaker/tipo-g`: `Authorization: Bearer`, cabecera `X-Filemaker-Secret` o `?secret=`. */
+function filemakerTipoGSecretFromRequest(req, url) {
+  const auth = req.headers.authorization;
+  if (auth && /^Bearer\s+/i.test(String(auth))) {
+    return String(auth).replace(/^Bearer\s+/i, "").trim();
+  }
+  const h = req.headers["x-filemaker-secret"];
+  if (h != null && String(h).trim() !== "") return String(h).trim();
+  const q = url.searchParams.get("secret");
+  if (q != null && String(q).trim() !== "") return String(q).trim();
+  return "";
 }
 
 /** URLs destino (hasta 4 POST salientes). Usa POST_URL_1…POST_URL_4 o POST_WEBHOOK_URLS=url1,url2,… */
@@ -1186,6 +1211,8 @@ const server = http.createServer(async (req, res) => {
           "GET|POST|DELETE /mensajes-postventa?k=ADMIN_SECRET (plantillas post-venta; JSON en POST/DELETE)",
         mensajes_whatsapp_tipo_e:
           "GET|POST /mensajes-tipo-e-whatsapp?k=ADMIN_SECRET (config tipo E en ml_whatsapp_tipo_e_config) · GET|POST /mensajes-tipo-f-whatsapp?k=ADMIN_SECRET (plantilla tipo F + seguir con E×2) · GET /envios-whatsapp-tipo-e?k=ADMIN_SECRET (log envíos Wasender E/F en ml_whatsapp_wasender_log; ?kind=e|f|all & outcome=…)",
+        filemaker_tipo_g:
+          "POST /filemaker/tipo-g o POST /mensajes-tipo-g (mismo JSON y FILEMAKER_TIPO_G_SECRET) — actualiza ml_buyers e intenta WhatsApp tipo E · GET /mensajes-tipo-g?k=ADMIN_SECRET (log ml_filemaker_tipo_g_log)",
         envio_auto_postventa:
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:
@@ -1248,6 +1275,48 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ status: "ok" }));
+    return;
+  }
+
+  /** FileMaker → actualizar buyer + intento tipo E (Wasender). Requiere `FILEMAKER_TIPO_G_SECRET`. Alias POST: `/mensajes-tipo-g`. */
+  if (
+    req.method === "POST" &&
+    (isFilemakerTipoGPostPath(url.pathname) || isMensajesTipoGPath(url.pathname))
+  ) {
+    const expected = process.env.FILEMAKER_TIPO_G_SECRET;
+    if (!expected || String(expected).trim() === "") {
+      res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: "FILEMAKER_TIPO_G_SECRET no definido en el servidor",
+        })
+      );
+      return;
+    }
+    const provided = filemakerTipoGSecretFromRequest(req, url);
+    if (provided !== String(expected).trim()) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+      return;
+    }
+    let body;
+    try {
+      body = await parseJsonBody(req);
+    } catch (e) {
+      respondJsonBodyParseError(res, e);
+      return;
+    }
+    body = unwrapJsonBodyIfNeeded(body);
+    try {
+      const result = await processFilemakerTipoGPost(body);
+      res.writeHead(result.httpStatus, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(result.json));
+    } catch (e) {
+      console.error("[filemaker tipo G]", e);
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "internal_error", detail: e.message || String(e) }));
+    }
     return;
   }
 
@@ -3862,6 +3931,95 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Log POST FileMaker tipo G — `ml_filemaker_tipo_g_log`. */
+  if (req.method === "GET" && isMensajesTipoGPath(url.pathname)) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Mensajes tipo G</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Mensajes tipo G</title><p>Acceso denegado. <code>/mensajes-tipo-g?k=…</code></p>"
+      );
+      return;
+    }
+    const lim = url.searchParams.get("limit");
+    let rows;
+    try {
+      rows = await listFilemakerTipoGLog(lim, 2000);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, rows }));
+      return;
+    }
+    const tableRows = rows
+      .map((r) => {
+        const prev =
+          r.tipo_e_detail && r.tipo_e_detail.length > 180
+            ? `${escapeHtml(r.tipo_e_detail.slice(0, 180))}…`
+            : escapeHtml(r.tipo_e_detail);
+        const reqPrev =
+          r.request_json && r.request_json.length > 120
+            ? `${escapeHtml(r.request_json.slice(0, 120))}…`
+            : escapeHtml(r.request_json);
+        return `<tr>
+  <td>${escapeHtml(r.id)}</td>
+  <td class="muted">${escapeHtml(r.created_at)}</td>
+  <td>${escapeHtml(r.order_id)}</td>
+  <td>${escapeHtml(r.buyer_id)}</td>
+  <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.phone_in)}</td>
+  <td>${escapeHtml(r.tipo_retiro)}</td>
+  <td>${escapeHtml(r.outcome)}</td>
+  <td>${escapeHtml(r.skip_reason)}</td>
+  <td><pre class="payload">${prev || "—"}</pre></td>
+  <td><pre class="payload">${reqPrev || "—"}</pre></td>
+</tr>`;
+      })
+      .join("");
+    const tipoGHtml = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Log mensajes tipo G (FileMaker)</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 1600px; margin-top: 1rem; font-size: 0.78rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.72rem; word-break: break-all; }
+    pre.payload { margin: 0; max-height: 100px; overflow: auto; font-size: 0.7rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+  </style>
+</head>
+<body>
+  <h1>Log mensajes tipo G (FileMaker)</h1>
+  <p class="lead">Tabla <code>ml_filemaker_tipo_g_log</code>: cada POST a <code>/filemaker/tipo-g</code> o <code>/mensajes-tipo-g</code> con <code>FILEMAKER_TIPO_G_SECRET</code>. Tras actualizar <code>ml_buyers</code> se intenta el envío tipo E (Wasender); el detalle del intento va en <code>tipo_e_detail</code>. ${rows.length} fila(s). JSON: <code>?format=json</code>.</p>
+  <table>
+    <thead><tr><th>id</th><th>created_at</th><th>order_id</th><th>buyer_id</th><th>ml_user_id</th><th>phone_in</th><th>tipo_retiro</th><th>outcome</th><th>skip_reason</th><th>tipo_e_detail</th><th>request_json</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="11">Sin registros.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(tipoGHtml);
+    return;
+  }
+
   /** Log unificado: tipo A (post-venta orden), B (retiro), C (calificación) — `ml_message_kind_send_log`. */
   if (req.method === "GET" && isEnviosTiposAbcPath(url.pathname)) {
     const adminSecret = process.env.ADMIN_SECRET;
@@ -4920,6 +5078,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Log WhatsApp Wasender E/F: http://localhost:${PORT}/envios-whatsapp-tipo-e?k=TU_ADMIN_SECRET`);
     console.log(`Log envíos post-venta: http://localhost:${PORT}/envios-postventa?k=TU_ADMIN_SECRET`);
     console.log(`Log tipos A/B/C (unificado): http://localhost:${PORT}/envios-tipos-abc?k=TU_ADMIN_SECRET`);
+    console.log(`Log tipo G FileMaker: http://localhost:${PORT}/mensajes-tipo-g?k=TU_ADMIN_SECRET`);
     console.log(
       `Log recordatorios calificación: http://localhost:${PORT}/recordatorios-calificacion?k=TU_ADMIN_SECRET (alias: /recordatorios?k=…)`
     );
@@ -4936,9 +5095,16 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /wasender-webhooks /fetches /buyers /mensajes-postventa /mensajes-tipo-e-whatsapp /mensajes-tipo-f-whatsapp /envios-whatsapp-tipo-e /envios-postventa /envios-tipos-abc /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /wasender-webhooks /fetches /buyers /mensajes-postventa /mensajes-tipo-e-whatsapp /mensajes-tipo-f-whatsapp /envios-whatsapp-tipo-e /envios-postventa /envios-tipos-abc /mensajes-tipo-g /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
+  }
+  if (process.env.FILEMAKER_TIPO_G_SECRET && String(process.env.FILEMAKER_TIPO_G_SECRET).trim() !== "") {
+    console.log(
+      `POST FileMaker tipo G: http://localhost:${PORT}/filemaker/tipo-g o http://localhost:${PORT}/mensajes-tipo-g (cabecera o ?secret= con FILEMAKER_TIPO_G_SECRET)`
+    );
+  } else {
+    console.log("[config] FILEMAKER_TIPO_G_SECRET no definido: POST /filemaker/tipo-g responde 503.");
   }
   console.log(`Token (enmascarado): GET http://localhost:${PORT}/oauth/token-status`);
 });

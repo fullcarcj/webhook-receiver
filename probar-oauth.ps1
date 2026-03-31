@@ -14,9 +14,9 @@ if (-not (Test-Path $credPath)) {
 
 . $credPath
 
-$existing = Get-NetTCPConnection -LocalPort 3000 -ErrorAction SilentlyContinue
+$existing = Get-NetTCPConnection -LocalPort 3001 -ErrorAction SilentlyContinue
 if ($existing) {
-    Write-Host "El puerto 3000 esta en uso. Cierra el otro proceso o usa PORT distinto." -ForegroundColor Red
+    Write-Host "El puerto 3001 esta en uso. Cierra el otro proceso o usa PORT distinto." -ForegroundColor Red
     exit 1
 }
 
@@ -25,8 +25,8 @@ try {
     $proc = Start-Process -FilePath "node" -ArgumentList "server.js" -WorkingDirectory $root -PassThru -WindowStyle Hidden
     Start-Sleep -Seconds 2
 
-    Write-Host "GET http://127.0.0.1:3000/oauth/status" -ForegroundColor Cyan
-    $r = Invoke-RestMethod -Uri "http://127.0.0.1:3000/oauth/status" -Method Get
+    Write-Host "GET http://127.0.0.1:3001/oauth/status" -ForegroundColor Cyan
+    $r = Invoke-RestMethod -Uri "http://127.0.0.1:3001/oauth/status" -Method Get
     $r | ConvertTo-Json -Depth 5
 } catch {
     Write-Host $_.Exception.Message -ForegroundColor Red

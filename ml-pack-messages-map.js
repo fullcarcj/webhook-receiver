@@ -72,6 +72,105 @@ function pagingTotalFromPackBody(data) {
  * @param {string} fetchedAt — ISO
  * @returns {object|null} fila para upsertMlOrderPackMessage
  */
+/**
+ * Id de mensaje opaco en `resource` del webhook (solo hex o `/messages/{id}`).
+ * @param {string|null|undefined} resourceStr
+ * @returns {string|null}
+ */
+function extractOpaqueMessageIdFromResource(resourceStr) {
+  if (resourceStr == null || typeof resourceStr !== "string") return null;
+  const s = resourceStr.trim();
+  if (/^[0-9a-f]{32}$/i.test(s)) return s;
+  const uuid = s.match(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  );
+  if (uuid) return s;
+  const m = s.match(/\/messages\/([^/?#]+)/i);
+  if (m) {
+    try {
+      return decodeURIComponent(m[1]);
+    } catch {
+      return m[1];
+    }
+  }
+  return null;
+}
+
+/**
+ * Cuerpo del GET /messages/{id}: mensaje en raíz o bajo `message`.
+ * @param {object} data
+ * @returns {object|null}
+ */
+function pickMessageRoot(data) {
+  if (!data || typeof data !== "object") return null;
+  if (extractMlMessageId(data)) return data;
+  if (data.message && typeof data.message === "object" && extractMlMessageId(data.message)) {
+    return data.message;
+  }
+  return null;
+}
+
+/**
+ * Persistir fila desde la respuesta del fetch del webhook `messages` (cuando el pack listado
+ * `/messages/packs/{order_id}/...` aún no existe o devuelve 404).
+ * @param {number} mlUserId
+ * @param {number} orderId
+ * @param {string|null} tag
+ * @param {object} data — JSON del GET
+ * @param {string} fetchedAt — ISO
+ * @param {string|null|undefined} resourceStr — resource del webhook (fallback id mensaje)
+ * @returns {object|null} fila para upsertMlOrderPackMessage
+ */
+function orderPackMessageRowFromWebhookMessageGet(
+  mlUserId,
+  orderId,
+  tag,
+  data,
+  fetchedAt,
+  resourceStr
+) {
+  const root = pickMessageRoot(data) || data;
+  if (!root || typeof root !== "object") return null;
+  let mid = extractMlMessageId(root);
+  if (!mid) mid = extractOpaqueMessageIdFromResource(resourceStr);
+  if (!mid) return null;
+  const { from_user_id, to_user_id } = extractFromToUserIds(root);
+  let rawJson;
+  try {
+    rawJson = JSON.stringify(data);
+  } catch {
+    rawJson = "{}";
+  }
+  const text =
+    root.text != null
+      ? String(root.text)
+      : root.message != null
+        ? String(root.message)
+        : root.body != null
+          ? String(root.body)
+          : null;
+  return {
+    ml_user_id: mlUserId,
+    order_id: orderId,
+    ml_message_id: mid,
+    from_user_id,
+    to_user_id,
+    message_text: text,
+    date_created:
+      root.date_created != null
+        ? String(root.date_created)
+        : root.date != null
+          ? String(root.date)
+          : null,
+    status: root.status != null ? String(root.status) : null,
+    moderation_status: root.moderation_status != null ? String(root.moderation_status) : null,
+    tag: tag != null ? String(tag) : null,
+    raw_json: rawJson,
+    fetched_at: fetchedAt,
+    updated_at: fetchedAt,
+  };
+}
+
 function orderPackMessageRowFromApi(mlUserId, orderId, tag, m, fetchedAt) {
   const mid = extractMlMessageId(m);
   if (!mid) return null;
@@ -118,4 +217,7 @@ module.exports = {
   messagesArrayFromPackBody,
   pagingTotalFromPackBody,
   orderPackMessageRowFromApi,
+  orderPackMessageRowFromWebhookMessageGet,
+  extractOpaqueMessageIdFromResource,
+  pickMessageRoot,
 };

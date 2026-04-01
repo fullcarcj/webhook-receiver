@@ -29,7 +29,7 @@ const {
   extractOrderIdFromFeedbackPayload,
   extractOrderIdFromMessage,
 } = require("./ml-pack-extract");
-const { syncPackMessagesForOrder } = require("./ml-pack-messages-sync");
+const { syncPackMessagesForOrder, persistPackMessageFromWebhookFetch } = require("./ml-pack-messages-sync");
 const { upsertOrderFeedbackFromApiResponse } = require("./ml-order-feedback-sync");
 const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
 const { upsertBuyerFromOrdersV2Webhook } = require("./ml-buyer-order-sync");
@@ -1152,13 +1152,37 @@ function scheduleTopicFetchFromWebhook(body) {
           setImmediate(() => {
             (async () => {
               const oidMsg = extractOrderIdFromMessage(parsed);
+              const tagPack =
+                (process.env.ML_PACK_MESSAGES_SYNC_TAG || "post_sale").trim() || "post_sale";
+              /** Aunque el listado pack aún no exista (404), el GET del mensaje sí trae cuerpo; así se crea la 1.ª fila. */
+              if (
+                oidMsg &&
+                process.env.ML_WEBHOOK_PERSIST_MESSAGE_FETCH !== "0" &&
+                process.env.ML_WEBHOOK_PERSIST_MESSAGE_FETCH !== "false"
+              ) {
+                try {
+                  const pr0 = await persistPackMessageFromWebhookFetch(mlUserId, oidMsg, parsed, {
+                    tag: tagPack,
+                    resourceStr: resourceStr,
+                  });
+                  if (pr0.ok) {
+                    console.log(
+                      "[ml pack webhook] mensaje GET guardado ml_user_id=%s order_id=%s ml_message_id=%s",
+                      mlUserId,
+                      oidMsg,
+                      pr0.ml_message_id
+                    );
+                  }
+                } catch (e0) {
+                  console.error("[ml pack webhook] persist mensaje GET:", e0.message || e0);
+                }
+              }
               if (
                 oidMsg &&
                 process.env.ML_WEBHOOK_SYNC_PACK_ON_MESSAGE !== "0" &&
                 process.env.ML_WEBHOOK_SYNC_PACK_ON_MESSAGE !== "false"
               ) {
                 try {
-                  const tag = (process.env.ML_PACK_MESSAGES_SYNC_TAG || "post_sale").trim() || "post_sale";
                   const appId = String(
                     process.env.ML_APPLICATION_ID || process.env.OAUTH_CLIENT_ID || "1837222235616049"
                   ).trim();
@@ -1168,17 +1192,18 @@ function scheduleTopicFetchFromWebhook(body) {
                   );
                   const delayMs = Math.max(0, Number(process.env.ML_PACK_MESSAGES_SYNC_DELAY_MS) || 0);
                   const pr = await syncPackMessagesForOrder(mlUserId, oidMsg, {
-                    tag,
+                    tag: tagPack,
                     appId,
                     pageSize,
                     delayMs,
                   });
                   if (pr.ok) {
                     console.log(
-                      "[ml pack webhook] ml_user_id=%s order_id=%s mensajes_upsert=%s",
+                      "[ml pack webhook] ml_user_id=%s order_id=%s mensajes_upsert_lista=%s empty=%s",
                       mlUserId,
                       oidMsg,
-                      pr.upserted
+                      pr.upserted,
+                      pr.empty === true ? "1" : "0"
                     );
                   } else {
                     console.warn(
@@ -1189,7 +1214,7 @@ function scheduleTopicFetchFromWebhook(body) {
                     );
                   }
                 } catch (ePk) {
-                  console.error("[ml pack webhook]", ePk.message || ePk);
+                  console.error("[ml pack webhook] sync lista:", ePk.message || ePk);
                 }
               }
               try {
@@ -1371,7 +1396,7 @@ const server = http.createServer(async (req, res) => {
         ordenes_ml:
           "GET /ordenes-ml?k=ADMIN_SECRET — ml_orders (descarga: npm run sync-orders | sync-orders-all | sync-orders-today-all solo día actual); feedback detalle: npm run sync-order-feedback | sync-order-feedback-all; ?cuenta= ?status= ?format=json; status ML típicos en raíz JSON bajo ordenes_estados_ml",
         mensajes_pack_orden:
-          "GET /mensajes-pack-orden?k=ADMIN_SECRET — ml_order_pack_messages (sync: npm run sync-pack-messages); webhook topic messages: tras GET OK se sincroniza el pack de esa orden si se extrae order_id (ML_WEBHOOK_SYNC_PACK_ON_MESSAGE≠0). ?ml_user_id= & opcional &order_id= &limit= ; ?format=json",
+          "GET /mensajes-pack-orden?k=ADMIN_SECRET — ml_order_pack_messages (sync: npm run sync-pack-messages); webhook messages: guarda el mensaje del GET en BD (ML_WEBHOOK_PERSIST_MESSAGE_FETCH≠0) aunque /messages/packs/{order_id}/… aún no exista; luego lista el pack (ML_WEBHOOK_SYNC_PACK_ON_MESSAGE≠0). ?ml_user_id= & opcional &order_id= &limit= ; ?format=json",
         ordenes_estados_ml: ML_ORDER_STATUSES_KNOWN,
       })
     );

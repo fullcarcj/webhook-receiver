@@ -34,6 +34,7 @@ const {
   messagesArrayFromPackBody,
   pagingTotalFromPackBody,
   orderPackMessageRowFromApi,
+  orderPackMessageRowFromWebhookMessageGet,
 } = require("./ml-pack-messages-map");
 const { listMlAccounts, listMlOrdersByUser, upsertMlOrderPackMessage } = require("./db");
 
@@ -44,6 +45,36 @@ const DEFAULT_PAGE_SIZE = Math.min(
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Guarda en `ml_order_pack_messages` el mensaje devuelto por GET /messages/{id} (webhook).
+ * Necesario cuando el pack `/messages/packs/{order_id}/sellers/...` aún no existe (404 / vacío).
+ * @param {number} mlUserId
+ * @param {number} orderId
+ * @param {object} parsed — JSON del GET
+ * @param {{ tag?: string, resourceStr?: string }} [opts]
+ */
+async function persistPackMessageFromWebhookFetch(mlUserId, orderId, parsed, opts = {}) {
+  const tag = opts.tag != null ? String(opts.tag).trim() : "";
+  const tagNorm =
+    tag ||
+    (process.env.ML_PACK_MESSAGES_SYNC_TAG || "post_sale").trim() ||
+    "post_sale";
+  const fetchedAt = new Date().toISOString();
+  const row = orderPackMessageRowFromWebhookMessageGet(
+    mlUserId,
+    orderId,
+    tagNorm,
+    parsed,
+    fetchedAt,
+    opts.resourceStr
+  );
+  if (!row) {
+    return { ok: false, reason: "no_mappable_message" };
+  }
+  await upsertMlOrderPackMessage(row);
+  return { ok: true, ml_message_id: row.ml_message_id };
 }
 
 function packMessagesPath(mlUserId, orderId, offset, limit, tag, appId) {
@@ -262,4 +293,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { syncPackMessagesForOrder, packMessagesPath };
+module.exports = { syncPackMessagesForOrder, packMessagesPath, persistPackMessageFromWebhookFetch };

@@ -2472,6 +2472,37 @@ async function getMlOrderByOrderId(orderId) {
   return rows[0] || null;
 }
 
+/** Órdenes por cuenta y conjunto de `order_id` (para enriquecer vistas como mensajes pack). */
+async function listMlOrdersByUserAndOrderIds(mlUserId, orderIds) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Array.isArray(orderIds) || orderIds.length === 0) return [];
+  const ids = [...new Set(orderIds.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0))];
+  if (ids.length === 0) return [];
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id, order_id, status, date_created, buyer_id, total_amount, currency_id
+     FROM ml_orders
+     WHERE ml_user_id = $1 AND order_id = ANY($2::bigint[])`,
+    [mlUid, ids]
+  );
+  return rows;
+}
+
+/** Buyers por ids (útil para columnas derivadas en HTML/JSON). */
+async function listMlBuyersByIds(buyerIds) {
+  await ensureSchema();
+  if (!Array.isArray(buyerIds) || buyerIds.length === 0) return [];
+  const ids = [...new Set(buyerIds.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0))];
+  if (ids.length === 0) return [];
+  const { rows } = await pool.query(
+    `SELECT buyer_id, nickname, phone_1, phone_2, pref_entrega, cambio_datos, nombre_apellido, observaciones, actualizacion
+     FROM ml_buyers
+     WHERE buyer_id = ANY($1::bigint[])`,
+    [ids]
+  );
+  return rows;
+}
+
 async function insertFilemakerTipoGLog(row) {
   await ensureSchema();
   const orderId = row.order_id != null ? Number(row.order_id) : null;
@@ -4336,6 +4367,46 @@ async function listMlWhatsappWasenderLog(limit, options = {}) {
   return rows;
 }
 
+/** Logs Wasender E/F por cuenta y conjunto de órdenes. */
+async function listMlWhatsappWasenderLogByUserAndOrderIds(mlUserId, orderIds, options = {}) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Array.isArray(orderIds) || orderIds.length === 0) return [];
+  const ids = [...new Set(orderIds.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0))];
+  if (ids.length === 0) return [];
+  const mk =
+    options.message_kind != null && String(options.message_kind).trim() !== ""
+      ? String(options.message_kind).trim().toUpperCase()
+      : null;
+  const maxRows = Math.min(Math.max(Number(options.limit) || 500, 1), 5000);
+  if (mk === "E" || mk === "F") {
+    const { rows } = await pool.query(
+      `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
+              phone_e164, phone_source, outcome, skip_reason, http_status,
+              wasender_msg_id, response_body, error_message, text_preview, tipo_e_step,
+              tipo_e_activation_source
+       FROM ml_whatsapp_wasender_log
+       WHERE ml_user_id = $1 AND order_id = ANY($2::bigint[]) AND message_kind = $3
+       ORDER BY id DESC
+       LIMIT $4`,
+      [mlUid, ids, mk, maxRows]
+    );
+    return rows;
+  }
+  const { rows } = await pool.query(
+    `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
+            phone_e164, phone_source, outcome, skip_reason, http_status,
+            wasender_msg_id, response_body, error_message, text_preview, tipo_e_step,
+            tipo_e_activation_source
+     FROM ml_whatsapp_wasender_log
+     WHERE ml_user_id = $1 AND order_id = ANY($2::bigint[])
+     ORDER BY id DESC
+     LIMIT $3`,
+    [mlUid, ids, maxRows]
+  );
+  return rows;
+}
+
 module.exports = {
   insertWebhook,
   listWebhooks,
@@ -4398,6 +4469,7 @@ module.exports = {
   countMlWhatsappTipoECompletedPairsForPhoneSinceQuestion,
   insertMlWhatsappWasenderLog,
   listMlWhatsappWasenderLog,
+  listMlWhatsappWasenderLogByUserAndOrderIds,
   upsertMlQuestionPending,
   getMlQuestionPendingByQuestionId,
   deleteMlQuestionPending,
@@ -4429,6 +4501,8 @@ module.exports = {
   upsertMlOrder,
   getMlOrderByUserAndOrderId,
   getMlOrderByOrderId,
+  listMlOrdersByUserAndOrderIds,
+  listMlBuyersByIds,
   insertFilemakerTipoGLog,
   listFilemakerTipoGLog,
   normalizeProductoAtributosJson,

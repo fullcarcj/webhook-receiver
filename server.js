@@ -65,10 +65,14 @@ const { renderPostSaleMessagesPage } = require("./post-sale-messages-html");
 const { renderWhatsappTipoEPage } = require("./whatsapp-tipo-e-html");
 const { renderWhatsappTipoFPage } = require("./whatsapp-tipo-f-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
-const { maybeProcessInternalOrderMessageForTipoE } = require("./ml-whatsapp-internal-order-message");
+const {
+  maybeProcessInternalOrderMessageForTipoE,
+  extractFirstMobile04,
+} = require("./ml-whatsapp-internal-order-message");
 const { trySendWhatsappTipoFForQuestion } = require("./ml-whatsapp-tipo-ef");
 const { processFilemakerTipoGPost } = require("./ml-filemaker-tipo-g");
 const { processFilemakerInventarioProductosPost } = require("./ml-filemaker-inventario-productos");
+const { normalizePhoneToE164 } = require("./ml-whatsapp-phone");
 const { appendWasenderWebhookNdjsonLine } = require("./wasender-webhook-log");
 const { wasenderWebhookSignatureOk } = require("./wasender-webhook-signature");
 const {
@@ -138,6 +142,8 @@ const {
   listMlOrdersByUser,
   listMlOrdersAll,
   upsertMlOrder,
+  listMlOrdersByUserAndOrderIds,
+  listMlBuyersByIds,
   listMlOrderCountsByUserStatus,
   listMlOrderCountsByUser,
   listMlOrderPackMessagesByUser,
@@ -151,6 +157,7 @@ const {
   getMlWhatsappTipoFConfig,
   upsertMlWhatsappTipoFConfig,
   listMlWhatsappWasenderLog,
+  listMlWhatsappWasenderLogByUserAndOrderIds,
   listFilemakerTipoGLog,
   insertProducto,
   upsertProductoBySku,
@@ -687,6 +694,51 @@ function isMlItemsTopic(topic, resourceStr) {
 }
 
 /**
+ * Para webhooks `messages`: si se puede resolver `order_id`, traer `/orders/{id}` y dejar la fila en `ml_orders`
+ * aunque el topic original no sea `orders_v2`.
+ */
+async function ensureOrderRowFromMessagesWebhook(mlUserId, orderId) {
+  const mlUid = Number(mlUserId);
+  const oid = Number(orderId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(oid) || oid <= 0) {
+    return { ok: false, reason: "bad_args" };
+  }
+  const path = `/orders/${oid}`;
+  let res;
+  try {
+    res = await mercadoLibreFetchForUser(mlUid, path);
+  } catch (e) {
+    return { ok: false, reason: "fetch_exception", detail: e && e.message ? e.message : String(e) };
+  }
+  if (!res || !res.ok || !res.data || typeof res.data !== "object" || Array.isArray(res.data)) {
+    return {
+      ok: false,
+      reason: "fetch_failed",
+      http_status: res && res.status != null ? res.status : null,
+      detail: res && res.rawText ? String(res.rawText).slice(0, 4000) : null,
+    };
+  }
+  const row = orderRowFromMlApi(mlUid, res.data, {
+    http_status: res.status,
+    sync_error: null,
+    fetched_at: new Date().toISOString(),
+  });
+  if (!row) {
+    return { ok: false, reason: "row_null" };
+  }
+  await upsertMlOrder(row);
+  const buyer = extractBuyerFromOrderPayload(res.data);
+  if (buyer) {
+    try {
+      await upsertBuyerFromOrdersV2Webhook(buyer);
+    } catch (e) {
+      console.error("[ml buyers message->order]", e.message || e);
+    }
+  }
+  return { ok: true, buyer_id: row.buyer_id != null ? Number(row.buyer_id) : null };
+}
+
+/**
  * Tras el webhook: GET al recurso de ML y guarda en ml_topic_fetches (no bloquea la respuesta HTTP).
  */
 function scheduleTopicFetchFromWebhook(body) {
@@ -1170,6 +1222,24 @@ function scheduleTopicFetchFromWebhook(body) {
               const oidMsg = extractOrderIdFromMessage(parsed);
               const tagPack =
                 (process.env.ML_PACK_MESSAGES_SYNC_TAG || "post_sale").trim() || "post_sale";
+              if (oidMsg) {
+                try {
+                  const ordRes = await ensureOrderRowFromMessagesWebhook(mlUserId, oidMsg);
+                  if (ordRes.ok) {
+                    console.log("[ml orders message-hook] ml_user_id=%s order_id=%s upsert_ok=1", mlUserId, oidMsg);
+                  } else {
+                    console.warn(
+                      "[ml orders message-hook] ml_user_id=%s order_id=%s reason=%s http=%s",
+                      mlUserId,
+                      oidMsg,
+                      ordRes.reason || "unknown",
+                      ordRes.http_status != null ? ordRes.http_status : "—"
+                    );
+                  }
+                } catch (eOrd) {
+                  console.error("[ml orders message-hook]", eOrd.message || eOrd);
+                }
+              }
               /** Aunque el listado pack aún no exista (404), el GET del mensaje sí trae cuerpo; así se crea la 1.ª fila. */
               if (
                 oidMsg &&
@@ -4128,6 +4198,9 @@ const server = http.createServer(async (req, res) => {
     let rows;
     let totalCuentaBd = 0;
     let totalOrdenBd = null;
+    let ordersForRows = [];
+    let buyersForRows = [];
+    let tipoELogsForRows = [];
     try {
       rows = await listMlOrderPackMessagesByUser(mlUserId, limNum, {
         order_id: orderIdOpt,
@@ -4135,6 +4208,24 @@ const server = http.createServer(async (req, res) => {
       totalCuentaBd = await countMlOrderPackMessagesForMlUser(mlUserId);
       if (orderIdOpt != null) {
         totalOrdenBd = await countMlOrderPackMessagesForOrder(mlUserId, orderIdOpt);
+      }
+      const orderIdsForRows = [...new Set(rows.map((r) => Number(r.order_id)).filter((n) => Number.isFinite(n) && n > 0))];
+      if (orderIdsForRows.length > 0) {
+        ordersForRows = await listMlOrdersByUserAndOrderIds(mlUserId, orderIdsForRows);
+        const buyerIdsForRows = [
+          ...new Set(
+            ordersForRows
+              .map((o) => Number(o.buyer_id))
+              .filter((n) => Number.isFinite(n) && n > 0)
+          ),
+        ];
+        if (buyerIdsForRows.length > 0) {
+          buyersForRows = await listMlBuyersByIds(buyerIdsForRows);
+        }
+        tipoELogsForRows = await listMlWhatsappWasenderLogByUserAndOrderIds(mlUserId, orderIdsForRows, {
+          message_kind: "E",
+          limit: 2000,
+        });
       }
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
@@ -4181,6 +4272,30 @@ const server = http.createServer(async (req, res) => {
         )}">Quitar filtro de orden (todas las recientes)</a>`
       : `Cuenta <strong>${escapeHtml(mlUserId)}</strong>. ${totalLine}`;
 
+    const orderMapForRows = new Map(ordersForRows.map((o) => [Number(o.order_id), o]));
+    const buyerMapForRows = new Map(buyersForRows.map((b) => [Number(b.buyer_id), b]));
+    const tipoELogByOrder = new Map();
+    for (const logRow of tipoELogsForRows) {
+      const oid = Number(logRow.order_id);
+      if (!Number.isFinite(oid) || oid <= 0) continue;
+      const prev = tipoELogByOrder.get(oid);
+      if (!prev) {
+        tipoELogByOrder.set(oid, logRow);
+        continue;
+      }
+      const prevTs = Date.parse(String(prev.created_at || ""));
+      const curTs = Date.parse(String(logRow.created_at || ""));
+      const prevInternal = String(prev.tipo_e_activation_source || "").trim() === "mensajeria_interna_ord";
+      const curInternal = String(logRow.tipo_e_activation_source || "").trim() === "mensajeria_interna_ord";
+      if (curInternal && !prevInternal) {
+        tipoELogByOrder.set(oid, logRow);
+        continue;
+      }
+      if (curInternal === prevInternal && Number.isFinite(curTs) && (!Number.isFinite(prevTs) || curTs > prevTs)) {
+        tipoELogByOrder.set(oid, logRow);
+      }
+    }
+
     const tableRows = rows
       .map((r) => {
         const txt =
@@ -4191,6 +4306,37 @@ const server = http.createServer(async (req, res) => {
           r.raw_json != null && String(r.raw_json).length > 120
             ? `${escapeHtml(String(r.raw_json).slice(0, 120))}…`
             : escapeHtml(r.raw_json || "—");
+        const ord = orderMapForRows.get(Number(r.order_id)) || null;
+        const buyer = ord && ord.buyer_id != null ? buyerMapForRows.get(Number(ord.buyer_id)) || null : null;
+        const detectedPhone = extractFirstMobile04(r.message_text != null ? String(r.message_text) : "") || null;
+        const detectedE164 = detectedPhone ? normalizePhoneToE164(detectedPhone, "58") : null;
+        const buyerPhoneMatches = (() => {
+          if (!buyer || !detectedPhone) return null;
+          const p1 = buyer.phone_1 != null ? String(buyer.phone_1).trim() : "";
+          const p2 = buyer.phone_2 != null ? String(buyer.phone_2).trim() : "";
+          if (p1 && (p1 === detectedPhone || normalizePhoneToE164(p1, "58") === detectedE164)) {
+            return `sí · phone_1=${p1}`;
+          }
+          if (p2 && (p2 === detectedPhone || normalizePhoneToE164(p2, "58") === detectedE164)) {
+            return `sí · phone_2=${p2}`;
+          }
+          return "no";
+        })();
+        const buyerPhoneCol =
+          detectedPhone != null
+            ? `${escapeHtml(detectedPhone)} · ${escapeHtml(buyerPhoneMatches || "sin buyer")}`
+            : "—";
+        const tipoELog = tipoELogByOrder.get(Number(r.order_id)) || null;
+        const tipoECol = (() => {
+          if (!tipoELog) return "—";
+          const out = tipoELog.outcome != null && String(tipoELog.outcome).trim() !== "" ? String(tipoELog.outcome).trim() : "—";
+          const phone = tipoELog.phone_e164 != null && String(tipoELog.phone_e164).trim() !== "" ? String(tipoELog.phone_e164).trim() : "—";
+          const src =
+            tipoELog.tipo_e_activation_source != null && String(tipoELog.tipo_e_activation_source).trim() !== ""
+              ? String(tipoELog.tipo_e_activation_source).trim()
+              : "—";
+          return `${escapeHtml(out)} · ${escapeHtml(phone)} · ${escapeHtml(src)}`;
+        })();
         return `<tr>
   <td>${escapeHtml(r.id)}</td>
   <td>${escapeHtml(r.order_id)}</td>
@@ -4198,6 +4344,8 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.from_user_id != null ? r.from_user_id : "—")}</td>
   <td>${escapeHtml(r.to_user_id != null ? r.to_user_id : "—")}</td>
   <td class="msg">${txt}</td>
+  <td>${buyerPhoneCol}</td>
+  <td>${tipoECol}</td>
   <td class="muted">${escapeHtml(r.date_created || "—")}</td>
   <td>${escapeHtml(r.status || "—")}</td>
   <td>${escapeHtml(r.tag || "—")}</td>
@@ -4235,10 +4383,10 @@ const server = http.createServer(async (req, res) => {
   )}</code> · JSON: <code>?format=json</code> · <a href="${escapeAttr(
     packMsgQuery({ ml_user_id: null })
   )}">Elegir otra cuenta</a></p>
-  <p class="lead">Orden concreta: añade <code>&amp;order_id=NUM</code> a la URL. Datos: <code>npm run sync-pack-messages</code> / <code>sync-pack-messages-all</code>.</p>
+  <p class="lead">Orden concreta: añade <code>&amp;order_id=NUM</code> a la URL. Columnas nuevas: <code>buyer_phone_update</code> usa el teléfono detectado en el texto (<code>04XXXXXXXXX</code> o <code>04XX-XXXXXXX</code>) y lo cruza contra <code>ml_buyers.phone_1/phone_2</code>; <code>tipo_e_invocado</code> muestra el último log tipo E de la orden. Datos: <code>npm run sync-pack-messages</code> / <code>sync-pack-messages-all</code>.</p>
   <table>
-    <thead><tr><th>id</th><th>order_id</th><th>ml_message_id</th><th>from</th><th>to</th><th>texto</th><th>date_created</th><th>status</th><th>tag</th><th>fetched_at</th><th>raw (preview)</th></tr></thead>
-    <tbody>${tableRows || '<tr><td colspan="11">Sin mensajes en BD para este filtro.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>order_id</th><th>ml_message_id</th><th>from</th><th>to</th><th>texto</th><th>buyer_phone_update</th><th>tipo_e_invocado</th><th>date_created</th><th>status</th><th>tag</th><th>fetched_at</th><th>raw (preview)</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="13">Sin mensajes en BD para este filtro.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

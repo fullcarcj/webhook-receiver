@@ -286,6 +286,21 @@ function extractApiPathFromMlResource(resource) {
   return r;
 }
 
+function appendMlMessagesTagIfNeeded(resourcePath) {
+  if (!resourcePath || typeof resourcePath !== "string") return resourcePath;
+  const path = resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`;
+  const qm = path.indexOf("?");
+  const pathname = qm >= 0 ? path.slice(0, qm) : path;
+  const search = qm >= 0 ? path.slice(1 + qm) : "";
+  if (!/^\/messages\/[^/]+$/i.test(pathname)) return path;
+  const params = new URLSearchParams(search);
+  if (!params.has("tag")) {
+    params.set("tag", process.env.ML_MESSAGES_TAG || "post_sale");
+  }
+  const q = params.toString();
+  return q ? `${pathname}?${q}` : pathname;
+}
+
 /**
  * Convierte `resource` del webhook en path de API (p. ej. messages trae id sin "/").
  * Si ML cambia el endpoint, sobreescribe con ML_MESSAGES_PATH_PREFIX o el path completo en ML_*.
@@ -296,11 +311,13 @@ function normalizeMlResourcePath(topic, resource) {
   if (typeof r !== "string") return null;
   r = r.trim();
   if (!r) return null;
-  if (r.startsWith("/")) return r;
+  if (r.startsWith("/")) {
+    return topic === "messages" ? appendMlMessagesTagIfNeeded(r) : r;
+  }
   if (topic === "messages") {
     const prefix = process.env.ML_MESSAGES_PATH_PREFIX || "/messages";
     const base = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
-    return `${base}/${r}`;
+    return appendMlMessagesTagIfNeeded(`${base}/${r}`);
   }
   const tq = topic != null ? String(topic).trim() : "";
   if (tq === "questions" || tq === "question") {
@@ -324,7 +341,7 @@ function normalizeMlResourcePath(topic, resource) {
     ) {
       const prefix = process.env.ML_MESSAGES_PATH_PREFIX || "/messages";
       const base = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
-      return `${base}/${r}`;
+      return appendMlMessagesTagIfNeeded(`${base}/${r}`);
     }
   }
   return `/${r}`;

@@ -1,7 +1,7 @@
 /**
  * Sincroniza mensajería post-venta (pack) por orden desde la API de Mercado Libre hacia PostgreSQL.
  *
- * GET /messages/packs/{order_id}/sellers/{seller_id}?tag=post_sale&limit=&offset=&mark_as_read=false
+ * GET /messages/packs/{order_id}/sellers/{seller_id}?tag=post_sale&api_version=4&limit=&offset=&mark_as_read=false
  * (el id del pack en post-venta suele ser el order_id; multicuenta: un seller_id por fila en ml_accounts).
  *
  * ═══════════════════════════════════════════════════════════════════════════════════
@@ -80,6 +80,7 @@ async function persistPackMessageFromWebhookFetch(mlUserId, orderId, parsed, opt
 function packMessagesPath(mlUserId, orderId, offset, limit, tag, appId) {
   const p = new URLSearchParams();
   p.set("tag", tag);
+  p.set("api_version", "4");
   p.set("limit", String(limit));
   p.set("offset", String(Math.max(0, offset)));
   p.set("mark_as_read", "false");

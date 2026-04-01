@@ -69,6 +69,15 @@ async function runCase(buyerId, phone) {
     ["04123333074", "04124444075", "04125555076", "04126666077"]
   );
 
+  const nested = mod.extractMessageTextFromMlMessagePayload({
+    messages: [{ text: { plain: "Tel 04123333074" } }],
+  });
+  assert.ok(
+    nested.includes("04123333074"),
+    "debe leer text.plain bajo messages[0] (payload real del webhook ML)"
+  );
+  assert.equal(mod.extractFirstMobile04(nested), "04123333074");
+
   console.log("OK buyer phone routing cases passed");
 })().catch((err) => {
   console.error(err);

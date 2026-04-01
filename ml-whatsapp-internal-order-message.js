@@ -62,24 +62,35 @@ function extractMessageTextFromMlMessagePayload(data) {
       push(String(v.text));
     }
   };
-  push(data.text);
-  push(data.body);
-  push(data.plain_text);
-  if (data.text && typeof data.text === "object") {
-    push(data.text.plain);
+  /** Mismo criterio que `pickMessageRoot` en ml-pack-messages-map: el cuerpo suele ir en messages[0]. */
+  const roots = [];
+  if (Array.isArray(data.messages) && data.messages.length > 0 && data.messages[0] && typeof data.messages[0] === "object") {
+    roots.push(data.messages[0]);
   }
-  const msg = data.message;
-  if (typeof msg === "string") push(msg);
-  else if (msg && typeof msg === "object") {
-    push(msg.text);
-    push(msg.body);
-    push(msg.plain_text);
-    if (msg.text && typeof msg.text === "object") {
-      push(msg.text.plain);
+  roots.push(data);
+  if (data.message && typeof data.message === "object") roots.push(data.message);
+
+  for (const root of roots) {
+    if (!root || typeof root !== "object") continue;
+    push(root.text);
+    push(root.body);
+    push(root.plain_text);
+    if (root.text && typeof root.text === "object") {
+      push(root.text.plain);
     }
-    if (msg.content && typeof msg.content === "object") {
-      push(msg.content.text);
-      push(msg.content.plain_text);
+    const msg = root.message;
+    if (typeof msg === "string") push(msg);
+    else if (msg && typeof msg === "object") {
+      push(msg.text);
+      push(msg.body);
+      push(msg.plain_text);
+      if (msg.text && typeof msg.text === "object") {
+        push(msg.text.plain);
+      }
+      if (msg.content && typeof msg.content === "object") {
+        push(msg.content.text);
+        push(msg.content.plain_text);
+      }
     }
   }
   return parts.join("\n");
@@ -140,7 +151,19 @@ async function processOrderMessagePhoneForTipoE(args) {
     return { skipped: true, reason: "no_order_or_phone" };
   }
 
-  const buyerId = extractBuyerIdForPostSale(parsed, args.mlUserId);
+  /** Misma fila comprador que tipo E y la UI: `ml_orders.buyer_id` (tras sync del webhook). */
+  let buyerId = null;
+  try {
+    const ord = await db.getMlOrderByUserAndOrderId(args.mlUserId, orderId);
+    if (ord && ord.buyer_id != null && Number(ord.buyer_id) > 0) {
+      buyerId = Number(ord.buyer_id);
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  if (!buyerId) {
+    buyerId = extractBuyerIdForPostSale(parsed, args.mlUserId);
+  }
   if (!buyerId) {
     return { skipped: true, reason: "no_buyer_id" };
   }

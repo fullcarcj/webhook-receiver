@@ -60,26 +60,17 @@ function extractBuyerFromOrderPayload(data) {
  */
 function extractBuyerIdForPostSale(data, sellerUserId) {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
-  const fromOrder = extractBuyerFromOrderPayload(data);
-  if (fromOrder) return fromOrder.buyer_id;
-  if (data.order && typeof data.order === "object") {
-    const nested = extractBuyerFromOrderPayload(data.order);
-    if (nested) return nested.buyer_id;
-  }
+  const sid =
+    sellerUserId != null && Number.isFinite(Number(sellerUserId))
+      ? Number(sellerUserId)
+      : null;
   const msgRoot =
     Array.isArray(data.messages) && data.messages.length > 0 && data.messages[0] && typeof data.messages[0] === "object"
       ? data.messages[0]
       : data.message && typeof data.message === "object"
         ? data.message
         : null;
-  if (msgRoot) {
-    const fromOrderMsg = extractBuyerFromOrderPayload(msgRoot);
-    if (fromOrderMsg) return fromOrderMsg.buyer_id;
-  }
-  const sid =
-    sellerUserId != null && Number.isFinite(Number(sellerUserId))
-      ? Number(sellerUserId)
-      : null;
+  /** Primero from/to vs cuenta vendedora: coincide con el interlocutor del hilo (no solo `buyer` embebido). */
   if (sid != null && sid > 0) {
     const participantCandidates = msgRoot ? [msgRoot, data] : [data];
     for (const part of participantCandidates) {
@@ -93,6 +84,16 @@ function extractBuyerIdForPostSale(data, sellerUserId) {
       const buyerCandidate = users.find((id) => id !== sid);
       if (buyerCandidate) return buyerCandidate;
     }
+  }
+  const fromOrder = extractBuyerFromOrderPayload(data);
+  if (fromOrder) return fromOrder.buyer_id;
+  if (data.order && typeof data.order === "object") {
+    const nested = extractBuyerFromOrderPayload(data.order);
+    if (nested) return nested.buyer_id;
+  }
+  if (msgRoot) {
+    const fromOrderMsg = extractBuyerFromOrderPayload(msgRoot);
+    if (fromOrderMsg) return fromOrderMsg.buyer_id;
   }
   return null;
 }

@@ -4384,16 +4384,16 @@ const server = http.createServer(async (req, res) => {
           fromUserIdNum != null && fromUserIdNum > 0 && sellerIdsForRows.has(fromUserIdNum);
         const detectedPhone = extractFirstMobile04(r.message_text != null ? String(r.message_text) : "") || null;
         const detectedE164 = detectedPhone ? normalizePhoneToE164(detectedPhone, "58") : null;
-        const buyerPhoneMatches = (() => {
+        const buyerPhoneUpdated = (() => {
           if (ignoreBySeller) return "omitido · from seller";
-          if (!buyer || !detectedPhone) return null;
+          if (!buyer || !detectedPhone) return "no";
           const p1 = buyer.phone_1 != null ? String(buyer.phone_1).trim() : "";
           const p2 = buyer.phone_2 != null ? String(buyer.phone_2).trim() : "";
           if (p1 && (p1 === detectedPhone || normalizePhoneToE164(p1, "58") === detectedE164)) {
-            return `sí · phone_1=${p1}`;
+            return "sí";
           }
           if (p2 && (p2 === detectedPhone || normalizePhoneToE164(p2, "58") === detectedE164)) {
-            return `sí · phone_2=${p2}`;
+            return "sí";
           }
           return "no";
         })();
@@ -4401,7 +4401,7 @@ const server = http.createServer(async (req, res) => {
           ignoreBySeller
             ? "omitido · from seller"
             : detectedPhone != null
-            ? `${escapeHtml(detectedPhone)} · ${escapeHtml(buyerPhoneMatches || "sin buyer")}`
+            ? `${escapeHtml(detectedPhone)} · ${escapeHtml(buyerPhoneUpdated)}`
             : "—";
         const tipoELog = tipoELogByOrder.get(Number(r.order_id)) || null;
         const tipoECol = (() => {
@@ -4461,9 +4461,9 @@ const server = http.createServer(async (req, res) => {
   )}</code> · JSON: <code>?format=json</code> · <a href="${escapeAttr(
     packMsgQuery({ ml_user_id: null })
   )}">Elegir otra cuenta</a></p>
-  <p class="lead">Orden concreta: añade <code>&amp;order_id=NUM</code> a la URL. Columnas nuevas: <code>buyer_phone_update</code> usa el teléfono detectado en el texto (<code>04XXXXXXXXX</code> o <code>04XX-XXXXXXX</code>) y lo cruza contra <code>ml_buyers.phone_1/phone_2</code>; <code>tipo_e_invocado</code> muestra el último log tipo E de la orden. Datos: <code>npm run sync-pack-messages</code> / <code>sync-pack-messages-all</code>.</p>
+  <p class="lead">Orden concreta: añade <code>&amp;order_id=NUM</code> a la URL. La columna <code>buyer_phone_updated</code> muestra el teléfono detectado en el texto (<code>04XXXXXXXXX</code> o <code>04XX-XXXXXXX</code>) y si ese número quedó aplicado en <code>ml_buyers.phone_1/phone_2</code> (<code>sí</code> o <code>no</code>); <code>tipo_e_invocado</code> muestra el último log tipo E de la orden. Datos: <code>npm run sync-pack-messages</code> / <code>sync-pack-messages-all</code>.</p>
   <table>
-    <thead><tr><th>id</th><th>order_id</th><th>ml_message_id</th><th>from</th><th>to</th><th>texto</th><th>buyer_phone_update</th><th>tipo_e_invocado</th><th>date_created</th><th>status</th><th>tag</th><th>fetched_at</th><th>raw (preview)</th></tr></thead>
+    <thead><tr><th>id</th><th>order_id</th><th>ml_message_id</th><th>from</th><th>to</th><th>texto</th><th>buyer_phone_updated</th><th>tipo_e_invocado</th><th>date_created</th><th>status</th><th>tag</th><th>fetched_at</th><th>raw (preview)</th></tr></thead>
     <tbody>${tableRows || '<tr><td colspan="13">Sin mensajes en BD para este filtro.</td></tr>'}</tbody>
   </table>
 </body>

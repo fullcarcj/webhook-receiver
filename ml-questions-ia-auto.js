@@ -15,6 +15,9 @@
  *
  * Polling: ML_QUESTIONS_IA_AUTO_POLL_MS vacío → 60000; 0 = sin poll. Respeta la misma ventana.
  *
+ * Antigüedad máx. para intentar POST /answers: ML_QUESTIONS_IA_AUTO_PENDING_MAX_AGE_MS (ms). Vacío → 1800000 (30 min).
+ * Con valor 0 o negativo no hay tope por edad (comportamiento anterior). Compara con `date_created` de la pregunta (ML).
+ *
  * Texto extra (opcional): ML_QUESTIONS_IA_AUTO_EXTRA_LINE se añade al final de la plantilla elegida
  * (p. ej. avisos de Semana Santa). Vacío = no se añade nada. Cuenta para ML_QUESTIONS_IA_MAX_CHARS.
  *
@@ -41,6 +44,40 @@ const {
 
 /** Intervalo por defecto del poll de reintentos (1 min). */
 const DEFAULT_IA_AUTO_POLL_MS = 60_000;
+
+/** Por defecto: ventana de 30 min desde la creación de la pregunta en ML para aplicar respuesta automática. */
+const DEFAULT_IA_AUTO_PENDING_MAX_AGE_MS = 30 * 60 * 1000;
+
+/**
+ * Tope de antigüedad de la pregunta para intentar IA automática. `null` = sin límite.
+ * @returns {number|null}
+ */
+function resolveQuestionsIaAutoPendingMaxAgeMs() {
+  const raw = process.env.ML_QUESTIONS_IA_AUTO_PENDING_MAX_AGE_MS;
+  if (raw == null || String(raw).trim() === "") {
+    return DEFAULT_IA_AUTO_PENDING_MAX_AGE_MS;
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.min(7 * 24 * 60 * 60 * 1000, Math.max(60_000, Math.floor(n)));
+}
+
+/**
+ * @param {object} pendingRow
+ * @param {object} parsed
+ * @param {Date} evalAt
+ * @returns {number|null} ms desde creación en ML, o null si no hay fecha
+ */
+function getQuestionAgeMsForIaAuto(pendingRow, parsed, evalAt) {
+  const iso =
+    (pendingRow && pendingRow.date_created != null && String(pendingRow.date_created).trim() !== ""
+      ? String(pendingRow.date_created).trim()
+      : null) || extractQuestionDateCreatedIso(parsed);
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  return evalAt.getTime() - t;
+}
 
 /**
  * ms efectivos para el poll: vacío/no definido → 1 min; "0" → desactivado.
@@ -354,6 +391,11 @@ function getQuestionsIaAutoDiagnostics() {
           ? process.env.ML_QUESTIONS_IA_AUTO_POLL_MS
           : `(vacío→${DEFAULT_IA_AUTO_POLL_MS})`,
       ML_QUESTIONS_IA_AUTO_POLL_LIMIT: process.env.ML_QUESTIONS_IA_AUTO_POLL_LIMIT || "",
+      ML_QUESTIONS_IA_AUTO_PENDING_MAX_AGE_MS:
+        process.env.ML_QUESTIONS_IA_AUTO_PENDING_MAX_AGE_MS != null &&
+        String(process.env.ML_QUESTIONS_IA_AUTO_PENDING_MAX_AGE_MS).trim() !== ""
+          ? process.env.ML_QUESTIONS_IA_AUTO_PENDING_MAX_AGE_MS
+          : `(vacío→${DEFAULT_IA_AUTO_PENDING_MAX_AGE_MS} = 30 min; 0 = sin tope)`,
       ML_QUESTIONS_IA_AUTO_EXTRA_LINE:
         process.env.ML_QUESTIONS_IA_AUTO_EXTRA_LINE != null &&
         String(process.env.ML_QUESTIONS_IA_AUTO_EXTRA_LINE).trim() !== ""
@@ -370,6 +412,7 @@ function getQuestionsIaAutoDiagnostics() {
         return ms >= DEFAULT_IA_AUTO_POLL_MS ? ms : 0;
       })(),
       webhook_fetch_resource: process.env.ML_WEBHOOK_FETCH_RESOURCE === "1",
+      pending_max_age_ms_efectivo: resolveQuestionsIaAutoPendingMaxAgeMs(),
     },
     evaluation: ev,
     server_time_utc: now.toISOString(),
@@ -474,6 +517,29 @@ async function tryQuestionIaAutoAnswer(args) {
     }
     const skip = win.outcome === "skip_disabled" ? "disabled" : "window_off";
     return { ok: true, skip, ia_outcome: win.outcome };
+  }
+
+  const maxAgeMs = resolveQuestionsIaAutoPendingMaxAgeMs();
+  if (maxAgeMs != null) {
+    const rawAge = getQuestionAgeMsForIaAuto(pendingRow, parsed, evalAt);
+    const ageMs = rawAge == null ? null : Math.max(0, rawAge);
+    if (ageMs != null && ageMs > maxAgeMs) {
+      const detail = `Pregunta ${Math.round(ageMs / 60000)} min de antigüedad > máximo ${Math.round(maxAgeMs / 60000)} min (ML_QUESTIONS_IA_AUTO_PENDING_MAX_AGE_MS); no se envía POST /answers automático.`;
+      try {
+        await insertMlQuestionsIaAutoLog({
+          ml_user_id: mlUid,
+          ml_question_id: pendingRow.ml_question_id,
+          item_id: pendingRow.item_id,
+          buyer_id: pendingRow.buyer_id,
+          outcome: "pending_too_old",
+          reason_detail: detail,
+          notification_id: pendingRow.notification_id,
+        });
+      } catch (e) {
+        console.error("[questions ia-auto] ml_questions_ia_auto_log:", e.message || e);
+      }
+      return { ok: true, skip: "pending_too_old", ia_outcome: "pending_too_old" };
+    }
   }
 
   const qid = Number(pendingRow.ml_question_id);
@@ -666,7 +732,8 @@ async function retryPendingQuestionsIaAuto(opts) {
       r.ok === true &&
       (r.question_id != null ||
         r.skip === "already_sent" ||
-        r.skip === "dropped_stale_pending");
+        r.skip === "dropped_stale_pending" ||
+        r.skip === "pending_too_old");
     if (!resueltaAuto) {
       try {
         await upsertMlQuestionPending({

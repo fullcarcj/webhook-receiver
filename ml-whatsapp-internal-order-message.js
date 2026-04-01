@@ -1,6 +1,6 @@
 /**
- * Mensajes internos de orden (tag `internal` en ML): si el texto incluye un móvil VE `04#########`,
- * guardar en ml_buyers (phone_1 → phone_2 → sustituir phone_1) e invocar envío tipo E (2 mensajes por orden).
+ * Mensajes internos de orden (tag `internal` en ML): si el texto incluye un móvil VE `04#########` o `04XX-XXXXXXX`,
+ * actualizar ml_buyers (si ya hay `phone_1`, el número detectado va a `phone_2`) e invocar envío tipo E (Wasender; log con `tipo_e_activation_source=mensajeria_interna_ord`).
  *
  * ML_INTERNAL_ORDER_MESSAGE_TAG — tag API a considerar (default: internal).
  * ML_WHATSAPP_TIPO_E_INTERNAL_MESSAGE=0 — desactiva este flujo.
@@ -60,11 +60,14 @@ function extractMessageTextFromMlMessagePayload(data) {
   return parts.join("\n");
 }
 
-/** @returns {string|null} primer match 04 + 9 dígitos (11 caracteres). */
+/** @returns {string|null} 11 dígitos 04XXXXXXXXX (acepta también 04XX-XXXXXXX). */
 function extractFirstMobile04(text) {
   if (!text || typeof text !== "string") return null;
-  const m = text.match(/\b04\d{9}\b/);
-  return m ? m[0] : null;
+  const compact = text.replace(/\s+/g, " ");
+  const plain = compact.match(/\b04\d{9}\b/);
+  if (plain) return plain[0];
+  const hy = compact.match(/\b04\d{2}-\d{7}\b/);
+  return hy ? hy[0].replace("-", "") : null;
 }
 
 function isPhoneSlotEmpty(p) {
@@ -72,7 +75,8 @@ function isPhoneSlotEmpty(p) {
 }
 
 /**
- * phone_1 vacío → phone_1; si no, phone_2 vacío → phone_2; si ambos llenos → sustituye phone_1.
+ * Si `phone_1` está vacío → guardar en `phone_1`. Si ya hay `phone_1` → el número detectado va a `phone_2`
+ * (sustituye `phone_2` si estaba lleno), para no pisar el contacto principal.
  */
 async function applyExtractedPhoneToBuyer(buyerId, digits11) {
   const row = await db.getMlBuyer(buyerId);
@@ -82,10 +86,8 @@ async function applyExtractedPhoneToBuyer(buyerId, digits11) {
   }
   if (isPhoneSlotEmpty(row.phone_1)) {
     await db.updateMlBuyerPhones(buyerId, { phone_1: digits11 });
-  } else if (isPhoneSlotEmpty(row.phone_2)) {
-    await db.updateMlBuyerPhones(buyerId, { phone_2: digits11 });
   } else {
-    await db.updateMlBuyerPhones(buyerId, { phone_1: digits11 });
+    await db.updateMlBuyerPhones(buyerId, { phone_2: digits11 });
   }
 }
 
@@ -124,6 +126,7 @@ async function maybeProcessInternalOrderMessageForTipoE(args) {
   const r = await trySendWhatsappTipoEForOrder({
     mlUserId: args.mlUserId,
     orderId,
+    tipoEActivationSource: "mensajeria_interna_ord",
   });
   return {
     ok: r.ok === true,

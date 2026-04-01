@@ -76,6 +76,7 @@ async function processFilemakerTipoGPost(body) {
       skip_reason: partial.skip_reason ?? null,
       tipo_e_detail: partial.tipo_e_detail ?? null,
       request_json: requestJson,
+      tipo_e_activation_source: partial.tipo_e_activation_source ?? "filemaker_tipo_g",
     });
   }
 
@@ -174,7 +175,11 @@ async function processFilemakerTipoGPost(body) {
 
   let tipoEResult;
   try {
-    tipoEResult = await trySendWhatsappTipoEForOrder({ mlUserId, orderId });
+    tipoEResult = await trySendWhatsappTipoEForOrder({
+      mlUserId,
+      orderId,
+      tipoEActivationSource: "filemaker_tipo_g",
+    });
   } catch (e) {
     await saveLog({
       order_id: orderId,

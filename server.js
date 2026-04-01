@@ -935,7 +935,8 @@ function scheduleTopicFetchFromWebhook(body) {
                           r.ok === true &&
                           (r.question_id != null ||
                             r.skip === "already_sent" ||
-                            r.skip === "dropped_stale_pending");
+                            r.skip === "dropped_stale_pending" ||
+                            r.skip === "pending_too_old");
                         if (!resueltaAuto) {
                           await upsertMlQuestionPending({
                             ...row,
@@ -1289,7 +1290,7 @@ const server = http.createServer(async (req, res) => {
           retry_ia_auto_pending:
             "GET /preguntas-ia-auto-retry?k=ADMIN_SECRET — reintenta POST /answers para filas en ml_questions_pending (?limit=50)",
           poll_ia_auto_pending:
-            "ENABLED=1: reintenta pending cada 1 min por defecto (POLL_MS vacío=60000; 0=sin poll; ≥60000=intervalo ms). ML_QUESTIONS_IA_AUTO_POLL_LIMIT=40",
+            "ENABLED=1: reintenta pending cada 1 min por defecto (POLL_MS vacío=60000; 0=sin poll; ≥60000=intervalo ms). ML_QUESTIONS_IA_AUTO_POLL_LIMIT=40 · ML_QUESTIONS_IA_AUTO_PENDING_MAX_AGE_MS vacío=1800000 (30 min): no POST /answers automático si la pregunta es más antigua; 0=sin tope por edad",
           estado_ia_auto_prueba:
             "GET /preguntas-ia-auto-status?k=ADMIN_SECRET — JSON: modo manual/automático, hora local, env efectivo, checks (IA on, ML_WEBHOOK_FETCH_RESOURCE), texto prueba",
         },
@@ -4311,6 +4312,7 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.order_id)}</td>
   <td>${escapeHtml(r.buyer_id)}</td>
   <td>${escapeHtml(r.ml_user_id)}</td>
+  <td>${escapeHtml(r.tipo_e_activation_source)}</td>
   <td>${escapeHtml(r.phone_in)}</td>
   <td>${escapeHtml(r.tipo_retiro)}</td>
   <td>${escapeHtml(r.outcome)}</td>
@@ -4340,10 +4342,10 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Log mensajes tipo G (FileMaker)</h1>
-  <p class="lead">Tabla <code>ml_filemaker_tipo_g_log</code>: cada POST a <code>/filemaker/tipo-g</code> o <code>/mensajes-tipo-g</code> con <code>FILEMAKER_TIPO_G_SECRET</code>. Tras actualizar <code>ml_buyers</code> se intenta el envío tipo E (Wasender); el detalle del intento va en <code>tipo_e_detail</code>. ${rows.length} fila(s). JSON: <code>?format=json</code>.</p>
+  <p class="lead">Tabla <code>ml_filemaker_tipo_g_log</code>: cada POST a <code>/filemaker/tipo-g</code> o <code>/mensajes-tipo-g</code> con <code>FILEMAKER_TIPO_G_SECRET</code>. Tras actualizar <code>ml_buyers</code> se intenta el envío tipo E (Wasender); el detalle del intento va en <code>tipo_e_detail</code>. Columna <code>tipo_e_activation_source</code> (motivo/origen): p. ej. <code>filemaker_tipo_g</code>. ${rows.length} fila(s). JSON: <code>?format=json</code>.</p>
   <table>
-    <thead><tr><th>id</th><th>created_at</th><th>order_id</th><th>buyer_id</th><th>ml_user_id</th><th>phone_in</th><th>tipo_retiro</th><th>outcome</th><th>skip_reason</th><th>tipo_e_detail</th><th>request_json</th></tr></thead>
-    <tbody>${tableRows || '<tr><td colspan="11">Sin registros.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>created_at</th><th>order_id</th><th>buyer_id</th><th>ml_user_id</th><th>motivo_activación</th><th>phone_in</th><th>tipo_retiro</th><th>outcome</th><th>skip_reason</th><th>tipo_e_detail</th><th>request_json</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="12">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;
@@ -4591,6 +4593,7 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(r.ml_question_id)}</td>
   <td>${escapeHtml(r.phone_e164)}</td>
   <td>${escapeHtml(r.tipo_e_step)}</td>
+  <td>${escapeHtml(r.tipo_e_activation_source)}</td>
   <td>${escapeHtml(r.outcome)}</td>
   <td>${escapeHtml(r.skip_reason)}</td>
   <td>${escapeHtml(r.http_status)}</td>
@@ -4621,12 +4624,12 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Log envíos WhatsApp Wasender (tipo E y F)</h1>
-  <p class="lead">Tabla <code>ml_whatsapp_wasender_log</code> · E = imagen + ubicación por orden · F = texto por pregunta. ${rows.length} fila(s). JSON: <code>?format=json</code> · <code>?kind=e|f|all</code> · <code>?outcome=success|skipped|api_error|all</code></p>
+  <p class="lead">Tabla <code>ml_whatsapp_wasender_log</code> · E = imagen + ubicación por orden · F = texto por pregunta. Columna <code>tipo_e_activation_source</code> (motivo/origen tipo E): p. ej. <code>filemaker_tipo_g</code>, <code>mensajeria_interna_ord</code>. ${rows.length} fila(s). JSON: <code>?format=json</code> · <code>?kind=e|f|all</code> · <code>?outcome=success|skipped|api_error|all</code></p>
   <nav class="filter-nav" aria-label="Tipo"><span class="muted">Tipo:</span> ${kindNav}</nav>
   <nav class="filter-nav" aria-label="Outcome"><span class="muted">Outcome:</span> ${outcomeNav}</nav>
   <table>
-    <thead><tr><th>id</th><th>created_at</th><th>kind</th><th>ml_user_id</th><th>buyer_id</th><th>order_id</th><th>ml_question_id</th><th>phone_e164</th><th>tipo_e_step</th><th>outcome</th><th>skip_reason</th><th>http</th><th>text_preview</th></tr></thead>
-    <tbody>${tableRows || '<tr><td colspan="13">Sin registros.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>created_at</th><th>kind</th><th>ml_user_id</th><th>buyer_id</th><th>order_id</th><th>ml_question_id</th><th>phone_e164</th><th>tipo_e_step</th><th>motivo_activación</th><th>outcome</th><th>skip_reason</th><th>http</th><th>text_preview</th></tr></thead>
+    <tbody>${tableRows || '<tr><td colspan="14">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

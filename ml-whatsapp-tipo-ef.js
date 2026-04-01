@@ -313,7 +313,7 @@ function pickFirstPhoneE164(buyer, defaultCountryCode) {
 }
 
 /**
- * @param {{ mlUserId: number, orderId: number, text?: string }} args — `text` opcional: plantilla del **2.º** mensaje (ubicación + leyenda; ver ML_WHATSAPP_TIPO_E_LOCATION_TEXT).
+ * @param {{ mlUserId: number, orderId: number, text?: string, tipoEActivationSource?: string }} args — `text` opcional: plantilla del **2.º** mensaje (ubicación + leyenda; ver ML_WHATSAPP_TIPO_E_LOCATION_TEXT). `tipoEActivationSource`: origen del disparo (p. ej. `filemaker_tipo_g`, `mensajeria_interna_ord`) en `ml_whatsapp_wasender_log.tipo_e_activation_source`.
  * @returns {Promise<object>}
  */
 async function trySendWhatsappTipoEForOrder(args) {
@@ -323,10 +323,20 @@ async function trySendWhatsappTipoEForOrder(args) {
     return { ok: false, outcome: "invalid_args", detail: "mlUserId u orderId inválido" };
   }
 
+  const tipoEActivationSource =
+    args.tipoEActivationSource != null && String(args.tipoEActivationSource).trim() !== ""
+      ? String(args.tipoEActivationSource).trim().slice(0, 64)
+      : null;
+  const logTipoE = (row) =>
+    db.insertMlWhatsappWasenderLog({
+      ...row,
+      tipo_e_activation_source: tipoEActivationSource,
+    });
+
   const cfg = await resolveWasenderRuntimeConfig();
   const order = await db.getMlOrderByUserAndOrderId(mlUserId, orderId);
   if (!order || order.buyer_id == null) {
-    await db.insertMlWhatsappWasenderLog({
+    await logTipoE({
       message_kind: "E",
       ml_user_id: mlUserId,
       buyer_id: order && order.buyer_id != null ? Number(order.buyer_id) : null,
@@ -342,7 +352,7 @@ async function trySendWhatsappTipoEForOrder(args) {
   const buyerId = Number(order.buyer_id);
   const buyer = await db.getMlBuyer(buyerId);
   if (!buyer) {
-    await db.insertMlWhatsappWasenderLog({
+    await logTipoE({
       message_kind: "E",
       ml_user_id: mlUserId,
       buyer_id: buyerId,
@@ -357,7 +367,7 @@ async function trySendWhatsappTipoEForOrder(args) {
 
   const prevOk = await db.countMlWhatsappTipoESuccessForOrder(mlUserId, orderId);
   if (prevOk >= 2) {
-    await db.insertMlWhatsappWasenderLog({
+    await logTipoE({
       message_kind: "E",
       ml_user_id: mlUserId,
       buyer_id: buyerId,
@@ -371,7 +381,7 @@ async function trySendWhatsappTipoEForOrder(args) {
   }
 
   if (!cfg.enabled) {
-    const id = await db.insertMlWhatsappWasenderLog({
+    const id = await logTipoE({
       message_kind: "E",
       ml_user_id: mlUserId,
       buyer_id: buyerId,
@@ -386,7 +396,7 @@ async function trySendWhatsappTipoEForOrder(args) {
 
   const picked = pickFirstPhoneE164(buyer, cfg.defaultCountryCode);
   if (!picked) {
-    const id = await db.insertMlWhatsappWasenderLog({
+    const id = await logTipoE({
       message_kind: "E",
       ml_user_id: mlUserId,
       buyer_id: buyerId,
@@ -413,7 +423,7 @@ async function trySendWhatsappTipoEForOrder(args) {
       since
     );
     if (pairsThisWindow > 0) {
-      await db.insertMlWhatsappWasenderLog({
+      await logTipoE({
         message_kind: "E",
         ml_user_id: mlUserId,
         buyer_id: buyerId,
@@ -451,7 +461,7 @@ async function trySendWhatsappTipoEForOrder(args) {
 
   if (prevOk === 0) {
     if (!imageUrl) {
-      await db.insertMlWhatsappWasenderLog({
+      await logTipoE({
         message_kind: "E",
         ml_user_id: mlUserId,
         buyer_id: buyerId,
@@ -475,7 +485,7 @@ async function trySendWhatsappTipoEForOrder(args) {
     });
     const mid1 = msgIdFrom(resImg);
     if (!resImg.ok) {
-      await db.insertMlWhatsappWasenderLog({
+      await logTipoE({
         message_kind: "E",
         ml_user_id: mlUserId,
         buyer_id: buyerId,
@@ -492,7 +502,7 @@ async function trySendWhatsappTipoEForOrder(args) {
       });
       return { ok: false, outcome: "api_error", step: 1, detail: resImg.bodyText };
     }
-    await db.insertMlWhatsappWasenderLog({
+    await logTipoE({
       message_kind: "E",
       ml_user_id: mlUserId,
       buyer_id: buyerId,
@@ -522,7 +532,7 @@ async function trySendWhatsappTipoEForOrder(args) {
     const mid2 = msgIdFrom(resLoc);
     const locPreview = `${loc2.name} | ${loc2.address}`.slice(0, 200);
     if (!resLoc.ok) {
-      await db.insertMlWhatsappWasenderLog({
+      await logTipoE({
         message_kind: "E",
         ml_user_id: mlUserId,
         buyer_id: buyerId,
@@ -539,7 +549,7 @@ async function trySendWhatsappTipoEForOrder(args) {
       });
       return { ok: false, outcome: "api_error", step: 2, detail: resLoc.bodyText, partial: true };
     }
-    await db.insertMlWhatsappWasenderLog({
+    await logTipoE({
       message_kind: "E",
       ml_user_id: mlUserId,
       buyer_id: buyerId,
@@ -570,7 +580,7 @@ async function trySendWhatsappTipoEForOrder(args) {
     const mid2 = msgIdFrom(resLoc);
     const locPreview = `${loc2.name} | ${loc2.address}`.slice(0, 200);
     if (!resLoc.ok) {
-      await db.insertMlWhatsappWasenderLog({
+      await logTipoE({
         message_kind: "E",
         ml_user_id: mlUserId,
         buyer_id: buyerId,
@@ -587,7 +597,7 @@ async function trySendWhatsappTipoEForOrder(args) {
       });
       return { ok: false, outcome: "api_error", step: 2, detail: resLoc.bodyText };
     }
-    await db.insertMlWhatsappWasenderLog({
+    await logTipoE({
       message_kind: "E",
       ml_user_id: mlUserId,
       buyer_id: buyerId,

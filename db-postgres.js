@@ -516,7 +516,8 @@ async function runSchemaAndSeed() {
       response_body TEXT,
       error_message TEXT,
       text_preview TEXT,
-      tipo_e_step SMALLINT CHECK (tipo_e_step IS NULL OR tipo_e_step IN (1, 2))
+      tipo_e_step SMALLINT CHECK (tipo_e_step IS NULL OR tipo_e_step IN (1, 2)),
+      tipo_e_activation_source TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_wa_log_created ON ml_whatsapp_wasender_log(created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_wa_log_kind ON ml_whatsapp_wasender_log(message_kind)`,
@@ -534,7 +535,8 @@ async function runSchemaAndSeed() {
       outcome TEXT NOT NULL,
       skip_reason TEXT,
       tipo_e_detail TEXT,
-      request_json TEXT
+      request_json TEXT,
+      tipo_e_activation_source TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_fm_tipo_g_created ON ml_filemaker_tipo_g_log(created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_fm_tipo_g_order ON ml_filemaker_tipo_g_log(order_id)`,
@@ -614,6 +616,8 @@ async function runSchemaAndSeed() {
   await migrateMlRatingRequestSentMultiRow();
   await migrateMlWhatsappWasenderLogBuyerNullable();
   await migrateMlWhatsappWasenderLogTipoEStep();
+  await migrateMlWhatsappWasenderLogTipoEActivationSource();
+  await migrateMlFilemakerTipoGLogTipoEActivationSource();
   await migrateMlWhatsappTipoFConfig();
   await migrateProductosUpdatedAtTrigger();
   await migrateProductosSolomotorColumns();
@@ -742,6 +746,46 @@ async function migrateMlWhatsappWasenderLogTipoEStep() {
   } catch (e) {
     if (!String(e.message || "").includes("does not exist")) {
       console.error("[db] migrate ml_whatsapp_wasender_log tipo_e_step:", e.message);
+    }
+  }
+}
+
+/** Origen del disparo tipo E: p. ej. `filemaker_tipo_g`, `mensajeria_interna_ord`. */
+async function migrateMlWhatsappWasenderLogTipoEActivationSource() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_whatsapp_wasender_log' AND column_name = 'tipo_e_activation_source'`
+    );
+    if (rows.length === 0) {
+      await pool.query(
+        `ALTER TABLE ml_whatsapp_wasender_log ADD COLUMN tipo_e_activation_source TEXT`
+      );
+      console.log("[db] ml_whatsapp_wasender_log: columna tipo_e_activation_source añadida (migración)");
+    }
+  } catch (e) {
+    if (!String(e.message || "").includes("does not exist")) {
+      console.error("[db] migrate ml_whatsapp_wasender_log tipo_e_activation_source:", e.message);
+    }
+  }
+}
+
+/** Mismo criterio que Wasender: POST FileMaker tipo G vs otros orígenes. */
+async function migrateMlFilemakerTipoGLogTipoEActivationSource() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_filemaker_tipo_g_log' AND column_name = 'tipo_e_activation_source'`
+    );
+    if (rows.length === 0) {
+      await pool.query(
+        `ALTER TABLE ml_filemaker_tipo_g_log ADD COLUMN tipo_e_activation_source TEXT`
+      );
+      console.log("[db] ml_filemaker_tipo_g_log: columna tipo_e_activation_source añadida (migración)");
+    }
+  } catch (e) {
+    if (!String(e.message || "").includes("does not exist")) {
+      console.error("[db] migrate ml_filemaker_tipo_g_log tipo_e_activation_source:", e.message);
     }
   }
 }
@@ -2439,10 +2483,14 @@ async function insertFilemakerTipoGLog(row) {
   const skipReason = row.skip_reason != null ? String(row.skip_reason).slice(0, 4000) : null;
   const tipoEDetail = row.tipo_e_detail != null ? String(row.tipo_e_detail).slice(0, 16000) : null;
   const requestJson = row.request_json != null ? String(row.request_json).slice(0, 32000) : null;
+  const tipoAct =
+    row.tipo_e_activation_source != null && String(row.tipo_e_activation_source).trim() !== ""
+      ? String(row.tipo_e_activation_source).trim().slice(0, 128)
+      : "filemaker_tipo_g";
   const { rows } = await pool.query(
-    `INSERT INTO ml_filemaker_tipo_g_log (order_id, buyer_id, ml_user_id, phone_in, tipo_retiro, outcome, skip_reason, tipo_e_detail, request_json)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-    [orderId, buyerId, mlUserId, phoneIn, tipoRetiro, outcome, skipReason, tipoEDetail, requestJson]
+    `INSERT INTO ml_filemaker_tipo_g_log (order_id, buyer_id, ml_user_id, phone_in, tipo_retiro, outcome, skip_reason, tipo_e_detail, request_json, tipo_e_activation_source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+    [orderId, buyerId, mlUserId, phoneIn, tipoRetiro, outcome, skipReason, tipoEDetail, requestJson, tipoAct]
   );
   return rows[0] ? Number(rows[0].id) : null;
 }
@@ -2452,7 +2500,7 @@ async function listFilemakerTipoGLog(limit, maxAllowed) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 200, 1), cap);
   const { rows } = await pool.query(
-    `SELECT id, created_at, order_id, buyer_id, ml_user_id, phone_in, tipo_retiro, outcome, skip_reason, tipo_e_detail, request_json
+    `SELECT id, created_at, order_id, buyer_id, ml_user_id, phone_in, tipo_retiro, outcome, skip_reason, tipo_e_detail, request_json, tipo_e_activation_source
      FROM ml_filemaker_tipo_g_log ORDER BY id DESC LIMIT $1`,
     [n]
   );
@@ -4200,12 +4248,17 @@ async function insertMlWhatsappWasenderLog(row) {
   const stepRaw = row.tipo_e_step != null ? Number(row.tipo_e_step) : null;
   const tipoEStep =
     stepRaw === 1 || stepRaw === 2 ? stepRaw : null;
+  const tipoAct =
+    row.tipo_e_activation_source != null && String(row.tipo_e_activation_source).trim() !== ""
+      ? String(row.tipo_e_activation_source).trim().slice(0, 128)
+      : null;
   const { rows } = await pool.query(
     `INSERT INTO ml_whatsapp_wasender_log (
        message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
        phone_e164, phone_source, outcome, skip_reason, http_status,
-       wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+       wasender_msg_id, response_body, error_message, text_preview, tipo_e_step,
+       tipo_e_activation_source
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
     [
       mk,
       row.ml_user_id != null ? Number(row.ml_user_id) : null,
@@ -4222,6 +4275,7 @@ async function insertMlWhatsappWasenderLog(row) {
       row.error_message != null ? String(row.error_message).slice(0, 4000) : null,
       row.text_preview != null ? String(row.text_preview).slice(0, 2000) : null,
       tipoEStep,
+      tipoAct,
     ]
   );
   return rows[0] ? Number(rows[0].id) : null;
@@ -4243,7 +4297,8 @@ async function listMlWhatsappWasenderLog(limit, options = {}) {
       const { rows } = await pool.query(
         `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
                 phone_e164, phone_source, outcome, skip_reason, http_status,
-                wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+                wasender_msg_id, response_body, error_message, text_preview, tipo_e_step,
+                tipo_e_activation_source
          FROM ml_whatsapp_wasender_log WHERE message_kind = $1 AND outcome = $2 ORDER BY id DESC LIMIT $3`,
         [kind, oc, n]
       );
@@ -4252,7 +4307,8 @@ async function listMlWhatsappWasenderLog(limit, options = {}) {
     const { rows } = await pool.query(
       `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
               phone_e164, phone_source, outcome, skip_reason, http_status,
-              wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+              wasender_msg_id, response_body, error_message, text_preview, tipo_e_step,
+              tipo_e_activation_source
        FROM ml_whatsapp_wasender_log WHERE message_kind = $1 ORDER BY id DESC LIMIT $2`,
       [kind, n]
     );
@@ -4262,7 +4318,8 @@ async function listMlWhatsappWasenderLog(limit, options = {}) {
     const { rows } = await pool.query(
       `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
               phone_e164, phone_source, outcome, skip_reason, http_status,
-              wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+              wasender_msg_id, response_body, error_message, text_preview, tipo_e_step,
+              tipo_e_activation_source
        FROM ml_whatsapp_wasender_log WHERE outcome = $1 ORDER BY id DESC LIMIT $2`,
       [oc, n]
     );
@@ -4271,7 +4328,8 @@ async function listMlWhatsappWasenderLog(limit, options = {}) {
   const { rows } = await pool.query(
     `SELECT id, created_at, message_kind, ml_user_id, buyer_id, order_id, ml_question_id,
             phone_e164, phone_source, outcome, skip_reason, http_status,
-            wasender_msg_id, response_body, error_message, text_preview, tipo_e_step
+            wasender_msg_id, response_body, error_message, text_preview, tipo_e_step,
+            tipo_e_activation_source
      FROM ml_whatsapp_wasender_log ORDER BY id DESC LIMIT $1`,
     [n]
   );

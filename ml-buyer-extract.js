@@ -66,27 +66,65 @@ function extractBuyerIdForPostSale(data, sellerUserId) {
     const nested = extractBuyerFromOrderPayload(data.order);
     if (nested) return nested.buyer_id;
   }
+  const msgRoot =
+    Array.isArray(data.messages) && data.messages.length > 0 && data.messages[0] && typeof data.messages[0] === "object"
+      ? data.messages[0]
+      : data.message && typeof data.message === "object"
+        ? data.message
+        : null;
+  if (msgRoot) {
+    const fromOrderMsg = extractBuyerFromOrderPayload(msgRoot);
+    if (fromOrderMsg) return fromOrderMsg.buyer_id;
+  }
   const sid =
     sellerUserId != null && Number.isFinite(Number(sellerUserId))
       ? Number(sellerUserId)
       : null;
   if (sid != null && sid > 0) {
-    const fromUid = readParticipantUserId(data.from);
-    const toUidVal = readParticipantUserId(data.to);
-    if (fromUid && toUidVal && fromUid !== toUidVal) {
-      if (fromUid === sid) return toUidVal;
-      if (toUidVal === sid) return fromUid;
+    const participantCandidates = msgRoot ? [msgRoot, data] : [data];
+    for (const part of participantCandidates) {
+      const fromUid = readParticipantUserId(part.from);
+      const toUidVal = readParticipantUserId(part.to);
+      if (fromUid && toUidVal && fromUid !== toUidVal) {
+        if (fromUid === sid) return toUidVal;
+        if (toUidVal === sid) return fromUid;
+      }
+      const users = collectParticipantUserIds(part.from).concat(collectParticipantUserIds(part.to));
+      const buyerCandidate = users.find((id) => id !== sid);
+      if (buyerCandidate) return buyerCandidate;
     }
   }
   return null;
 }
 
 function readParticipantUserId(part) {
+  if (Array.isArray(part)) {
+    for (const one of part) {
+      const n = readParticipantUserId(one);
+      if (n) return n;
+    }
+    return null;
+  }
   if (!part || typeof part !== "object") return null;
   const raw = part.user_id ?? part.id;
   if (raw == null) return null;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function collectParticipantUserIds(part) {
+  if (Array.isArray(part)) {
+    const out = [];
+    for (const one of part) {
+      const ids = collectParticipantUserIds(one);
+      for (const id of ids) {
+        if (!out.includes(id)) out.push(id);
+      }
+    }
+    return out;
+  }
+  const one = readParticipantUserId(part);
+  return one ? [one] : [];
 }
 
 module.exports = { extractBuyerFromOrderPayload, extractBuyerIdForPostSale };

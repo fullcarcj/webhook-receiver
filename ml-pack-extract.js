@@ -50,16 +50,38 @@ function scanOrderIdNested(obj, depth) {
 /** Respuesta GET /messages/...: prioriza order_id si viene en el JSON. */
 function extractOrderIdFromMessage(data) {
   if (!data || typeof data !== "object") return null;
+  const rootMsg =
+    Array.isArray(data.messages) && data.messages.length > 0 && data.messages[0] && typeof data.messages[0] === "object"
+      ? data.messages[0]
+      : data.message && typeof data.message === "object"
+        ? data.message
+        : null;
+  const resources =
+    Array.isArray(rootMsg && rootMsg.message_resources)
+      ? rootMsg.message_resources
+      : Array.isArray(data.message_resources)
+        ? data.message_resources
+        : [];
+  const packRes = resources.find(
+    (r) =>
+      r &&
+      typeof r === "object" &&
+      String(r.name || "").trim().toLowerCase() === "packs" &&
+      toPositiveInt(r.id)
+  );
   const candidates = [
     data.order_id,
     data.order?.id,
     data.pack_id,
     data.pack?.id,
+    data.resource_id,
+    String(data.resource || "").trim().toLowerCase() === "orders" ? data.resource_id : null,
     data.resource?.pack_id,
     data.resource?.order_id,
     data.context?.order_id,
     data.metadata?.order_id,
     data.conversation?.order_id,
+    packRes ? packRes.id : null,
     data.message?.order_id,
     data.message?.pack_id,
     data.message?.pack?.id,
@@ -67,6 +89,9 @@ function extractOrderIdFromMessage(data) {
     data.message?.resource?.order_id,
     data.message?.resource?.pack_id,
     data.message?.context?.order_id,
+    rootMsg ? rootMsg.resource_id : null,
+    rootMsg ? rootMsg.order_id : null,
+    rootMsg ? rootMsg.pack_id : null,
   ];
   for (const c of candidates) {
     const n = toPositiveInt(c);

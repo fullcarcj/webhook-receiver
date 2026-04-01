@@ -65,12 +65,18 @@ function extractMessageTextFromMlMessagePayload(data) {
   push(data.text);
   push(data.body);
   push(data.plain_text);
+  if (data.text && typeof data.text === "object") {
+    push(data.text.plain);
+  }
   const msg = data.message;
   if (typeof msg === "string") push(msg);
   else if (msg && typeof msg === "object") {
     push(msg.text);
     push(msg.body);
     push(msg.plain_text);
+    if (msg.text && typeof msg.text === "object") {
+      push(msg.text.plain);
+    }
     if (msg.content && typeof msg.content === "object") {
       push(msg.content.text);
       push(msg.content.plain_text);

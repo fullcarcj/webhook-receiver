@@ -32,6 +32,15 @@ function extractFromToUserIds(m) {
   if (to && typeof to === "object") {
     if (to.user_id != null) toUid = Number(to.user_id);
     else if (to.id != null) toUid = Number(to.id);
+  } else if (Array.isArray(to)) {
+    for (const one of to) {
+      if (!one || typeof one !== "object") continue;
+      const cand = one.user_id != null ? Number(one.user_id) : one.id != null ? Number(one.id) : NaN;
+      if (Number.isFinite(cand) && cand > 0) {
+        toUid = cand;
+        break;
+      }
+    }
   }
   return {
     from_user_id: Number.isFinite(fromUid) && fromUid > 0 ? fromUid : null,
@@ -103,6 +112,10 @@ function extractOpaqueMessageIdFromResource(resourceStr) {
  */
 function pickMessageRoot(data) {
   if (!data || typeof data !== "object") return null;
+  if (Array.isArray(data.messages)) {
+    const first = data.messages.find((m) => m && typeof m === "object");
+    if (first) return first;
+  }
   if (extractMlMessageId(data)) return data;
   if (data.message && typeof data.message === "object" && extractMlMessageId(data.message)) {
     return data.message;
@@ -141,9 +154,20 @@ function orderPackMessageRowFromWebhookMessageGet(
   } catch {
     rawJson = "{}";
   }
+  const plainTextObj = root.text && typeof root.text === "object" ? root.text : null;
+  const moderationObj =
+    root.message_moderation && typeof root.message_moderation === "object"
+      ? root.message_moderation
+      : root.moderation && typeof root.moderation === "object"
+        ? root.moderation
+        : null;
+  const messageDateObj =
+    root.message_date && typeof root.message_date === "object" ? root.message_date : null;
   const text =
-    root.text != null
-      ? String(root.text)
+    plainTextObj && plainTextObj.plain != null
+      ? String(plainTextObj.plain)
+      : root.text != null && typeof root.text !== "object"
+        ? String(root.text)
       : root.message != null
         ? String(root.message)
         : root.body != null
@@ -157,13 +181,20 @@ function orderPackMessageRowFromWebhookMessageGet(
     to_user_id,
     message_text: text,
     date_created:
-      root.date_created != null
+      messageDateObj && messageDateObj.created != null
+        ? String(messageDateObj.created)
+        : root.date_created != null
         ? String(root.date_created)
         : root.date != null
           ? String(root.date)
           : null,
     status: root.status != null ? String(root.status) : null,
-    moderation_status: root.moderation_status != null ? String(root.moderation_status) : null,
+    moderation_status:
+      moderationObj && moderationObj.status != null
+        ? String(moderationObj.status)
+        : root.moderation_status != null
+          ? String(root.moderation_status)
+          : null,
     tag: tag != null ? String(tag) : null,
     raw_json: rawJson,
     fetched_at: fetchedAt,

@@ -706,14 +706,30 @@ function scheduleTopicFetchFromWebhook(body) {
     if (topic != null) {
       const tl = String(topic).toLowerCase();
       if (tl === "question" || tl === "questions") topic = "questions";
+      if (tl === "message" || tl === "messages") topic = "messages";
       if (tl === "item" || tl === "items") topic = "items";
       if (tl === "orders_feedback") topic = "orders_feedback";
+    }
+    /** Resource solo id opaco (32 hex o UUID) sin path: ML a veces no envía topic ni `/messages/…`. */
+    function resourceLooksLikeMessageOpaqueId(s) {
+      if (s == null || typeof s !== "string") return false;
+      const core = s.trim().split(/[?#]/)[0];
+      const last = core.includes("/") ? core.replace(/^.*\//, "").trim() : core.trim();
+      if (/^[0-9a-f]{32}$/i.test(last)) return true;
+      if (
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(last)
+      ) {
+        return true;
+      }
+      return false;
     }
     if (!topic && /\/orders\/\d+\/feedback/i.test(resourceStr)) {
       /* No inferir orders_feedback: ML debe enviar body.topic estrictamente "orders_feedback". */
     } else if (!topic && /\/orders\/\d/i.test(resourceStr)) {
       topic = "orders_v2";
     } else if (!topic && /\/messages\//i.test(resourceStr)) {
+      topic = "messages";
+    } else if (!topic && resourceLooksLikeMessageOpaqueId(resourceStr)) {
       topic = "messages";
     } else if (!topic && /\/questions\//i.test(resourceStr)) {
       topic = "questions";

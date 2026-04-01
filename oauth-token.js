@@ -314,6 +314,19 @@ function normalizeMlResourcePath(topic, resource) {
     if (!id) return null;
     return `/items/${id}`;
   }
+  /** Sin topic: id opaco de mensaje ML (32 hex / UUID) → GET /messages/{id} (no /{id}). */
+  if (!tq || tq === "") {
+    const head = r.split(/[?#]/)[0];
+    const last = head.includes("/") ? head.replace(/^.*\//, "") : head;
+    if (
+      /^[0-9a-f]{32}$/i.test(last) ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(last)
+    ) {
+      const prefix = process.env.ML_MESSAGES_PATH_PREFIX || "/messages";
+      const base = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+      return `${base}/${r}`;
+    }
+  }
   return `/${r}`;
 }
 

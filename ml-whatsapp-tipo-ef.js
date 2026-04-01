@@ -22,6 +22,9 @@
  * orden distinta con otro número: si el cliente cambia el celular en la orden y el nuevo destino normaliza
  * a otro E.164, el historial del número anterior no bloquea.
  * ML_WHATSAPP_TIPO_E_WEEKLY_CAP=0 lo desactiva. ML_WHATSAPP_TIPO_E_WEEKLY_CAP_DAYS — días (default 7).
+ *
+ * Si la orden no está en `ml_orders` (p. ej. aún no corrió sync-orders), por defecto se hace GET `/orders/{id}`
+ * y upsert antes de enviar. Desactivar: ML_WHATSAPP_TIPO_E_FETCH_ORDER_IF_MISSING=0.
  */
 
 require("./load-env-local");
@@ -29,6 +32,7 @@ require("./load-env-local");
 const db = require("./db");
 const { mercadoLibreGetForUser } = require("./oauth-token");
 const { listingRowFromMlItemApi } = require("./ml-listing-map");
+const { orderRowFromMlApi } = require("./ml-order-map");
 const { MESSAGE_TYPE_E, MESSAGE_TYPE_F } = require("./ml-message-types");
 const { sendWasenderTextMessage, sendWasenderImageMessage, sendWasenderLocationMessage } = require("./wasender-client");
 const { normalizePhoneToE164 } = require("./ml-whatsapp-phone");
@@ -313,6 +317,50 @@ function pickFirstPhoneE164(buyer, defaultCountryCode) {
 }
 
 /**
+ * Si no hay fila en `ml_orders` o falta `buyer_id`, GET `/orders/{id}` y upsert (misma forma que sync-orders).
+ */
+async function fetchAndUpsertOrderIfMissingForTipoE(mlUserId, orderId) {
+  if (
+    process.env.ML_WHATSAPP_TIPO_E_FETCH_ORDER_IF_MISSING === "0" ||
+    process.env.ML_WHATSAPP_TIPO_E_FETCH_ORDER_IF_MISSING === "false"
+  ) {
+    return;
+  }
+  const existing = await db.getMlOrderByUserAndOrderId(mlUserId, orderId);
+  if (existing && existing.buyer_id != null) return;
+  const path = `/orders/${orderId}`;
+  let res;
+  try {
+    res = await mercadoLibreGetForUser(mlUserId, path);
+  } catch (e) {
+    console.error("[tipo E] GET %s: %s", path, e.message || e);
+    return;
+  }
+  if (!res || !res.ok || res.data == null) {
+    console.warn(
+      "[tipo E] GET orders/%s → HTTP %s (sin upsert en ml_orders)",
+      orderId,
+      res && res.status != null ? res.status : "?"
+    );
+    return;
+  }
+  const ord = res.data;
+  if (!ord || typeof ord !== "object" || Array.isArray(ord)) return;
+  const row = orderRowFromMlApi(mlUserId, ord, {
+    http_status: res.status,
+    sync_error: null,
+    fetched_at: new Date().toISOString(),
+  });
+  if (!row) return;
+  try {
+    await db.upsertMlOrder(row);
+    console.log("[tipo E] ml_orders order_id=%s upsert desde API (faltaba o sin buyer_id)", orderId);
+  } catch (e) {
+    console.error("[tipo E] upsertMlOrder order_id=%s: %s", orderId, e.message || e);
+  }
+}
+
+/**
  * @param {{ mlUserId: number, orderId: number, text?: string, tipoEActivationSource?: string }} args — `text` opcional: plantilla del **2.º** mensaje (ubicación + leyenda; ver ML_WHATSAPP_TIPO_E_LOCATION_TEXT). `tipoEActivationSource`: origen del disparo (p. ej. `filemaker_tipo_g`, `mensajeria_interna_ord`) en `ml_whatsapp_wasender_log.tipo_e_activation_source`.
  * @returns {Promise<object>}
  */
@@ -332,6 +380,8 @@ async function trySendWhatsappTipoEForOrder(args) {
       ...row,
       tipo_e_activation_source: tipoEActivationSource,
     });
+
+  await fetchAndUpsertOrderIfMissingForTipoE(mlUserId, orderId);
 
   const cfg = await resolveWasenderRuntimeConfig();
   const order = await db.getMlOrderByUserAndOrderId(mlUserId, orderId);

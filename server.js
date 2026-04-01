@@ -31,6 +31,7 @@ const {
 const { upsertOrderFeedbackFromApiResponse } = require("./ml-order-feedback-sync");
 const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
 const { upsertBuyerFromOrdersV2Webhook } = require("./ml-buyer-order-sync");
+const { orderRowFromMlApi } = require("./ml-order-map");
 const {
   normalizeBuyerPrefEntrega,
   BUYER_PREF_ENTREGA_VALUES,
@@ -134,6 +135,7 @@ const {
   listMlListingChangeAck,
   listMlOrdersByUser,
   listMlOrdersAll,
+  upsertMlOrder,
   listMlOrderCountsByUserStatus,
   listMlOrderCountsByUser,
   listMlOrderPackMessagesByUser,
@@ -848,6 +850,19 @@ function scheduleTopicFetchFromWebhook(body) {
                 } catch (errBuyer) {
                   console.error("[ml buyers]", errBuyer.message);
                 }
+              }
+              /** Sin fila en `ml_orders`, tipo E / ordenes-ml quedan vacíos aunque el hook registre el GET. */
+              try {
+                const rowOrder = orderRowFromMlApi(mlUserId, parsed, {
+                  http_status: result.status,
+                  sync_error: null,
+                  fetched_at: new Date().toISOString(),
+                });
+                if (rowOrder) {
+                  await upsertMlOrder(rowOrder);
+                }
+              } catch (eOrd) {
+                console.error("[ml orders webhook]", eOrd.message || eOrd);
               }
             }
             if (result.ok && parsed && topic === "orders_feedback") {
@@ -3847,7 +3862,7 @@ const server = http.createServer(async (req, res) => {
 </head>
 <body>
   <h1>Órdenes Mercado Libre</h1>
-  <p class="lead">Tabla <code>ml_orders</code>: <code>npm run sync-orders</code> · todas las cuentas: <code>npm run sync-orders-all</code> (o <code>ML_ORDERS_SYNC_ALL=1</code>) · solo órdenes creadas hoy (API ML <code>order.date_created</code>): <code>npm run sync-orders-today-all</code> (<code>--today</code>). JSON: <code>?format=json</code> · <code>?limit=</code> · <code>?cuenta=</code> · <code>?status=</code></p>
+  <p class="lead">Tabla <code>ml_orders</code>: <code>npm run sync-orders</code> · todas las cuentas: <code>npm run sync-orders-all</code> (o <code>ML_ORDERS_SYNC_ALL=1</code>) · solo órdenes creadas hoy (API ML <code>order.date_created</code>): <code>npm run sync-orders-today-all</code> (<code>--today</code>). Con <code>ML_WEBHOOK_FETCH_RESOURCE=1</code>, cada GET OK de webhook <code>orders_v2</code> también hace upsert de la orden en esta tabla. JSON: <code>?format=json</code> · <code>?limit=</code> · <code>?cuenta=</code> · <code>?status=</code></p>
   <p class="lead">${filterNote}</p>
   <p class="lead">Filtros rápidos: <a href="${escapeAttr(ordQuery({ status: "confirmed" }))}">confirmed</a> · <a href="${escapeAttr(
     ordQuery({ status: "paid" })

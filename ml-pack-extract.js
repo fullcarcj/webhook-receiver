@@ -14,18 +14,74 @@ function extractOrderIdFromOrder(data) {
   return toPositiveInt(data.id ?? data.order_id ?? data.pack_id ?? data.pack?.id);
 }
 
+/**
+ * Recorre subárboles típicos de GET /messages/{id} (ML: ids opacos, order_id en resource/context/message).
+ * @param {object} obj
+ * @param {number} depth
+ * @returns {number|null}
+ */
+function scanOrderIdNested(obj, depth) {
+  if (!obj || typeof obj !== "object" || depth <= 0) return null;
+  for (const k of ["order_id", "pack_id"]) {
+    if (obj[k] != null) {
+      const n = toPositiveInt(obj[k]);
+      if (n) return n;
+    }
+  }
+  for (const key of Object.keys(obj)) {
+    const v = obj[key];
+    if (v && typeof v === "object") {
+      if (Array.isArray(v)) {
+        for (const el of v) {
+          if (el && typeof el === "object") {
+            const n = scanOrderIdNested(el, depth - 1);
+            if (n) return n;
+          }
+        }
+      } else {
+        const n = scanOrderIdNested(v, depth - 1);
+        if (n) return n;
+      }
+    }
+  }
+  return null;
+}
+
 /** Respuesta GET /messages/...: prioriza order_id si viene en el JSON. */
 function extractOrderIdFromMessage(data) {
   if (!data || typeof data !== "object") return null;
-  return toPositiveInt(
-    data.order_id ??
-      data.order?.id ??
-      data.pack_id ??
-      data.pack?.id ??
-      (data.message && data.message.order_id) ??
-      (data.message && data.message.pack_id) ??
-      data.resource?.pack_id
-  );
+  const candidates = [
+    data.order_id,
+    data.order?.id,
+    data.pack_id,
+    data.pack?.id,
+    data.resource?.pack_id,
+    data.resource?.order_id,
+    data.context?.order_id,
+    data.metadata?.order_id,
+    data.conversation?.order_id,
+    data.message?.order_id,
+    data.message?.pack_id,
+    data.message?.pack?.id,
+    data.message?.order?.id,
+    data.message?.resource?.order_id,
+    data.message?.resource?.pack_id,
+    data.message?.context?.order_id,
+  ];
+  for (const c of candidates) {
+    const n = toPositiveInt(c);
+    if (n) return n;
+  }
+  const nested = scanOrderIdNested(data, 6);
+  if (nested) return nested;
+  try {
+    const blob = JSON.stringify(data);
+    const m = blob.match(/"order_id"\s*:\s*(\d{10,})/);
+    if (m) return toPositiveInt(m[1]);
+  } catch (_) {
+    /* ignore */
+  }
+  return null;
 }
 
 /**

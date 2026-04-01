@@ -23,8 +23,19 @@ function isInternalOrderMessageTag(parsed, resourceStr) {
     if (check(parsed.tag)) return true;
     if (check(parsed.message_type)) return true;
     if (check(parsed.type)) return true;
+    if (String(parsed.visibility || "").trim().toLowerCase() === want) return true;
     const msg = parsed.message;
-    if (msg && typeof msg === "object" && check(msg.tag)) return true;
+    if (msg && typeof msg === "object") {
+      if (check(msg.tag)) return true;
+      if (check(msg.message_type)) return true;
+      if (check(msg.type)) return true;
+      if (String(msg.visibility || "").trim().toLowerCase() === want) return true;
+      if (Array.isArray(msg.tags)) {
+        for (const t of msg.tags) {
+          if (check(t)) return true;
+        }
+      }
+    }
   }
   const rs = resourceStr != null ? String(resourceStr) : "";
   if (!rs) return false;
@@ -56,7 +67,15 @@ function extractMessageTextFromMlMessagePayload(data) {
   push(data.plain_text);
   const msg = data.message;
   if (typeof msg === "string") push(msg);
-  else if (msg && typeof msg === "object") push(msg.text);
+  else if (msg && typeof msg === "object") {
+    push(msg.text);
+    push(msg.body);
+    push(msg.plain_text);
+    if (msg.content && typeof msg.content === "object") {
+      push(msg.content.text);
+      push(msg.content.plain_text);
+    }
+  }
   return parts.join("\n");
 }
 

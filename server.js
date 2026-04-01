@@ -27,7 +27,9 @@ const {
   extractOrderIdFromOrder,
   extractOrderIdFromResource,
   extractOrderIdFromFeedbackPayload,
+  extractOrderIdFromMessage,
 } = require("./ml-pack-extract");
+const { syncPackMessagesForOrder } = require("./ml-pack-messages-sync");
 const { upsertOrderFeedbackFromApiResponse } = require("./ml-order-feedback-sync");
 const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
 const { upsertBuyerFromOrdersV2Webhook } = require("./ml-buyer-order-sync");
@@ -1148,18 +1150,69 @@ function scheduleTopicFetchFromWebhook(body) {
         /** Post-venta automático para topics no-orden: solo `messages` (order_id en payload). */
         if (result.ok && parsed && !isOrderTopic && topic === "messages") {
           setImmediate(() => {
-            trySendDefaultPostSaleMessage({
-              mlUserId,
-              topic,
-              payload: parsed,
-              resource: resourceStr,
-              notificationId: notifId,
-            }).catch((e) => console.error("[post-sale]", e.message));
-            maybeProcessInternalOrderMessageForTipoE({
-              mlUserId,
-              parsed,
-              resourceStr,
-            }).catch((e) => console.error("[whatsapp tipo E internal]", e.message));
+            (async () => {
+              const oidMsg = extractOrderIdFromMessage(parsed);
+              if (
+                oidMsg &&
+                process.env.ML_WEBHOOK_SYNC_PACK_ON_MESSAGE !== "0" &&
+                process.env.ML_WEBHOOK_SYNC_PACK_ON_MESSAGE !== "false"
+              ) {
+                try {
+                  const tag = (process.env.ML_PACK_MESSAGES_SYNC_TAG || "post_sale").trim() || "post_sale";
+                  const appId = String(
+                    process.env.ML_APPLICATION_ID || process.env.OAUTH_CLIENT_ID || "1837222235616049"
+                  ).trim();
+                  const pageSize = Math.min(
+                    50,
+                    Math.max(1, Number(process.env.ML_PACK_MESSAGES_SYNC_PAGE_SIZE) || 50)
+                  );
+                  const delayMs = Math.max(0, Number(process.env.ML_PACK_MESSAGES_SYNC_DELAY_MS) || 0);
+                  const pr = await syncPackMessagesForOrder(mlUserId, oidMsg, {
+                    tag,
+                    appId,
+                    pageSize,
+                    delayMs,
+                  });
+                  if (pr.ok) {
+                    console.log(
+                      "[ml pack webhook] ml_user_id=%s order_id=%s mensajes_upsert=%s",
+                      mlUserId,
+                      oidMsg,
+                      pr.upserted
+                    );
+                  } else {
+                    console.warn(
+                      "[ml pack webhook] ml_user_id=%s order_id=%s err=%s",
+                      mlUserId,
+                      oidMsg,
+                      (pr.error || "—").slice(0, 400)
+                    );
+                  }
+                } catch (ePk) {
+                  console.error("[ml pack webhook]", ePk.message || ePk);
+                }
+              }
+              try {
+                await trySendDefaultPostSaleMessage({
+                  mlUserId,
+                  topic,
+                  payload: parsed,
+                  resource: resourceStr,
+                  notificationId: notifId,
+                });
+              } catch (e) {
+                console.error("[post-sale]", e.message);
+              }
+              try {
+                await maybeProcessInternalOrderMessageForTipoE({
+                  mlUserId,
+                  parsed,
+                  resourceStr,
+                });
+              } catch (e) {
+                console.error("[whatsapp tipo E internal]", e.message);
+              }
+            })();
           });
         }
 
@@ -1318,7 +1371,7 @@ const server = http.createServer(async (req, res) => {
         ordenes_ml:
           "GET /ordenes-ml?k=ADMIN_SECRET — ml_orders (descarga: npm run sync-orders | sync-orders-all | sync-orders-today-all solo día actual); feedback detalle: npm run sync-order-feedback | sync-order-feedback-all; ?cuenta= ?status= ?format=json; status ML típicos en raíz JSON bajo ordenes_estados_ml",
         mensajes_pack_orden:
-          "GET /mensajes-pack-orden?k=ADMIN_SECRET — ml_order_pack_messages (sync: npm run sync-pack-messages); sin ml_user_id: elige cuenta; ?ml_user_id= & opcional &order_id= &limit= ; ?format=json",
+          "GET /mensajes-pack-orden?k=ADMIN_SECRET — ml_order_pack_messages (sync: npm run sync-pack-messages); webhook topic messages: tras GET OK se sincroniza el pack de esa orden si se extrae order_id (ML_WEBHOOK_SYNC_PACK_ON_MESSAGE≠0). ?ml_user_id= & opcional &order_id= &limit= ; ?format=json",
         ordenes_estados_ml: ML_ORDER_STATUSES_KNOWN,
       })
     );

@@ -34,7 +34,8 @@
     "test-wasender-hook": "node scripts/test-wasender-webhook.js",
     "process-lote-images": "node scripts/process-lote-imagenes-solomotor.js",
     "upload-firebase-webp": "node scripts/upload-firebase-webp.js",
-    "sync-imagenes-cantidad-json": "node scripts/sync-imagenes-cantidad-from-json.js"
+    "sync-imagenes-cantidad-json": "node scripts/sync-imagenes-cantidad-from-json.js",
+    "test-pack-webhook": "node scripts/test-pack-webhook-sim.js"
   },
   "engines": {
     "node": ">=18"

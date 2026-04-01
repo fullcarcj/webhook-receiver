@@ -67,6 +67,7 @@ const { renderWhatsappTipoFPage } = require("./whatsapp-tipo-f-html");
 const { trySendDefaultPostSaleMessage } = require("./ml-post-sale-send");
 const {
   maybeProcessInternalOrderMessageForTipoE,
+  processOrderMessagePhoneForTipoE,
   extractFirstMobile04,
 } = require("./ml-whatsapp-internal-order-message");
 const { trySendWhatsappTipoFForQuestion } = require("./ml-whatsapp-tipo-ef");
@@ -1322,6 +1323,31 @@ function scheduleTopicFetchFromWebhook(body) {
                 });
               } catch (e) {
                 console.error("[whatsapp tipo E internal]", e.message);
+              }
+              try {
+                const tipoEForce =
+                  process.env.ML_WEBHOOK_MESSAGES_FORCE_TIPO_E_ON_PHONE !== "0" &&
+                  process.env.ML_WEBHOOK_MESSAGES_FORCE_TIPO_E_ON_PHONE !== "false";
+                if (tipoEForce) {
+                  const forced = await processOrderMessagePhoneForTipoE({
+                    mlUserId,
+                    parsed,
+                    resourceStr,
+                    tipoEActivationSource: "mensajeria_pack_phone",
+                  });
+                  if (forced && !forced.skipped) {
+                    console.log(
+                      "[whatsapp tipo E message-phone] ml_user_id=%s order_id=%s buyer_id=%s updated=%s outcome=%s",
+                      mlUserId,
+                      forced.order_id != null ? forced.order_id : "—",
+                      forced.buyer_id != null ? forced.buyer_id : "—",
+                      forced.buyer_updated === true ? "1" : "0",
+                      forced.outcome || "—"
+                    );
+                  }
+                }
+              } catch (e) {
+                console.error("[whatsapp tipo E message-phone]", e.message || e);
               }
             })();
           });

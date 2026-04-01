@@ -100,8 +100,8 @@ function isPhoneSlotEmpty(p) {
 }
 
 /**
- * Si `phone_1` está vacío → guardar en `phone_1`. Si ya hay `phone_1` → el número detectado va a `phone_2`
- * (sustituye `phone_2` si estaba lleno), para no pisar el contacto principal.
+ * Guarda el teléfono detectado en el primer slot disponible (`phone_1`, luego `phone_2`).
+ * Si ambos ya están ocupados, sustituye `phone_1`.
  */
 async function applyExtractedPhoneToBuyer(buyerId, digits11) {
   const row = await db.getMlBuyer(buyerId);
@@ -112,10 +112,17 @@ async function applyExtractedPhoneToBuyer(buyerId, digits11) {
   if (isPhoneSlotEmpty(row.phone_1)) {
     await db.updateMlBuyerPhones(buyerId, { phone_1: digits11 });
     return { updated: true, slot: "phone_1", previous: row.phone_1 ?? null };
-  } else {
+  }
+  if (isPhoneSlotEmpty(row.phone_2)) {
     await db.updateMlBuyerPhones(buyerId, { phone_2: digits11 });
     return { updated: true, slot: "phone_2", previous: row.phone_2 ?? null };
   }
+  await db.updateMlBuyerPhones(buyerId, { phone_1: digits11 });
+  return {
+    updated: true,
+    slot: "phone_1",
+    previous: row.phone_1 ?? null,
+  };
 }
 
 /**
@@ -147,6 +154,7 @@ async function processOrderMessagePhoneForTipoE(args) {
       args.tipoEActivationSource != null && String(args.tipoEActivationSource).trim() !== ""
         ? String(args.tipoEActivationSource).trim()
         : "mensajeria_interna_ord",
+    overridePhoneRaw: phone,
   });
   return {
     ok: r.ok === true,

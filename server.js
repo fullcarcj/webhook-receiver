@@ -739,6 +739,15 @@ async function ensureOrderRowFromMessagesWebhook(mlUserId, orderId) {
   return { ok: true, buyer_id: row.buyer_id != null ? Number(row.buyer_id) : null };
 }
 
+async function getRegisteredSellerIdSet() {
+  const accounts = await listMlAccounts();
+  return new Set(
+    accounts
+      .map((a) => Number(a.ml_user_id))
+      .filter((n) => Number.isFinite(n) && n > 0)
+  );
+}
+
 /**
  * Tras el webhook: GET al recurso de ML y guarda en ml_topic_fetches (no bloquea la respuesta HTTP).
  */
@@ -1223,6 +1232,37 @@ function scheduleTopicFetchFromWebhook(body) {
               const oidMsg = extractOrderIdFromMessage(parsed);
               const tagPack =
                 (process.env.ML_PACK_MESSAGES_SYNC_TAG || "post_sale").trim() || "post_sale";
+              let skipPhoneAnalysisFromSeller = false;
+              try {
+                const sellerIds = await getRegisteredSellerIdSet();
+                const msgRoot =
+                  parsed &&
+                  typeof parsed === "object" &&
+                  Array.isArray(parsed.messages) &&
+                  parsed.messages.length > 0 &&
+                  parsed.messages[0] &&
+                  typeof parsed.messages[0] === "object"
+                    ? parsed.messages[0]
+                    : parsed;
+                const fromUserId =
+                  msgRoot &&
+                  msgRoot.from &&
+                  typeof msgRoot.from === "object" &&
+                  msgRoot.from.user_id != null
+                    ? Number(msgRoot.from.user_id)
+                    : NaN;
+                skipPhoneAnalysisFromSeller =
+                  Number.isFinite(fromUserId) && fromUserId > 0 && sellerIds.has(fromUserId);
+                if (skipPhoneAnalysisFromSeller) {
+                  console.log(
+                    "[messages phone analysis] omitido ml_user_id=%s from_user_id=%s (cuenta seller registrada)",
+                    mlUserId,
+                    fromUserId
+                  );
+                }
+              } catch (eSeller) {
+                console.error("[messages phone analysis] seller ids:", eSeller.message || eSeller);
+              }
               if (oidMsg) {
                 try {
                   const ordRes = await ensureOrderRowFromMessagesWebhook(mlUserId, oidMsg);
@@ -1316,11 +1356,13 @@ function scheduleTopicFetchFromWebhook(body) {
                 console.error("[post-sale]", e.message);
               }
               try {
-                await maybeProcessInternalOrderMessageForTipoE({
-                  mlUserId,
-                  parsed,
-                  resourceStr,
-                });
+                if (!skipPhoneAnalysisFromSeller) {
+                  await maybeProcessInternalOrderMessageForTipoE({
+                    mlUserId,
+                    parsed,
+                    resourceStr,
+                  });
+                }
               } catch (e) {
                 console.error("[whatsapp tipo E internal]", e.message);
               }
@@ -1328,7 +1370,7 @@ function scheduleTopicFetchFromWebhook(body) {
                 const tipoEForce =
                   process.env.ML_WEBHOOK_MESSAGES_FORCE_TIPO_E_ON_PHONE !== "0" &&
                   process.env.ML_WEBHOOK_MESSAGES_FORCE_TIPO_E_ON_PHONE !== "false";
-                if (tipoEForce) {
+                if (tipoEForce && !skipPhoneAnalysisFromSeller) {
                   const forced = await processOrderMessagePhoneForTipoE({
                     mlUserId,
                     parsed,
@@ -4227,6 +4269,7 @@ const server = http.createServer(async (req, res) => {
     let ordersForRows = [];
     let buyersForRows = [];
     let tipoELogsForRows = [];
+    let sellerIdsForRows = new Set();
     try {
       rows = await listMlOrderPackMessagesByUser(mlUserId, limNum, {
         order_id: orderIdOpt,
@@ -4253,6 +4296,7 @@ const server = http.createServer(async (req, res) => {
           limit: 2000,
         });
       }
+      sellerIdsForRows = await getRegisteredSellerIdSet();
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
       res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
@@ -4334,9 +4378,14 @@ const server = http.createServer(async (req, res) => {
             : escapeHtml(r.raw_json || "—");
         const ord = orderMapForRows.get(Number(r.order_id)) || null;
         const buyer = ord && ord.buyer_id != null ? buyerMapForRows.get(Number(ord.buyer_id)) || null : null;
+        const fromUserIdNum =
+          r.from_user_id != null && Number.isFinite(Number(r.from_user_id)) ? Number(r.from_user_id) : null;
+        const ignoreBySeller =
+          fromUserIdNum != null && fromUserIdNum > 0 && sellerIdsForRows.has(fromUserIdNum);
         const detectedPhone = extractFirstMobile04(r.message_text != null ? String(r.message_text) : "") || null;
         const detectedE164 = detectedPhone ? normalizePhoneToE164(detectedPhone, "58") : null;
         const buyerPhoneMatches = (() => {
+          if (ignoreBySeller) return "omitido · from seller";
           if (!buyer || !detectedPhone) return null;
           const p1 = buyer.phone_1 != null ? String(buyer.phone_1).trim() : "";
           const p2 = buyer.phone_2 != null ? String(buyer.phone_2).trim() : "";
@@ -4349,11 +4398,14 @@ const server = http.createServer(async (req, res) => {
           return "no";
         })();
         const buyerPhoneCol =
-          detectedPhone != null
+          ignoreBySeller
+            ? "omitido · from seller"
+            : detectedPhone != null
             ? `${escapeHtml(detectedPhone)} · ${escapeHtml(buyerPhoneMatches || "sin buyer")}`
             : "—";
         const tipoELog = tipoELogByOrder.get(Number(r.order_id)) || null;
         const tipoECol = (() => {
+          if (ignoreBySeller) return "omitido · from seller";
           if (!tipoELog) return "—";
           const out = tipoELog.outcome != null && String(tipoELog.outcome).trim() !== "" ? String(tipoELog.outcome).trim() : "—";
           const phone = tipoELog.phone_e164 != null && String(tipoELog.phone_e164).trim() !== "" ? String(tipoELog.phone_e164).trim() : "—";

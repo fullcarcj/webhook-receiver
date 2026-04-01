@@ -361,7 +361,7 @@ async function fetchAndUpsertOrderIfMissingForTipoE(mlUserId, orderId) {
 }
 
 /**
- * @param {{ mlUserId: number, orderId: number, text?: string, tipoEActivationSource?: string }} args — `text` opcional: plantilla del **2.º** mensaje (ubicación + leyenda; ver ML_WHATSAPP_TIPO_E_LOCATION_TEXT). `tipoEActivationSource`: origen del disparo (p. ej. `filemaker_tipo_g`, `mensajeria_interna_ord`) en `ml_whatsapp_wasender_log.tipo_e_activation_source`.
+ * @param {{ mlUserId: number, orderId: number, text?: string, tipoEActivationSource?: string, overridePhoneRaw?: string }} args — `text` opcional: plantilla del **2.º** mensaje (ubicación + leyenda; ver ML_WHATSAPP_TIPO_E_LOCATION_TEXT). `tipoEActivationSource`: origen del disparo (p. ej. `filemaker_tipo_g`, `mensajeria_interna_ord`) en `ml_whatsapp_wasender_log.tipo_e_activation_source`. `overridePhoneRaw`: fuerza el destino a este teléfono.
  * @returns {Promise<object>}
  */
 async function trySendWhatsappTipoEForOrder(args) {
@@ -374,6 +374,10 @@ async function trySendWhatsappTipoEForOrder(args) {
   const tipoEActivationSource =
     args.tipoEActivationSource != null && String(args.tipoEActivationSource).trim() !== ""
       ? String(args.tipoEActivationSource).trim().slice(0, 64)
+      : null;
+  const overridePhoneRaw =
+    args.overridePhoneRaw != null && String(args.overridePhoneRaw).trim() !== ""
+      ? String(args.overridePhoneRaw).trim()
       : null;
   const logTipoE = (row) =>
     db.insertMlWhatsappWasenderLog({
@@ -444,7 +448,12 @@ async function trySendWhatsappTipoEForOrder(args) {
     return { ok: false, outcome: "disabled", logId: id };
   }
 
-  const picked = pickFirstPhoneE164(buyer, cfg.defaultCountryCode);
+  const picked = overridePhoneRaw
+    ? (() => {
+        const e164 = normalizePhoneToE164(overridePhoneRaw, cfg.defaultCountryCode);
+        return e164 ? { e164, source: "phone_1" } : null;
+      })()
+    : pickFirstPhoneE164(buyer, cfg.defaultCountryCode);
   if (!picked) {
     const id = await logTipoE({
       message_kind: "E",
@@ -453,7 +462,9 @@ async function trySendWhatsappTipoEForOrder(args) {
       order_id: orderId,
       phone_e164: "—",
       outcome: "skipped",
-      skip_reason: "phone_1 y phone_2 vacíos o no normalizables",
+      skip_reason: overridePhoneRaw
+        ? "overridePhoneRaw no normalizable"
+        : "phone_1 y phone_2 vacíos o no normalizables",
       text_preview: MESSAGE_TYPE_E,
     });
     return { ok: false, outcome: "no_phone", logId: id };

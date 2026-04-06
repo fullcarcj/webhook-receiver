@@ -174,6 +174,13 @@ const { enrichProductoConImagenesUrls, buildProductoImagenesUrls } = require("./
 const { handlePublicFrontendRequest } = require("./public-frontend-api");
 const { handleCurrencyApiRequest } = require("./src/routes/currency");
 const { handleShippingApiRequest } = require("./src/routes/shipping");
+const { handleWmsApiRequest } = require("./src/routes/wms");
+const {
+  reserveForOrder,
+  commitReservation,
+  releaseReservation,
+  mapOrderItemsForWms,
+} = require("./src/services/reservationService");
 const { timingSafeCompare } = require("./src/services/currencyService");
 
 const PORT = process.env.PORT || 3001;
@@ -1224,6 +1231,48 @@ function scheduleTopicFetchFromWebhook(body) {
             processStatus = FETCH_PROCESS_STATUS_POST_SALE_FAILED;
           }
         }
+        if (
+          result.ok &&
+          parsed &&
+          topic === "orders_v2" &&
+          process.env.ML_WMS_ORDER_RESERVATIONS_ENABLED === "1"
+        ) {
+          setImmediate(() => {
+            (async () => {
+              try {
+                const orderId = extractOrderIdFromOrder(parsed);
+                if (!orderId) return;
+                const resource =
+                  parsed._links && parsed._links.self && parsed._links.self.href
+                    ? String(parsed._links.self.href)
+                    : "";
+                const status = parsed.status != null ? String(parsed.status) : "";
+                const items = mapOrderItemsForWms(parsed);
+
+                if (status === "confirmed" || status === "paid") {
+                  const r = await reserveForOrder({
+                    mlOrderId: orderId,
+                    mlResourceUrl: resource,
+                    items,
+                    userId: null,
+                  });
+                  if (!r.success) {
+                    console.log("[WMS] Reserva fallida orden", orderId, r);
+                  }
+                } else if (status === "shipped") {
+                  await commitReservation({ mlOrderId: orderId, userId: null });
+                } else if (status === "cancelled") {
+                  await releaseReservation({ mlOrderId: orderId, userId: null });
+                }
+              } catch (err) {
+                console.error(
+                  "[WMS] Error en reserva automática:",
+                  err && err.message ? err.message : err
+                );
+              }
+            })();
+          });
+        }
         if (result.ok && !isOrdersV2Topic && !isItemsTopic && !isOrdersFeedbackTopic) {
           processStatus = FETCH_PROCESS_STATUS_PENDING;
         }
@@ -1571,6 +1620,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleShippingApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleWmsApiRequest(req, res, url)) {
     return;
   }
 

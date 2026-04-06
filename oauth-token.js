@@ -1,3 +1,4 @@
+require("./load-env-local");
 const fs = require("fs");
 const { getMlAccount, upsertMlAccount } = require("./db");
 

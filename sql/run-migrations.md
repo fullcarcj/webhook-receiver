@@ -12,6 +12,15 @@ psql $DATABASE_URL -f sql/landed-cost.sql
 
 # 3. Módulo de proveedores y categorías de envío
 psql $DATABASE_URL -f sql/shipping-providers.sql
+
+# 4. WMS (ubicaciones y stock por bin)
+psql $DATABASE_URL -f sql/wms-bins.sql
+
+# 5. WMS — auditoría v2 (ENUM movement_reason, DELETE, deltas generados)
+psql $DATABASE_URL -f sql/wms-audit-v2.sql
+
+# 6. Reservas de stock por órdenes ML (tabla ml_order_reservations)
+psql $DATABASE_URL -f sql/ml-reservations.sql
 ```
 
 ## Variables de entorno requeridas (ya deben existir)

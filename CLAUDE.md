@@ -4,9 +4,10 @@ Documento de contexto persistente para asistentes de IA y desarrolladores. Conve
 
 ## Qué es este repo
 
-Receptor HTTP de webhooks de Mercado Libre (órdenes, mensajes, preguntas, ítems, etc.) y orquestador de automatizaciones: post-venta por API ML, respuestas automáticas a preguntas (IA/plantillas), WhatsApp vía Wasender (tipos E/F), integración FileMaker, inventario/catálogo y jobs programados (GitHub Actions).
+Receptor HTTP de webhooks de Mercado Libre (órdenes, mensajes, preguntas, ítems, etc.) y orquestador de automatizaciones: post-venta por API ML, respuestas automáticas a preguntas (IA/plantillas), WhatsApp vía Wasender (tipos E/F), integración FileMaker, inventario/catálogo, módulo de divisas (currency), módulo de envío/importación (shipping + landed cost), WMS (ubicaciones y stock por bin), con jobs programados (GitHub Actions).
 
 - **Runtime principal:** `node server.js` (HTTP).
+- **Estilo del repo:** CommonJS (`require/module.exports`) + rutas en servidor HTTP nativo (sin Express).
 - **Base de datos:** solo **PostgreSQL** en producción (`db.js` → `db-postgres.js`). Existe código SQLite histórico (`db-sqlite.js`) pero **no** se usa en runtime si `DATABASE_URL` apunta a Postgres.
 - **Carga de entorno:** `load-env-local.js` lee `oauth-env.json` si existe (solo claves no ya definidas en `process.env`). **`oauth-env.json` está en `.gitignore`** — no versionar secretos.
 
@@ -19,6 +20,8 @@ Receptor HTTP de webhooks de Mercado Libre (órdenes, mensajes, preguntas, ítem
 | `npm run rating-request-daily` | Tipo C (calificación) — también en CI |
 | `npm run retiro-broadcast-morning` / `afternoon` | Tipo B — también en CI |
 | `npm run whatsapp-tipo-f` | Prueba manual tipo F |
+| `npm run fetch-rates` | Job manual de tasas (currency) |
+| `node src/scripts/bulkAssignShippingCategories.js --auto` | Onboarding masivo de categorías de envío |
 
 Ver `package.json` para el listado completo.
 
@@ -56,6 +59,30 @@ Workflows en `.github/workflows/`. Necesitan:
 
 Sin OAuth en el job, los POST a la API de ML pueden fallar al renovar token.
 
+### Currency (tasas + catálogo en Bs)
+
+- Servicio: `src/services/currencyService.js`.
+- Rutas: `src/routes/currency.js` montadas en `server.js` bajo `/api/currency`.
+- SQL: `sql/currency-management.sql` (+ optimización en `sql/currency-optimization.sql`).
+- Job/CI: `src/jobs/dailyRatesFetch.js`, workflow `.github/workflows/daily-rates.yml`.
+- Regla operativa: precios en Bs se calculan en runtime (vista/queries), no se persisten por SKU.
+
+### Shipping + Landed Cost (flete dinámico)
+
+- Servicio: `src/services/shippingService.js`.
+- Rutas: `src/routes/shipping.js` montadas en `server.js` bajo `/api/shipping`.
+- SQL: `sql/shipping-providers.sql` y `sql/landed-cost.sql`.
+- Integración landed cost: `src/services/landedCostService.js`.
+- Script de carga masiva: `src/scripts/bulkAssignShippingCategories.js`.
+- Regla operativa: al calcular flete dinámico CBM se elimina `FREIGHT` manual en `import_expenses` para evitar doble conteo.
+
+### WMS (bins y stock)
+
+- Servicio: `src/services/wmsService.js`.
+- Rutas: `src/routes/wms.js` montadas en `server.js` bajo `/api/wms` (lecturas públicas de stock/picking/bin; ajustes y movimientos con `X-Admin-Secret`).
+- SQL: `sql/wms-bins.sql` (jerarquía warehouse → aisle → shelf → bin, `bin_stock`, `stock_movements_audit`, vistas `v_stock_by_sku` y `v_picking_route`); parche de auditoría avanzada: `sql/wms-audit-v2.sql` (ENUM `movement_reason`, trigger INSERT/UPDATE/DELETE, `delta_*` generados, `last_counted_at`, `app.movement_notes` en sesión).
+- `bin_code`: con un solo almacén activo por empresa el código es corto (`A01-E1-N1`); con varios almacenes activos se antepone `warehouses.code` (`SM-A01-E1-N1`).
+
 ## Variables de entorno (referencia rápida)
 
 Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-env-local.js` y en los módulos citados.
@@ -66,6 +93,8 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | OAuth ML | `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`; tokens por cuenta en `ml_accounts` |
 | DB | `DATABASE_URL` (obligatoria) |
 | Webhooks | `WEBHOOK_SAVE_DB`, `ML_WEBHOOK_FETCH_RESOURCE`, `ML_WEBHOOK_FETCH_VENTAS_DETALLE` |
+| WMS reservas ML | `ML_WMS_ORDER_RESERVATIONS_ENABLED=1` — tras GET `orders_v2` reserva/libera stock según estado (`src/services/reservationService.js`); requiere migración `sql/ml-reservations.sql` |
+| Currency | `CRON_SECRET` (auth de `POST /api/currency/fetch`), `CURRENCY_COMPANY_IDS` opcional |
 | Preguntas IA | `ML_QUESTIONS_IA_AUTO_ENABLED`, ventana/horario en `ML_QUESTIONS_IA_AUTO_*` |
 | WhatsApp | `WASENDER_ENABLED`, `WASENDER_API_KEY`, `WASENDER_API_BASE_URL`, `ML_WHATSAPP_TIPO_F_ENABLED`, plantillas E/F en BD o env |
 | Post-venta A | `ML_AUTO_SEND_POST_SALE`, `ML_AUTO_SEND_TOPICS`, `ML_POST_SALE_*` |
@@ -82,6 +111,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 - No añadir documentación markdown salvo que se pida explícitamente (este archivo es la excepción de contexto).
 - No commitear `oauth-env.json`, `firebase-key.json`, ni credenciales.
 - Tras cambios en workflows, recordar que los **secrets** deben existir en el repo de GitHub.
+- Para shipping/landed/currency/WMS en entornos nuevos: ejecutar migraciones en orden (ver `sql/run-migrations.md`).
 
 ## Dónde buscar qué
 
@@ -94,6 +124,12 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Wasender E/F | `ml-whatsapp-tipo-ef.js`, `wasender-client.js` |
 | Post-venta A | `ml-post-sale-send.js` |
 | Retiro B / rating C | `ml-retiro-broadcast.js`, `ml-rating-request-daily.js` |
+| Currency (tasas) | `src/services/currencyService.js`, `src/routes/currency.js`, `sql/currency-management.sql` |
+| Shipping/flete | `src/services/shippingService.js`, `src/routes/shipping.js`, `src/scripts/bulkAssignShippingCategories.js`, `sql/shipping-providers.sql` |
+| Landed cost | `src/services/landedCostService.js`, `sql/landed-cost.sql` |
+| WMS (ubicaciones / stock) | `src/services/wmsService.js`, `src/routes/wms.js`, `sql/wms-bins.sql` |
+| Reservas ML ↔ bin_stock | `src/services/reservationService.js`, `sql/ml-reservations.sql`, enganche en `server.js` (topic `orders_v2` + fetch) |
+| Orden de migración SQL | `sql/run-migrations.md` |
 
 ---
 

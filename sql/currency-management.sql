@@ -2,10 +2,15 @@
 -- Ejecutar en orden.
 
 -- 1a. ENUM de tipo de tasa activa
-CREATE TYPE rate_type AS ENUM ('BCV', 'BINANCE', 'ADJUSTED');
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'rate_type') THEN
+    CREATE TYPE rate_type AS ENUM ('BCV', 'BINANCE', 'ADJUSTED');
+  END IF;
+END $$;
 
 -- 1b. Tabla principal de tasas diarias
-CREATE TABLE daily_exchange_rates (
+CREATE TABLE IF NOT EXISTS daily_exchange_rates (
   id               BIGSERIAL PRIMARY KEY,
   company_id       INTEGER NOT NULL DEFAULT 1,
   rate_date        DATE    NOT NULL,
@@ -18,6 +23,7 @@ CREATE TABLE daily_exchange_rates (
       WHEN 'BCV'      THEN bcv_rate
       WHEN 'BINANCE'  THEN binance_rate
       WHEN 'ADJUSTED' THEN adjusted_rate
+      ELSE NULL
     END
   ) STORED,
   is_manual_override BOOLEAN NOT NULL DEFAULT FALSE,
@@ -46,21 +52,42 @@ CREATE TABLE daily_exchange_rates (
   CONSTRAINT chk_adjusted_positive  CHECK (adjusted_rate IS NULL OR adjusted_rate > 0)
 );
 
-CREATE INDEX idx_der_company_date ON daily_exchange_rates (company_id, rate_date DESC);
+-- PARTE 0: corregir active_rate nullable para FETCH_FAILED
+DROP VIEW IF EXISTS v_product_prices_bs;
+ALTER TABLE daily_exchange_rates DROP COLUMN IF EXISTS active_rate;
+ALTER TABLE daily_exchange_rates ADD COLUMN active_rate NUMERIC(15,6)
+  GENERATED ALWAYS AS (
+    CASE active_rate_type
+      WHEN 'BCV'      THEN bcv_rate
+      WHEN 'BINANCE'  THEN binance_rate
+      WHEN 'ADJUSTED' THEN adjusted_rate
+      ELSE NULL
+    END
+  ) STORED;
+
+CREATE INDEX IF NOT EXISTS idx_der_company_date ON daily_exchange_rates (company_id, rate_date DESC);
+CREATE INDEX IF NOT EXISTS idx_der_company_date_valid
+  ON daily_exchange_rates (company_id, rate_date DESC)
+  WHERE active_rate IS NOT NULL;
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN NEW.updated_at = now(); RETURN NEW; END;
 $$;
 
-CREATE TRIGGER trg_der_updated_at
-  BEFORE UPDATE ON daily_exchange_rates
-  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_der_updated_at') THEN
+    CREATE TRIGGER trg_der_updated_at
+      BEFORE UPDATE ON daily_exchange_rates
+      FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+  END IF;
+END $$;
 
 -- 1c. Log de auditoría inmutable (append-only)
-CREATE TABLE exchange_rate_audit_log (
+CREATE TABLE IF NOT EXISTS exchange_rate_audit_log (
   id            BIGSERIAL PRIMARY KEY,
-  rate_id       BIGINT NOT NULL REFERENCES daily_exchange_rates(id),
+  rate_id       BIGINT REFERENCES daily_exchange_rates(id),
   action        TEXT NOT NULL,
   field_changed TEXT,
   old_value     NUMERIC(15,6),
@@ -70,29 +97,33 @@ CREATE TABLE exchange_rate_audit_log (
   metadata      JSONB
 );
 
-CREATE INDEX idx_eral_rate_id ON exchange_rate_audit_log (rate_id);
+CREATE INDEX IF NOT EXISTS idx_eral_rate_id ON exchange_rate_audit_log (rate_id);
 
--- 1d. Vista de productos con precio Bs dinámico
+-- 1d. Vista de productos con fallback al último rate válido
 CREATE OR REPLACE VIEW v_product_prices_bs AS
 SELECT
-  p.id,
   p.sku,
-  p.name,
-  p.price_usd,
-  p.company_id,
-  der.rate_date,
-  der.active_rate_type,
-  der.active_rate,
-  der.spread_alert_triggered,
-  ROUND(p.price_usd * der.active_rate, 2)          AS price_bs,
-  ROUND(p.price_usd * der.bcv_rate, 2)             AS price_bs_bcv,
-  ROUND(p.price_usd * COALESCE(der.binance_rate,
-        der.bcv_rate), 2)                           AS price_bs_binance,
-  ROUND(p.price_usd * COALESCE(der.adjusted_rate,
-        der.active_rate), 2)                        AS price_bs_adjusted,
-  ROUND(p.price_usd * 1.03, 4)                     AS price_usd_with_igtf
-FROM products p
-JOIN daily_exchange_rates der
-  ON der.company_id = p.company_id
-  AND der.rate_date = CURRENT_DATE;
+  p.descripcion,
+  p.precio_usd AS price_usd,
+  last_rate.rate_date,
+  last_rate.active_rate_type,
+  last_rate.active_rate,
+  last_rate.spread_alert_triggered,
+  ROUND(p.precio_usd * last_rate.active_rate, 2)                  AS price_bs,
+  ROUND(p.precio_usd * COALESCE(last_rate.bcv_rate,
+        last_rate.active_rate), 2)                                 AS price_bs_bcv,
+  ROUND(p.precio_usd * COALESCE(last_rate.binance_rate,
+        last_rate.active_rate), 2)                                 AS price_bs_binance,
+  ROUND(p.precio_usd * 1.03, 4)                                    AS price_usd_igtf
+FROM productos p
+CROSS JOIN LATERAL (
+  SELECT rate_date, active_rate_type, active_rate,
+         bcv_rate, binance_rate, spread_alert_triggered
+  FROM daily_exchange_rates
+  WHERE company_id = 1
+    AND rate_date <= CURRENT_DATE
+    AND active_rate IS NOT NULL
+  ORDER BY rate_date DESC
+  LIMIT 1
+) last_rate;
 

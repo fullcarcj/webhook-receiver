@@ -173,6 +173,7 @@ const {
 const { enrichProductoConImagenesUrls, buildProductoImagenesUrls } = require("./producto-imagenes-urls");
 const { handlePublicFrontendRequest } = require("./public-frontend-api");
 const { handleCurrencyApiRequest } = require("./src/routes/currency");
+const { timingSafeCompare } = require("./src/services/currencyService");
 
 const PORT = process.env.PORT || 3001;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
@@ -339,7 +340,7 @@ function isMensajesPackOrdenPath(pathname) {
 function rejectIngestSecret(req, res) {
   const secret = process.env.INGEST_SECRET;
   if (!secret) return false;
-  if (req.headers["x-ingest-secret"] !== secret) {
+  if (!timingSafeCompare(req.headers["x-ingest-secret"], secret)) {
     res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
     return true;
@@ -354,7 +355,7 @@ function rejectAdminSecret(req, res) {
     res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
     return true;
   }
-  if (req.headers["x-admin-secret"] !== secret) {
+  if (!timingSafeCompare(req.headers["x-admin-secret"], secret)) {
     res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
     return true;
@@ -1585,7 +1586,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const provided = filemakerTipoGSecretFromRequest(req, url);
-    if (provided !== String(expected).trim()) {
+    if (!timingSafeCompare(provided, String(expected).trim())) {
       res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
       return;
@@ -1627,7 +1628,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const provided = filemakerTipoGSecretFromRequest(req, url);
-    if (provided !== String(expected).trim()) {
+    if (!timingSafeCompare(provided, String(expected).trim())) {
       res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
       return;

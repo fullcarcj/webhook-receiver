@@ -4,7 +4,11 @@ const {
   getTodayRate,
   getRateHistory,
   getProductPrices,
+  timingSafeCompare,
 } = require("../services/currencyService");
+const { rateLimit } = require("../utils/rateLimiter");
+
+const adminLimiter = rateLimit({ maxRequests: 10, windowMs: 60_000 });
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -28,7 +32,8 @@ async function parseJsonBody(req) {
 function validAdminSecret(req) {
   const s = process.env.ADMIN_SECRET;
   if (!s) return false;
-  return req.headers["x-admin-secret"] === s;
+  const provided = req.headers["x-admin-secret"];
+  return timingSafeCompare(provided, s);
 }
 
 function validCronToken(req) {
@@ -37,7 +42,7 @@ function validCronToken(req) {
   const auth = req.headers.authorization;
   if (!auth || !/^Bearer\s+/i.test(String(auth))) return false;
   const token = String(auth).replace(/^Bearer\s+/i, "").trim();
-  return token === secret;
+  return timingSafeCompare(token, secret);
 }
 
 function ensureAdminAuth(req, res) {
@@ -46,7 +51,7 @@ function ensureAdminAuth(req, res) {
     return false;
   }
   if (!validAdminSecret(req)) {
-    writeJson(res, 401, { ok: false, error: "no autorizado" });
+    writeJson(res, 403, { ok: false, error: "forbidden" });
     return false;
   }
   return true;
@@ -73,23 +78,33 @@ async function handleCurrencyApiRequest(req, res, url) {
       const toDate = url.searchParams.get("to");
       const page = Number(url.searchParams.get("page") || 1);
       const pageSize = Number(url.searchParams.get("page_size") || 50);
-      const history = await getRateHistory({ companyId, fromDate, toDate, page, pageSize });
-      writeJson(res, 200, { ok: true, ...history });
+      const rows = await getRateHistory({ companyId, fromDate, toDate, page, pageSize });
+      writeJson(res, 200, { ok: true, rows });
       return true;
     }
 
     if (req.method === "GET" && url.pathname === "/api/currency/products") {
       const companyId = Number(url.searchParams.get("company_id") || 1);
       const page = Number(url.searchParams.get("page") || 1);
-      const limit = Number(url.searchParams.get("limit") || 50);
+      const limit = Math.min(Number(url.searchParams.get("limit") || 50), 200);
       const search = url.searchParams.get("search");
-      const data = await getProductPrices({ companyId, page, limit, search });
-      writeJson(res, 200, { ok: true, ...data });
+      const rows = await getProductPrices({ companyId, page, limit, search });
+      writeJson(res, 200, { ok: true, page, limit, rows });
       return true;
     }
 
     if (req.method === "POST" && url.pathname === "/api/currency/override") {
       if (!ensureAdminAuth(req, res)) return true;
+      const ip = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "unknown";
+      const lim = adminLimiter(ip, "/override");
+      if (!lim.allowed) {
+        res.writeHead(429, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Retry-After": String(Math.ceil((lim.retryAfterMs || 0) / 1000)),
+        });
+        res.end(JSON.stringify({ ok: false, error: "rate_limit_exceeded" }));
+        return true;
+      }
       let body;
       try {
         body = await parseJsonBody(req);
@@ -110,13 +125,24 @@ async function handleCurrencyApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/currency/fetch") {
+      const ip = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "unknown";
+      const lim = adminLimiter(ip, "/fetch");
+      if (!lim.allowed) {
+        res.writeHead(429, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Retry-After": String(Math.ceil((lim.retryAfterMs || 0) / 1000)),
+        });
+        res.end(JSON.stringify({ ok: false, error: "rate_limit_exceeded" }));
+        return true;
+      }
       const byAdmin = validAdminSecret(req);
       const byCron = validCronToken(req);
       if (!byAdmin && !byCron) {
-        writeJson(res, 401, { ok: false, error: "no autorizado" });
+        writeJson(res, 403, { ok: false, error: "forbidden" });
         return true;
       }
-      const result = await fetchAndSaveDailyRates();
+      const companyId = Number(url.searchParams.get("company_id") || 1);
+      const result = await fetchAndSaveDailyRates(companyId);
       writeJson(res, 200, result);
       return true;
     }

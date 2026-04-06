@@ -35,7 +35,8 @@
     "process-lote-images": "node scripts/process-lote-imagenes-solomotor.js",
     "upload-firebase-webp": "node scripts/upload-firebase-webp.js",
     "sync-imagenes-cantidad-json": "node scripts/sync-imagenes-cantidad-from-json.js",
-    "test-pack-webhook": "node scripts/test-pack-webhook-sim.js"
+    "test-pack-webhook": "node scripts/test-pack-webhook-sim.js",
+    "fetch-rates": "node src/jobs/dailyRatesFetch.js"
   },
   "engines": {
     "node": ">=18"

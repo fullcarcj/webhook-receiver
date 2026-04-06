@@ -4408,6 +4408,7 @@ async function listMlWhatsappWasenderLogByUserAndOrderIds(mlUserId, orderIds, op
 }
 
 module.exports = {
+  pool,
   insertWebhook,
   listWebhooks,
   deleteWebhooks,

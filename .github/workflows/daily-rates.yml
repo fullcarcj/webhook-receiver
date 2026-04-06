@@ -1,0 +1,25 @@
+name: Daily Rates Fetch
+
+on:
+  schedule:
+    - cron: "30 8 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Trigger currency fetch endpoint
+        env:
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          test -n "$RENDER_URL"
+          test -n "$DATABASE_URL"
+          test -n "$CRON_SECRET"
+          curl -fsS -X POST "${RENDER_URL}/api/currency/fetch" \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            -H "Content-Type: application/json"
+

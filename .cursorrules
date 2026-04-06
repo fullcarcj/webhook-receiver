@@ -1,0 +1,1 @@
+Never read data files or logs unless explicitly asked. Focus only on .cs, .js, and .sql schema files.

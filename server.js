@@ -172,6 +172,7 @@ const {
 } = require("./db");
 const { enrichProductoConImagenesUrls, buildProductoImagenesUrls } = require("./producto-imagenes-urls");
 const { handlePublicFrontendRequest } = require("./public-frontend-api");
+const { handleCurrencyApiRequest } = require("./src/routes/currency");
 
 const PORT = process.env.PORT || 3001;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
@@ -1560,6 +1561,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ status: "ok" }));
+    return;
+  }
+
+  if (await handleCurrencyApiRequest(req, res, url)) {
     return;
   }
 

@@ -173,6 +173,7 @@ const {
 const { enrichProductoConImagenesUrls, buildProductoImagenesUrls } = require("./producto-imagenes-urls");
 const { handlePublicFrontendRequest } = require("./public-frontend-api");
 const { handleCurrencyApiRequest } = require("./src/routes/currency");
+const { handleShippingApiRequest } = require("./src/routes/shipping");
 const { timingSafeCompare } = require("./src/services/currencyService");
 
 const PORT = process.env.PORT || 3001;
@@ -1566,6 +1567,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleCurrencyApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleShippingApiRequest(req, res, url)) {
     return;
   }
 

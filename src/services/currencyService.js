@@ -254,7 +254,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_der_updated_at') THEN
     CREATE TRIGGER trg_der_updated_at
     BEFORE UPDATE ON daily_exchange_rates
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at_daily_exchange_rates();
+    FOR EACH ROW EXECUTE PROCEDURE set_updated_at_daily_exchange_rates();
   END IF;
 END $$;`);
 
@@ -272,7 +272,8 @@ CREATE TABLE IF NOT EXISTS exchange_rate_audit_log (
 );`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_eral_rate_id ON exchange_rate_audit_log (rate_id)`);
 
-    await pool.query(`
+    try {
+      await pool.query(`
 CREATE OR REPLACE VIEW v_product_prices_bs AS
 SELECT
   p.sku,
@@ -296,6 +297,9 @@ CROSS JOIN LATERAL (
   ORDER BY rate_date DESC
   LIMIT 1
 ) last_rate`);
+    } catch (e) {
+      console.warn("[currency] v_product_prices_bs omitida:", e.message || e);
+    }
   })();
   return schemaReadyPromise;
 }

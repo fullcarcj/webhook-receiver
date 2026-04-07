@@ -26,7 +26,11 @@ jobs:
           echo "GET ${BASE}/health"
           curl -fsS -o /dev/null -w "health HTTP %{http_code}\n" "${BASE}/health"
           echo "POST ${BASE}/api/currency/fetch"
-          curl -fsS -X POST "${BASE}/api/currency/fetch" \
+          code=$(curl -sS -o /tmp/cur.json -w "%{http_code}" -X POST "${BASE}/api/currency/fetch" \
             -H "Authorization: Bearer ${CRON_SECRET}" \
-            -H "Content-Type: application/json"
+            -H "Content-Type: application/json")
+          echo "fetch HTTP ${code}"
+          cat /tmp/cur.json
+          echo
+          test "$code" = "200"
 

@@ -308,15 +308,15 @@ async function insertAuditLog(client, { rateId, action, fieldChanged, oldValue, 
   await client.query(
     `INSERT INTO exchange_rate_audit_log
        (rate_id, action, field_changed, old_value, new_value, performed_by, metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+     VALUES ($1::bigint, $2::text, $3::text, $4::numeric, $5::numeric, $6::integer, $7::jsonb)`,
     [
-      rateId || null,
+      rateId ?? null,
       action,
       fieldChanged ?? null,
       oldValue ?? null,
       newValue ?? null,
       userId ?? null,
-      metadata ? JSON.stringify(metadata) : null,
+      metadata != null ? metadata : null,
     ]
   );
 }
@@ -340,13 +340,13 @@ async function fetchAndSaveDailyRates(companyId = 1) {
       `INSERT INTO daily_exchange_rates
          (company_id, rate_date, bcv_rate, binance_rate, active_rate_type,
           bcv_fetched_at, bcv_source_url, binance_fetched_at, binance_source_url)
-       VALUES ($1,$2,$3,$4,
+       VALUES ($1::integer, $2::date, $3::numeric, $4::numeric,
          CASE
-           WHEN ($3::numeric) IS NOT NULL THEN 'BCV'::rate_type
-           WHEN ($4::numeric) IS NOT NULL THEN 'BINANCE'::rate_type
+           WHEN $3 IS NOT NULL THEN 'BCV'::rate_type
+           WHEN $4 IS NOT NULL THEN 'BINANCE'::rate_type
            ELSE 'BCV'::rate_type
          END,
-         $5,$6,$7,$8)
+         $5::timestamptz, $6::text, $7::timestamptz, $8::text)
        ON CONFLICT (company_id, rate_date) DO UPDATE SET
          bcv_rate = EXCLUDED.bcv_rate,
          binance_rate = EXCLUDED.binance_rate,

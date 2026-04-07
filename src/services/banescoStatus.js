@@ -1,7 +1,11 @@
 "use strict";
 
 const { pool } = require("../../db-postgres");
-const { getLastCycleSnapshot, SESSION_MAX_HOURS } = require("./banescoService");
+const {
+  getLastCycleSnapshot,
+  getBanescoMonitorWindowStatus,
+  SESSION_MAX_HOURS,
+} = require("./banescoService");
 
 /**
  * Estado de conexión Banesco: env + fila `bank_accounts` + último ciclo del monitor.
@@ -28,6 +32,7 @@ async function getBanescoConnectionSnapshot() {
       monitor_enabled: monitorEnabled,
       bank_account_id: bankAccountId,
       last_cycle: getLastCycleSnapshot(),
+      monitor_window: getBanescoMonitorWindowStatus(),
     };
   }
 
@@ -83,6 +88,7 @@ async function getBanescoConnectionSnapshot() {
       valid: sessionValid,
     },
     last_cycle: getLastCycleSnapshot(),
+    monitor_window: getBanescoMonitorWindowStatus(),
   };
 }
 

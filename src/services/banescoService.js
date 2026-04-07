@@ -2292,8 +2292,134 @@ async function insertMovements(bankAccountId, movements) {
   return { inserted, duplicates, errors };
 }
 
+/** "HH:mm" → minutos desde medianoche. */
+function parseHmMinutes(s) {
+  const m = String(s || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h < 0 || h > 23 || min < 0 || min > 59) {
+    return null;
+  }
+  return h * 60 + min;
+}
+
+/** Hora local en `timeZone` (p. ej. America/Caracas) como minutos desde medianoche. */
+function getMinutesInTimeZone(date, timeZone) {
+  try {
+    const dtf = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "numeric",
+      minute: "numeric",
+      hour12: false,
+    });
+    const parts = dtf.formatToParts(date);
+    let hour = 0;
+    let minute = 0;
+    for (const p of parts) {
+      if (p.type === "hour") hour = parseInt(p.value, 10);
+      if (p.type === "minute") minute = parseInt(p.value, 10);
+    }
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+    return hour * 60 + minute;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isMinutesWithinOperatingWindow(nowM, startM, endM) {
+  if (startM === endM) return true;
+  if (startM < endM) {
+    return nowM >= startM && nowM < endM;
+  }
+  return nowM >= startM || nowM < endM;
+}
+
+/**
+ * Ventana en la que el portal Banesco suele estar disponible (no hace login/descarga fuera).
+ * BANESCO_MONITOR_WINDOW_ENABLED=1 para activar.
+ * Defaults: 05:00–23:00 en BANESCO_MONITOR_WINDOW_TZ (America/Caracas).
+ */
+function getBanescoMonitorWindowStatus() {
+  const enabled = process.env.BANESCO_MONITOR_WINDOW_ENABLED === "1";
+  const tz = process.env.BANESCO_MONITOR_WINDOW_TZ || "America/Caracas";
+  const startS = process.env.BANESCO_MONITOR_WINDOW_START || "05:00";
+  const endS = process.env.BANESCO_MONITOR_WINDOW_END || "23:00";
+  const startM = parseHmMinutes(startS);
+  const endM = parseHmMinutes(endS);
+
+  if (!enabled) {
+    return {
+      window_enabled: false,
+      timezone: tz,
+      start: startS,
+      end: endS,
+      within_operating_hours: true,
+      minutes_now: null,
+    };
+  }
+
+  if (startM == null || endM == null) {
+    console.warn(
+      `[banesco] ${nowVET()} — BANESCO_MONITOR_WINDOW_START/END inválidos (${startS} / ${endS}); se ignora la ventana.`
+    );
+    return {
+      window_enabled: true,
+      timezone: tz,
+      start: startS,
+      end: endS,
+      within_operating_hours: true,
+      minutes_now: null,
+      parse_error: true,
+    };
+  }
+
+  const nowM = getMinutesInTimeZone(new Date(), tz);
+  if (nowM == null) {
+    console.warn(`[banesco] ${nowVET()} — Zona horaria inválida: ${tz}; se ignora la ventana.`);
+    return {
+      window_enabled: true,
+      timezone: tz,
+      start: startS,
+      end: endS,
+      within_operating_hours: true,
+      minutes_now: null,
+      parse_error: true,
+    };
+  }
+
+  const within = isMinutesWithinOperatingWindow(nowM, startM, endM);
+  return {
+    window_enabled: true,
+    timezone: tz,
+    start: startS,
+    end: endS,
+    within_operating_hours: within,
+    minutes_now: nowM,
+  };
+}
+
 async function runCycle(bankAccountId) {
   try {
+    const win = getBanescoMonitorWindowStatus();
+    if (win.window_enabled && !win.within_operating_hours) {
+      const hh = Math.floor(win.minutes_now / 60);
+      const mm = win.minutes_now % 60;
+      console.log(
+        `[banesco] ${nowVET()} — Fuera de horario de operaciones (${win.timezone} ` +
+          `${win.start}–${win.end}; ahora ~${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}). ` +
+          `Ciclo omitido (sin login ni Playwright).`
+      );
+      lastCycleSnapshot = {
+        at: new Date().toISOString(),
+        ok: true,
+        skipped: true,
+        skip_reason: "outside_window",
+        window: win,
+      };
+      return { skipped: true, skip_reason: "outside_window", window: win };
+    }
+
     let cookies = await loadSession(bankAccountId);
 
     if (!cookies) {
@@ -2405,4 +2531,9 @@ async function runCycle(bankAccountId) {
   }
 }
 
-module.exports = { runCycle, getLastCycleSnapshot, SESSION_MAX_HOURS };
+module.exports = {
+  runCycle,
+  getLastCycleSnapshot,
+  getBanescoMonitorWindowStatus,
+  SESSION_MAX_HOURS,
+};

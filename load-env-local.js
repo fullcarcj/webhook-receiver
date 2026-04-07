@@ -16,7 +16,7 @@
  * Wasender webhooks: WASENDER_WEBHOOK_SECRET o WASENDER_X_WEBHOOK_SIGNATURE (= cabecera X-Webhook-Signature); ver wasender-webhook-signature.js.
  * Postgres remoto suele exigir TLS: la app activa ssl en el cliente salvo localhost o PGSSLMODE=disable.
  * Banesco: estado de cuenta vía CSV desde el portal; BANESCO_STATEMENT_CSV_DIR carpeta para esos archivos. Ver src/config/banesco.js y GET /api/bank/banesco/status (X-Admin-Secret).
- * Monitor automático: BANESCO_MONITOR_ENABLED, BANESCO_MONITOR_INTERVAL_SEC (segundos entre descargas, default 60, mín. 15).
+ * Monitor automático: BANESCO_MONITOR_ENABLED, BANESCO_MONITOR_INTERVAL_SEC (segundos entre descargas, default 60, mín. 15). Ventana horaria portal: BANESCO_MONITOR_WINDOW_ENABLED=1, BANESCO_MONITOR_WINDOW_START/END (ej. 05:00 y 23:00), BANESCO_MONITOR_WINDOW_TZ (default America/Caracas) — fuera de ventana no se hace login/descarga; a las 5:00 el siguiente ciclo vuelve a operar.
  * Ver ventana del navegador (login + Exportar): BANESCO_HEADLESS=0; por defecto headless.
  * Tras descargar el CSV, re-mostrar el formulario con la misma selección (iframe suele vaciarse al Aceptar): por defecto activo; BANESCO_EXPORT_RESTORE_UI_AFTER_DOWNLOAD=0 lo desactiva. Pausa BANESCO_EXPORT_RESTORE_UI_PAUSE_MS (default 1500).
  * CSV Banesco: delimitador BANESCO_EXPORT_FIELD_DELIMITER; export: BANESCO_MOVIMIENTOS_CUENTA_URL → ddlCuenta → pausa BANESCO_POST_CUENTA_SELECT_MS → espera botón Exportar BANESCO_EXPORTAR_BTN_WAIT_MS (default 25000) → botón Exportar → pausa BANESCO_POST_EXPORTAR_BTN_MS → Exportar.aspx; BANESCO_CUENTA_SELECT_VALUE (ej. 1); BANESCO_SKIP_MOVIMIENTOS_CUENTA=1 salta ese paso. CSV: BANESCO_CSV_DELIMITER.

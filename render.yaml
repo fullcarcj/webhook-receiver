@@ -47,6 +47,15 @@ services:
         value: "1"
       - key: BANESCO_MONITOR_ENABLED
         value: "1"
+      # Horario portal (no login Playwright fuera de ventana; el monitor sigue en intervalo y omite ciclos)
+      - key: BANESCO_MONITOR_WINDOW_ENABLED
+        value: "1"
+      - key: BANESCO_MONITOR_WINDOW_START
+        value: "05:00"
+      - key: BANESCO_MONITOR_WINDOW_END
+        value: "23:00"
+      - key: BANESCO_MONITOR_WINDOW_TZ
+        value: "America/Caracas"
 
 databases:
   - name: webhook-receiver-db

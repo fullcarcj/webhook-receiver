@@ -19,7 +19,7 @@
  * Monitor automático: BANESCO_MONITOR_ENABLED, BANESCO_MONITOR_INTERVAL_SEC (segundos entre descargas, default 60, mín. 15).
  * Ver ventana del navegador (login + Exportar): BANESCO_HEADLESS=0; por defecto headless.
  * Tras descargar el CSV, re-mostrar el formulario con la misma selección (iframe suele vaciarse al Aceptar): por defecto activo; BANESCO_EXPORT_RESTORE_UI_AFTER_DOWNLOAD=0 lo desactiva. Pausa BANESCO_EXPORT_RESTORE_UI_PAUSE_MS (default 1500).
- * CSV movimientos 6 columnas: si Banesco exporta Crédito|Débito (col.4–5) en vez de Débito|Crédito, BANESCO_CSV_SIXCOL_CREDITO_FIRST=1 o dejar que banescoService elija por heurística (solo un importe en col.4 o 5).
+ * CSV Banesco: delimitador en el TXT: export Playwright usa BANESCO_EXPORT_FIELD_DELIMITER (default «;», «|» con =|). Valor <option> forzado: BANESCO_EXPORT_DELIMITER_OPTION_VALUE. Al leer: BANESCO_CSV_DELIMITER o auto (; primero).
  * Playwright login: BANESCO_BOTON_ACEPTAR_PASO1_SELECTOR y BANESCO_BOTON_ACEPTAR_PASO2_SELECTOR (CSS) si el clic en Aceptar falla; BANESCO_STEP_SCREENSHOTS / BANESCO_SCREENSHOT_DIR.
  * Exportar movimientos: BANESCO_DOWNLOAD_EVENT_TIMEOUT_MS (ms, default 10000) si waitForEvent download hace timeout.
  * Capturas post-login (Exportar.aspx): BANESCO_EXPORT_STEP_SCREENSHOTS=1 y opcional BANESCO_EXPORT_SCREENSHOT_DIR (default ./banesco-export-debug).

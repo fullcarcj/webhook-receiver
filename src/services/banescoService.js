@@ -1107,114 +1107,183 @@ async function clickExportarAceptarEnFrame(page) {
 }
 
 /**
- * Selecciona la barra vertical en el <select> de delimitadores vía DOM (más fiable que value="|").
+ * Carácter de campo en el TXT que genera el portal: «;» (default) o «|».
+ * Override: BANESCO_EXPORT_FIELD_DELIMITER=|  —  BANESCO_EXPORT_DELIMITER_OPTION_VALUE=2 si hace falta forzar value del <option>.
  */
-async function seleccionarDelimitadorBarraVerticalEnFrame(frame) {
-  const result = await frame.evaluate(() => {
-    const out = { ok: false, detail: null, debug: [] };
-    const candidates = [];
-    for (const sel of document.querySelectorAll("select[name*='ddlDelimitador' i]")) {
-      candidates.push(sel);
-    }
-    for (const sel of document.querySelectorAll("select[id*='ddlDelimitador' i]")) {
-      if (!candidates.includes(sel)) {
+function getBanescoExportFieldDelimiter() {
+  const v = String(process.env.BANESCO_EXPORT_FIELD_DELIMITER ?? ";").trim();
+  if (v === ";" || v === "|") return v;
+  return ";";
+}
+
+/**
+ * Selecciona el delimitador de campos en el <select> (punto y coma o barra vertical).
+ */
+async function seleccionarDelimitadorCampoEnFrame(frame) {
+  const delimiterChar = getBanescoExportFieldDelimiter();
+  const forcedValue =
+    process.env.BANESCO_EXPORT_DELIMITER_OPTION_VALUE != null &&
+    String(process.env.BANESCO_EXPORT_DELIMITER_OPTION_VALUE).trim() !== ""
+      ? String(process.env.BANESCO_EXPORT_DELIMITER_OPTION_VALUE).trim()
+      : null;
+
+  const result = await frame.evaluate(
+    ({ delimiterChar: char, forcedValue: forced }) => {
+      const out = { ok: false, detail: null, debug: [] };
+      const candidates = [];
+      for (const sel of document.querySelectorAll("select[name*='ddlDelimitador' i]")) {
         candidates.push(sel);
       }
-    }
-    if (candidates.length === 0) {
-      for (const sel of document.querySelectorAll("select")) {
-        const lab = (sel.name || "") + (sel.id || "");
-        if (/delimit/i.test(lab)) {
+      for (const sel of document.querySelectorAll("select[id*='ddlDelimitador' i]")) {
+        if (!candidates.includes(sel)) {
           candidates.push(sel);
         }
       }
-    }
-
-    function pickPipeOption(selectEl) {
-      const opts = [...selectEl.options];
-      for (let i = 0; i < opts.length; i++) {
-        const opt = opts[i];
-        const v = String(opt.value ?? "").trim();
-        const tRaw = String(opt.text ?? "").trim();
-        const tCompact = tRaw.replace(/\s+/g, "");
-        if (
-          v === "|" ||
-          v === "%7C" ||
-          tCompact === "|" ||
-          tRaw === "|" ||
-          /^[|｜¦\u2502\uFF5C]$/.test(tCompact) ||
-          (/barra|pipe|vertical/i.test(tRaw) && /[|｜]/.test(tRaw))
-        ) {
-          return { index: i, value: opt.value, text: tRaw };
+      if (candidates.length === 0) {
+        for (const sel of document.querySelectorAll("select")) {
+          const lab = (sel.name || "") + (sel.id || "");
+          if (/delimit/i.test(lab)) {
+            candidates.push(sel);
+          }
         }
       }
-      return null;
-    }
 
-    for (const sel of candidates) {
-      const picked = pickPipeOption(sel);
-      out.debug.push({
-        name: sel.name,
-        id: sel.id,
-        disabled: sel.disabled,
-        optionSample: [...sel.options].slice(0, 12).map((o) => ({ v: o.value, t: o.text.trim().slice(0, 24) })),
-      });
-      if (sel.disabled) {
-        continue;
-      }
-      if (picked) {
-        sel.selectedIndex = picked.index;
-        sel.value = picked.value;
-        sel.dispatchEvent(new Event("input", { bubbles: true }));
-        sel.dispatchEvent(new Event("change", { bubbles: true }));
-        try {
-          const ev = new Event("click", { bubbles: true });
-          sel.dispatchEvent(ev);
-        } catch {
-          /* ignore */
+      function pickDelimiterOption(selectEl, want) {
+        const opts = [...selectEl.options];
+        if (forced) {
+          for (let i = 0; i < opts.length; i++) {
+            const opt = opts[i];
+            if (String(opt.value ?? "").trim() === forced) {
+              return { index: i, value: opt.value, text: String(opt.text ?? "").trim() };
+            }
+          }
         }
-        out.ok = true;
-        out.detail = { name: sel.name, id: sel.id, ...picked };
-        return out;
+        for (let i = 0; i < opts.length; i++) {
+          const opt = opts[i];
+          const v = String(opt.value ?? "").trim();
+          const tRaw = String(opt.text ?? "").trim();
+          const tCompact = tRaw.replace(/\s+/g, "");
+          if (want === "|") {
+            if (
+              v === "|" ||
+              v === "%7C" ||
+              tCompact === "|" ||
+              tRaw === "|" ||
+              /^[|｜¦\u2502\uFF5C]$/.test(tCompact) ||
+              (/barra|pipe|vertical/i.test(tRaw) && /[|｜]/.test(tRaw))
+            ) {
+              return { index: i, value: opt.value, text: tRaw };
+            }
+          } else {
+            if (
+              v === ";" ||
+              v === "%3B" ||
+              tCompact === ";" ||
+              /punto\s*y\s*coma/i.test(tRaw) ||
+              (tRaw.includes(";") && !/\|/.test(tRaw))
+            ) {
+              return { index: i, value: opt.value, text: tRaw };
+            }
+          }
+        }
+        return null;
       }
-    }
-    return out;
-  });
 
+      for (const sel of candidates) {
+        const picked = pickDelimiterOption(sel, char);
+        out.debug.push({
+          name: sel.name,
+          id: sel.id,
+          disabled: sel.disabled,
+          optionSample: [...sel.options].slice(0, 16).map((o) => ({ v: o.value, t: o.text.trim().slice(0, 32) })),
+        });
+        if (sel.disabled) {
+          continue;
+        }
+        if (picked) {
+          sel.selectedIndex = picked.index;
+          sel.value = picked.value;
+          sel.dispatchEvent(new Event("input", { bubbles: true }));
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+          try {
+            const ev = new Event("click", { bubbles: true });
+            sel.dispatchEvent(ev);
+          } catch {
+            /* ignore */
+          }
+          out.ok = true;
+          out.detail = { name: sel.name, id: sel.id, ...picked };
+          return out;
+        }
+      }
+      return out;
+    },
+    { delimiterChar, forcedValue }
+  );
+
+  const label = delimiterChar === ";" ? "punto y coma" : "barra vertical";
   if (result.ok) {
-    console.log(`[banesco] ${nowVET()} — Delimitador «|» (barra recta): DOM OK`, result.detail);
+    console.log(`[banesco] ${nowVET()} — Delimitador de campo «${delimiterChar}» (${label}): DOM OK`, result.detail);
     return true;
   }
   console.warn(
-    `[banesco] ${nowVET()} — Delimitador «|»: DOM sin coincidencia; opciones:`,
+    `[banesco] ${nowVET()} — Delimitador «${delimiterChar}»: DOM sin coincidencia; opciones:`,
     JSON.stringify(result.debug).slice(0, 2500)
   );
   return false;
 }
 
 /** Fallback Playwright si el evaluate no encontró el combo. */
-async function seleccionarDelimitadorBarraVerticalPlaywrightFallback(frame) {
+async function seleccionarDelimitadorCampoPlaywrightFallback(frame) {
+  const delimiterChar = getBanescoExportFieldDelimiter();
   const loc = frame
     .locator(
       'select[name*="ddlDelimitador" i], select[id*="ddlDelimitador" i], #ctl00_cp_ddlDelimitadores, #ctl00_cp_ddlDelimitador'
     )
     .first();
+  const forced = process.env.BANESCO_EXPORT_DELIMITER_OPTION_VALUE;
   try {
     await loc.scrollIntoViewIfNeeded().catch(() => {});
     const count = await loc.count();
     if (count === 0) {
       return;
     }
-    for (const spec of [
+    if (forced != null && String(forced).trim() !== "") {
+      try {
+        await loc.selectOption({ value: String(forced).trim() }, { timeout: 6000, force: true });
+        console.log(
+          `[banesco] ${nowVET()} — Delimitador: Playwright fallback por BANESCO_EXPORT_DELIMITER_OPTION_VALUE=${forced}`
+        );
+        return;
+      } catch {
+        /* siguiente */
+      }
+    }
+    const specsPipe = [
       { value: "|" },
       { label: "|" },
       { label: /\|/ },
       { index: 1 },
       { index: 2 },
-    ]) {
+      { index: 0 },
+    ];
+    const specsSemi = [
+      { value: ";" },
+      { label: ";" },
+      { label: /;/ },
+      { label: /punto\s*y\s*coma/i },
+      { index: 2 },
+      { index: 1 },
+      { index: 0 },
+    ];
+    const specs = delimiterChar === ";" ? specsSemi : specsPipe;
+    for (const spec of specs) {
       try {
         await loc.selectOption(spec, { timeout: 6000, force: true });
-        console.log(`[banesco] ${nowVET()} — Delimitador «|»: Playwright fallback OK`, spec);
+        console.log(
+          `[banesco] ${nowVET()} — Delimitador «${delimiterChar}»: Playwright fallback OK`,
+          spec
+        );
         return;
       } catch {
         /* siguiente */
@@ -1259,7 +1328,7 @@ async function soltarFocoTrasDelimitador(frame) {
 
 /**
  * Opciones acordadas: formato «Configurar Parámetros» (valor Personalizado),
- * división «Delimitador», carácter | en el combo de delimitadores.
+ * división «Delimitador», carácter de campo «;» o «|» (BANESCO_EXPORT_FIELD_DELIMITER).
  * Usa clics Playwright (como el usuario) + ids/names reales del portal; no el primer <select> del DOM.
  */
 async function _configurarFormulario(page) {
@@ -1361,12 +1430,15 @@ async function _configurarFormulario(page) {
     )
     .catch(() => {});
 
-  const pipeOk = await seleccionarDelimitadorBarraVerticalEnFrame(frame);
-  if (!pipeOk) {
-    await seleccionarDelimitadorBarraVerticalPlaywrightFallback(frame);
+  const delimOk = await seleccionarDelimitadorCampoEnFrame(frame);
+  if (!delimOk) {
+    await seleccionarDelimitadorCampoPlaywrightFallback(frame);
   }
 
-  console.log(`[banesco] ${nowVET()} — Pausa 2s tras seleccionar delimitador «|» (barra recta)…`);
+  const _dChar = getBanescoExportFieldDelimiter();
+  console.log(
+    `[banesco] ${nowVET()} — Pausa 2s tras seleccionar delimitador de campo «${_dChar}»…`
+  );
   await sleep(2000);
 
   await soltarFocoTrasDelimitador(frame);
@@ -1405,10 +1477,19 @@ async function _configurarFormulario(page) {
   }
   const txt = estado.ddlDelimitadorTexto || "";
   const val = estado.ddlDelimitador || "";
-  if (txt && !/[|｜]/.test(txt) && val !== "|" && !/^[|｜]/.test(String(val))) {
-    console.warn(
-      `[banesco] ${nowVET()} — Aviso: delimitador seleccionado no parece «|» (texto="${txt}" value="${val}")`
-    );
+  const want = getBanescoExportFieldDelimiter();
+  if (want === "|") {
+    if (txt && !/[|｜]/.test(txt) && val !== "|" && !/^[|｜]/.test(String(val))) {
+      console.warn(
+        `[banesco] ${nowVET()} — Aviso: delimitador no parece «|» (texto="${txt}" value="${val}")`
+      );
+    }
+  } else if (want === ";") {
+    if (txt && !/;/.test(txt) && val !== ";" && val !== "%3B") {
+      console.warn(
+        `[banesco] ${nowVET()} — Aviso: delimitador no parece «;» (texto="${txt}" value="${val}")`
+      );
+    }
   }
 }
 
@@ -1430,6 +1511,19 @@ function parseFechaToIso(fechaRaw) {
   return `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
 }
 
+/**
+ * Importe en columna Débito/Crédito del TXT: suele ser positivo, pero Banesco a veces manda
+ * el débito como negativo o entre paréntesis. `parseVenezuelanNumber` rechaza negativos (sanity
+ * pensada para tasas BCV), así que normalizamos signo antes.
+ */
+function parseAmountColumnUnsigned(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return 0;
+  const unsigned = s.replace(/^\(+|\)+$/g, "").replace(/^[+-]/, "").trim();
+  if (!unsigned) return 0;
+  return Math.abs(parseVenezuelanNumber(unsigned) || 0);
+}
+
 function paymentTypeFromDescription(description) {
   const descUpper = String(description || "").toUpperCase();
   if (descUpper.includes("PAGO MOVIL") || descUpper.includes("PAGO MÓ")) {
@@ -1442,16 +1536,16 @@ function paymentTypeFromDescription(description) {
 }
 
 /**
- * Elige el separador de campo que mejor encaja con las primeras líneas (|; tab).
- * Si el portal exporta con ";" y el select "|" falla, antes se descartaban todas las líneas.
+ * Elige el separador de campo (; primero — suele ir mejor con montos 1.234,56).
+ * Override: BANESCO_CSV_DELIMITER=; o =|
  */
 function detectDelimiter(sampleLines) {
   const candidates = [
-    ["|", "|"],
     [";", ";"],
+    ["|", "|"],
     ["\t", "TAB"],
   ];
-  let bestDelim = "|";
+  let bestDelim = ";";
   let bestScore = -1;
   for (const [delim] of candidates) {
     let score = 0;
@@ -1467,6 +1561,20 @@ function detectDelimiter(sampleLines) {
     }
   }
   return bestDelim;
+}
+
+/** Columna “vacía” entre descripción e importe (espacios, NBSP, etc.). */
+function isBlankGapColumn(s) {
+  return !String(s ?? "").replace(/\s/g, "").length;
+}
+
+function resolveCsvDelimiter(sampleLines) {
+  const raw = process.env.BANESCO_CSV_DELIMITER;
+  const d = raw != null ? String(raw).trim() : "";
+  if (d === ";" || d === "|" || d === "\\t" || d === "TAB") {
+    return d === "\\t" || d === "TAB" ? "\t" : d;
+  }
+  return detectDelimiter(sampleLines);
 }
 
 /** Una fila: fecha, ref, descripción, monto (+/-), saldo (opcional). */
@@ -1523,8 +1631,8 @@ function parseLineaSixCols(cols) {
   const reference = (refRaw || "").trim() || null;
   const description = (descRaw || "").trim();
 
-  const debito = Math.abs(parseVenezuelanNumber((debitoRaw || "").trim()) || 0);
-  const credito = Math.abs(parseVenezuelanNumber((creditoRaw || "").trim()) || 0);
+  const debito = parseAmountColumnUnsigned(debitoRaw);
+  const credito = parseAmountColumnUnsigned(creditoRaw);
 
   let amount;
   let txType;
@@ -1580,8 +1688,8 @@ function parseLineaSixColsBest(trimmed) {
   const alt = parseLineaSixCols(swapped);
 
   if (std && alt && std.amount === alt.amount && std.tx_type !== alt.tx_type) {
-    const v3 = Math.abs(parseVenezuelanNumber(trimmed[3]) || 0);
-    const v4 = Math.abs(parseVenezuelanNumber(trimmed[4]) || 0);
+    const v3 = parseAmountColumnUnsigned(trimmed[3]);
+    const v4 = parseAmountColumnUnsigned(trimmed[4]);
     /** Solo importe en col.5: suele ser archivo Crédito|Débito mal leído como Débito|Crédito */
     if (v3 === 0 && v4 > 0 && std.tx_type === "CREDIT" && alt.tx_type === "DEBIT") {
       return alt;
@@ -1595,15 +1703,43 @@ function parseLineaSixColsBest(trimmed) {
   return alt;
 }
 
-function parseLineaColumns(cols) {
-  const trimmed = cols.map((c) => String(c || "").trim());
-  if (trimmed.length >= 6) {
-    const six = parseLineaSixColsBest(trimmed);
-    if (six) return six;
-    const fiveFromSix = parseLineaFiveCols(trimmed.slice(0, 5));
-    if (fiveFromSix) return fiveFromSix;
+/** Quita celdas vacías finales (línea que termina en |). */
+function trimTrailingEmptyCols(trimmed) {
+  const out = [...trimmed];
+  while (out.length > 0 && out[out.length - 1] === "") {
+    out.pop();
   }
-  if (trimmed.length >= 5) {
+  return out;
+}
+
+/**
+ * Banesco exporta a veces: fecha|ref|descripción| columna vacía | ±importe | saldo
+ * (un solo monto con +/−, no dos columnas débito/crédito).
+ */
+function parseLineaBanescoSignedAmountSixCols(trimmed) {
+  if (trimmed.length < 6) return null;
+  if (!isBlankGapColumn(trimmed[3])) return null;
+  return parseLineaFiveCols([
+    trimmed[0],
+    trimmed[1],
+    trimmed[2],
+    trimmed[4],
+    trimmed[5],
+  ]);
+}
+
+function parseLineaColumns(cols) {
+  const trimmed = trimTrailingEmptyCols(cols.map((c) => String(c || "").trim()));
+
+  if (trimmed.length >= 6) {
+    /** fecha|ref|desc| |±monto|saldo — no mezclar con parseLineaSixCols (trataría − como crédito). */
+    if (isBlankGapColumn(trimmed[3])) {
+      return parseLineaBanescoSignedAmountSixCols(trimmed);
+    }
+    return parseLineaSixColsBest(trimmed);
+  }
+
+  if (trimmed.length === 5) {
     return parseLineaFiveCols(trimmed);
   }
   if (trimmed.length === 4) {
@@ -1624,7 +1760,7 @@ function parseTxt(txtContent) {
   }
 
   const sample = lines.slice(0, 30);
-  const delimiter = detectDelimiter(sample);
+  const delimiter = resolveCsvDelimiter(sample);
   const movements = [];
 
   for (const line of lines) {

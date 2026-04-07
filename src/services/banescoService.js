@@ -225,6 +225,29 @@ function banescoChromiumLaunchOptions() {
 }
 
 /**
+ * Lanza Chromium; si `BANESCO_PLAYWRIGHT_CHANNEL` apunta a Chrome/Edge pero no está instalado
+ * (p. ej. Linux en Render sin `/opt/google/chrome/chrome`), reintenta sin canal → Chromium del paquete npm.
+ */
+async function launchBanescoBrowser() {
+  const opts = banescoChromiumLaunchOptions();
+  try {
+    return await chromium.launch(opts);
+  } catch (e) {
+    if (!opts.channel) throw e;
+    const msg = String(e.message || e);
+    const looksMissing =
+      /not found|doesn't exist|is not installed|not installed at|distribution/i.test(msg);
+    if (!looksMissing) throw e;
+    console.warn(
+      `[banesco] ${nowVET()} — Canal "${opts.channel}" no disponible en este host; ` +
+        `usando Chromium embebido de Playwright. (${msg.slice(0, 200)})`
+    );
+    const { channel: _ch, ...rest } = opts;
+    return await chromium.launch(rest);
+  }
+}
+
+/**
  * Tras el POST de exportación, el iframe suele vaciarse al entregar el adjunto (los radios/select «desaparecen»).
  * Tras leer el archivo, volvemos a Exportar.aspx y re-aplicamos _configurarFormulario (sin segunda descarga).
  * Por defecto: activo. Desactivar solo si no te importa la UI y querés ahorrar ~3–8 s: BANESCO_EXPORT_RESTORE_UI_AFTER_DOWNLOAD=0.
@@ -859,7 +882,7 @@ async function doLogin() {
 
   const shotState = getBanescoScreenshotState();
 
-  const browser = await chromium.launch(banescoChromiumLaunchOptions());
+  const browser = await launchBanescoBrowser();
 
   try {
     const context = await browser.newContext({
@@ -1306,7 +1329,7 @@ async function downloadTxt(cookies) {
     );
   }
 
-  const browser = await chromium.launch(banescoChromiumLaunchOptions());
+  const browser = await launchBanescoBrowser();
 
   const context = await browser.newContext({
     userAgent:

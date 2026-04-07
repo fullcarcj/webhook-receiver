@@ -25,7 +25,7 @@
  * Capturas post-login (Exportar.aspx): BANESCO_EXPORT_STEP_SCREENSHOTS=1 y opcional BANESCO_EXPORT_SCREENSHOT_DIR (default ./banesco-export-debug).
  * Guardar en disco cada descarga exitosa (mismo bytes que el portal): BANESCO_SAVE_DOWNLOAD_DIR=ruta/carpeta → escribe banesco-last-download.txt (sobrescribe).
  * Playwright/Chromium carpeta de descargas: BANESCO_PLAYWRIGHT_DOWNLOADS_DIR o BANESCO_DOWNLOADS_DIR; si no, BANESCO_SAVE_DOWNLOAD_DIR o data/banesco-downloads. Tras abrir la página se envía CDP Browser.setDownloadBehavior (desactivar con BANESCO_SKIP_CDP_DOWNLOAD=1).
- * Sin canal, Playwright usa Chromium del paquete (ventana "Chrome for Testing"). Chrome/Edge del sistema: BANESCO_PLAYWRIGHT_CHANNEL=chrome o =msedge (también BANESCO_USE_SYSTEM_CHROME=chrome).
+ * Sin canal, Playwright usa Chromium del paquete (ventana "Chrome for Testing"). Chrome/Edge del sistema: BANESCO_PLAYWRIGHT_CHANNEL=chrome o =msedge (también BANESCO_USE_SYSTEM_CHROME=chrome). Si ese navegador no está instalado en el servidor (p. ej. Render), el arranque hace fallback al Chromium embebido.
  * Headless / diálogos: BANESCO_CHROMIUM_DISABLE_SITE_ISOLATION=1 añade --disable-features=IsolateOrigins,site-per-process (solo si hace falta; opt-in).
  * Botón descarga en Exportar: por defecto #ctl00_cp_btnOk; override con BANESCO_EXPORT_BTN_SELECTOR (CSS).
  */

@@ -1,5 +1,16 @@
 "use strict";
 
+/**
+ * Misma ruta que `npx playwright install` con PLAYWRIGHT_BROWSERS_PATH=0 (node_modules/.../.local-browsers).
+ * Sin esto, en runtime Playwright busca ~/.cache/ms-playwright aunque el build haya instalado en el proyecto.
+ */
+if (
+  process.env.PLAYWRIGHT_BROWSERS_PATH === undefined ||
+  process.env.PLAYWRIGHT_BROWSERS_PATH === ""
+) {
+  process.env.PLAYWRIGHT_BROWSERS_PATH = "0";
+}
+
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
@@ -225,11 +236,71 @@ function banescoChromiumLaunchOptions() {
 }
 
 /**
+ * Chromium instalado por `playwright install` con PLAYWRIGHT_BROWSERS_PATH=0 vive en
+ * `node_modules/playwright-core/.local-browsers/chromium-*`. En Render suele ser
+ * `.../src/node_modules/...` (un `..` desde `src/services`), no siempre la raíz del repo.
+ */
+function resolvePlaywrightEmbeddedChromiumExecutable() {
+  const localRel = ["playwright-core", ".local-browsers"];
+  const roots = [
+    path.join(__dirname, "..", "node_modules", ...localRel),
+    path.join(__dirname, "..", "..", "node_modules", ...localRel),
+    path.join(process.cwd(), "node_modules", ...localRel),
+  ];
+  const seen = new Set();
+  for (const root of roots) {
+    const key = path.resolve(root);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!fs.existsSync(root)) continue;
+    let dirs;
+    try {
+      dirs = fs.readdirSync(root);
+    } catch (_) {
+      continue;
+    }
+    const chromiumDirs = dirs.filter((d) => /^chromium-\d+/.test(d));
+    if (chromiumDirs.length === 0) continue;
+    chromiumDirs.sort(
+      (a, b) =>
+        parseInt(a.replace(/^chromium-/, ""), 10) -
+        parseInt(b.replace(/^chromium-/, ""), 10)
+    );
+    const dirName = chromiumDirs[chromiumDirs.length - 1];
+    const base = path.join(root, dirName);
+    let exe = null;
+    if (process.platform === "win32") {
+      exe = path.join(base, "chrome-win", "chrome.exe");
+    } else if (process.platform === "darwin") {
+      exe = path.join(
+        base,
+        "chrome-mac",
+        "Chromium.app",
+        "Contents",
+        "MacOS",
+        "Chromium"
+      );
+    } else {
+      exe = path.join(base, "chrome-linux64", "chrome");
+    }
+    if (exe && fs.existsSync(exe)) {
+      return exe;
+    }
+  }
+  return null;
+}
+
+/**
  * Lanza Chromium; si `BANESCO_PLAYWRIGHT_CHANNEL` apunta a Chrome/Edge pero no está instalado
  * (p. ej. Linux en Render sin `/opt/google/chrome/chrome`), reintenta sin canal → Chromium del paquete npm.
+ * Si existe binario en `.local-browsers`, se pasa `executablePath` para no depender de ~/.cache/ms-playwright.
  */
 async function launchBanescoBrowser() {
   const opts = banescoChromiumLaunchOptions();
+  const embedded = resolvePlaywrightEmbeddedChromiumExecutable();
+  if (embedded && !opts.channel) {
+    opts.executablePath = embedded;
+  }
   try {
     return await chromium.launch(opts);
   } catch (e) {
@@ -243,6 +314,9 @@ async function launchBanescoBrowser() {
         `usando Chromium embebido de Playwright. (${msg.slice(0, 200)})`
     );
     const { channel: _ch, ...rest } = opts;
+    if (embedded) {
+      rest.executablePath = embedded;
+    }
     return await chromium.launch(rest);
   }
 }

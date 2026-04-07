@@ -19,7 +19,14 @@ jobs:
           test -n "$RENDER_URL"
           test -n "$DATABASE_URL"
           test -n "$CRON_SECRET"
-          curl -fsS -X POST "${RENDER_URL}/api/currency/fetch" \
+          # Solo la raíz del servicio Node (p. ej. https://nombre.onrender.com). Sin path extra ni barra final.
+          BASE="${RENDER_URL//[[:space:]]/}"
+          BASE="${BASE%/}"
+          while [[ "$BASE" == */ ]]; do BASE="${BASE%/}"; done
+          echo "GET ${BASE}/health"
+          curl -fsS -o /dev/null -w "health HTTP %{http_code}\n" "${BASE}/health"
+          echo "POST ${BASE}/api/currency/fetch"
+          curl -fsS -X POST "${BASE}/api/currency/fetch" \
             -H "Authorization: Bearer ${CRON_SECRET}" \
             -H "Content-Type: application/json"
 

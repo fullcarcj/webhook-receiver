@@ -86,7 +86,7 @@ Sin OAuth en el job, los POST a la API de ML pueden fallar al renovar token.
 ### WMS (bins y stock)
 
 - Servicio: `src/services/wmsService.js`.
-- Rutas: `src/routes/wms.js` montadas en `server.js` bajo `/api/wms` (lecturas públicas de stock/picking/bin; ajustes y movimientos con `X-Admin-Secret`).
+- Rutas: `src/routes/wms.js` montadas en `server.js` bajo `/api/wms` (lecturas públicas de stock/picking/bin; ajustes y movimientos con `X-Admin-Secret`). Reservas por **orden ML** (tabla `ml_order_reservations`): `POST /api/wms/ml-order/reserve`, `…/commit`, `…/release` (solo admin; no sustituyen al webhook `orders_v2`).
 - SQL: `sql/wms-bins.sql` (jerarquía warehouse → aisle → shelf → bin, `bin_stock`, `stock_movements_audit`, vistas `v_stock_by_sku` y `v_picking_route`); parche de auditoría avanzada: `sql/wms-audit-v2.sql` (ENUM `movement_reason`, trigger INSERT/UPDATE/DELETE, `delta_*` generados, `last_counted_at`, `app.movement_notes` en sesión).
 - `bin_code`: con un solo almacén activo por empresa el código es corto (`A01-E1-N1`); con varios almacenes activos se antepone `warehouses.code` (`SM-A01-E1-N1`).
 
@@ -100,7 +100,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | OAuth ML | `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`; tokens por cuenta en `ml_accounts` |
 | DB | `DATABASE_URL` (obligatoria) |
 | Webhooks | `WEBHOOK_SAVE_DB`, `ML_WEBHOOK_FETCH_RESOURCE`, `ML_WEBHOOK_FETCH_VENTAS_DETALLE` |
-| WMS reservas ML | `ML_WMS_ORDER_RESERVATIONS_ENABLED=1` — tras GET `orders_v2` reserva/libera stock según estado (`src/services/reservationService.js`); requiere migración `sql/ml-reservations.sql` |
+| WMS reservas ML | `ML_WMS_ORDER_RESERVATIONS_ENABLED=1` — tras GET `orders_v2` reserva/libera stock según estado (`src/services/reservationService.js`); requiere migración `sql/ml-reservations.sql`. **API admin (opcional):** `POST /api/wms/ml-order/reserve|commit|release` con `X-Admin-Secret` — mismas funciones que el webhook (pruebas/soporte) |
 | Currency | `CRON_SECRET` (`Authorization: Bearer` en `POST /api/currency/fetch`), `ADMIN_SECRET` vía `X-Admin-Secret` en el mismo endpoint; `BCV_URL`, `BCV_FETCH_TIMEOUT_MS`, `BCV_TLS_INSECURE`; en GitHub Actions: secrets `RENDER_URL`, `CRON_SECRET`, `DATABASE_URL` (`daily-rates.yml`); `CURRENCY_COMPANY_IDS` opcional |
 | Preguntas IA | `ML_QUESTIONS_IA_AUTO_ENABLED`, ventana/horario en `ML_QUESTIONS_IA_AUTO_*` |
 | WhatsApp | `WASENDER_ENABLED`, `WASENDER_API_KEY`, `WASENDER_API_BASE_URL`, `ML_WHATSAPP_TIPO_F_ENABLED`, plantillas E/F en BD o env |

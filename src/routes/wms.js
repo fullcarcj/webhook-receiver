@@ -11,6 +11,12 @@ const {
   getBinByCode,
   createBin,
 } = require("../services/wmsService");
+/** Reservas por orden ML (`ml_order_reservations`); independiente de stock/reserve genérico arriba */
+const {
+  reserveForOrder,
+  commitReservation,
+  releaseReservation: releaseMlOrderReservation,
+} = require("../services/reservationService");
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -126,6 +132,71 @@ async function handleWmsApiRequest(req, res, url) {
         userId: body.user_id,
       });
       writeJson(res, 200, { ok: true, ...out });
+      return true;
+    }
+
+    /** Órdenes ML → tabla ml_order_reservations (misma lógica que el webhook orders_v2). Requiere X-Admin-Secret. */
+    if (req.method === "POST" && url.pathname === "/api/wms/ml-order/reserve") {
+      if (!ensureAdmin(req, res)) return true;
+      const body = await parseJsonBody(req);
+      const mlOrderId = Number(body.ml_order_id);
+      const items = Array.isArray(body.items) ? body.items : [];
+      const mlResourceUrl =
+        body.ml_resource_url != null ? String(body.ml_resource_url) : body.mlResourceUrl != null ? String(body.mlResourceUrl) : "";
+      const userId = body.user_id != null ? body.user_id : body.userId != null ? body.userId : null;
+      const r = await reserveForOrder({
+        mlOrderId,
+        mlResourceUrl,
+        items,
+        userId,
+      });
+      if (r.success) {
+        writeJson(res, 200, { ok: true, ...r });
+      } else if (r.code === "INSUFFICIENT_STOCK") {
+        writeJson(res, 409, { ok: false, ...r });
+      } else if (r.reason === "ALREADY_RESERVED") {
+        writeJson(res, 409, { ok: false, ...r });
+      } else if (r.reason === "BAD_ORDER_ID" || r.reason === "NO_ITEMS") {
+        writeJson(res, 400, { ok: false, ...r });
+      } else {
+        writeJson(res, 200, { ok: false, ...r });
+      }
+      return true;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/wms/ml-order/commit") {
+      if (!ensureAdmin(req, res)) return true;
+      const body = await parseJsonBody(req);
+      const mlOrderId = Number(body.ml_order_id != null ? body.ml_order_id : body.mlOrderId);
+      const userId = body.user_id != null ? body.user_id : body.userId != null ? body.userId : null;
+      const r = await commitReservation({ mlOrderId, userId });
+      if (r.success) {
+        writeJson(res, 200, { ok: true, ...r });
+      } else if (r.reason === "NO_ACTIVE_RESERVATION") {
+        writeJson(res, 404, { ok: false, ...r });
+      } else if (r.reason === "BAD_ORDER_ID") {
+        writeJson(res, 400, { ok: false, ...r });
+      } else {
+        writeJson(res, 200, { ok: false, ...r });
+      }
+      return true;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/wms/ml-order/release") {
+      if (!ensureAdmin(req, res)) return true;
+      const body = await parseJsonBody(req);
+      const mlOrderId = Number(body.ml_order_id != null ? body.ml_order_id : body.mlOrderId);
+      const userId = body.user_id != null ? body.user_id : body.userId != null ? body.userId : null;
+      const r = await releaseMlOrderReservation({ mlOrderId, userId });
+      if (r.success) {
+        writeJson(res, 200, { ok: true, ...r });
+      } else if (r.reason === "NO_ACTIVE_RESERVATION") {
+        writeJson(res, 404, { ok: false, ...r });
+      } else if (r.reason === "BAD_ORDER_ID") {
+        writeJson(res, 400, { ok: false, ...r });
+      } else {
+        writeJson(res, 200, { ok: false, ...r });
+      }
       return true;
     }
 

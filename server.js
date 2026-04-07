@@ -1549,7 +1549,7 @@ const server = http.createServer(async (req, res) => {
         filemaker_inventario_productos:
           "POST /filemaker/inventario-productos o POST /mensajes-inventario-productos (JSON producto + FILEMAKER_INVENTARIO_PRODUCTOS_SECRET) — upsert tabla productos; GET inventario sigue en /inventario-productos?k=ADMIN_SECRET",
         catalogo_publico_frontend:
-          "API pública /api/v1: GET /api/v1 (índice), GET /api/v1/health, GET /api/v1/catalog?search=&limit=&offset= — catálogo con cabecera X-API-KEY (=FRONTEND_API_KEY); CORS FRONTEND_CORS_ORIGINS; rate limit FRONTEND_RATE_LIMIT_*; solo id, sku, nombre, precio_venta, stock",
+          "API pública /api/v1: GET /api/v1 (índice), GET /api/v1/health, GET /api/v1/catalog?search=&limit=&offset= — catálogo con cabecera X-API-KEY (=FRONTEND_API_KEY); CORS FRONTEND_CORS_ORIGINS; rate limit FRONTEND_RATE_LIMIT_*; solo id, sku, nombre, precio_venta, stock · compat motor/válvulas: GET /api/v1/catalog/compat/makes|/models?make=|/search?make=&model=&year=&displacement_l=|/for-sku?sku=|/equivalences?sku= (misma X-API-KEY; requiere sql/catalog-motor-compatibility.sql)",
         envio_auto_postventa:
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:

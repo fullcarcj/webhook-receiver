@@ -7,6 +7,7 @@
 const crypto = require("crypto");
 const pkg = require("./package.json");
 const { listProductosCatalogPublic } = require("./db");
+const catalogMotorService = require("./src/services/catalogMotorService");
 
 function parseOrigins() {
   const raw = process.env.FRONTEND_CORS_ORIGINS;
@@ -175,6 +176,12 @@ async function handlePublicFrontendRequest(req, res, url) {
       endpoints: {
         health: "/api/v1/health",
         catalog: "/api/v1/catalog",
+        catalog_compat_makes: "/api/v1/catalog/compat/makes",
+        catalog_compat_models: "/api/v1/catalog/compat/models?make=Toyota",
+        catalog_compat_search:
+          "/api/v1/catalog/compat/search?make=Toyota&model=Corolla&year=2003&displacement_l=1.8",
+        catalog_compat_for_sku: "/api/v1/catalog/compat/for-sku?sku=SKU-001",
+        catalog_compat_equivalences: "/api/v1/catalog/compat/equivalences?sku=SKU-001&limit=10",
       },
     });
     return true;
@@ -192,6 +199,89 @@ async function handlePublicFrontendRequest(req, res, url) {
       public_api: "v1",
     });
     return true;
+  }
+
+  if (pathname.startsWith("/api/v1/catalog/compat")) {
+    if (req.method !== "GET") {
+      json(res, 405, { ok: false, error: "method_not_allowed" });
+      return true;
+    }
+
+    const ip = clientIp(req);
+    const rl = rateLimitAllow(ip, "catalog_compat");
+    if (!rl.ok) {
+      res.setHeader("Retry-After", String(rl.retryAfterSec));
+      json(res, 429, { ok: false, error: "rate_limited", retry_after_seconds: rl.retryAfterSec });
+      return true;
+    }
+
+    const auth = validatePublicAccess(req);
+    if (!auth.ok) {
+      json(res, auth.status, auth.json);
+      return true;
+    }
+
+    try {
+      if (pathname === "/api/v1/catalog/compat/makes") {
+        const items = await catalogMotorService.listVehicleMakes();
+        json(res, 200, { ok: true, items });
+        return true;
+      }
+      if (pathname === "/api/v1/catalog/compat/models") {
+        const make = url.searchParams.get("make") || "";
+        const items = await catalogMotorService.listVehicleModelsByMakeName(make);
+        json(res, 200, { ok: true, items });
+        return true;
+      }
+      if (pathname === "/api/v1/catalog/compat/search") {
+        const out = await catalogMotorService.searchCatalogCompatibility({
+          makeName: url.searchParams.get("make") || url.searchParams.get("make_name"),
+          modelName: url.searchParams.get("model") || url.searchParams.get("model_name"),
+          year: url.searchParams.get("year"),
+          displacementL: url.searchParams.get("displacement_l"),
+          limit: url.searchParams.get("limit"),
+          offset: url.searchParams.get("offset"),
+        });
+        json(res, 200, { ok: true, ...out });
+        return true;
+      }
+      if (pathname === "/api/v1/catalog/compat/for-sku") {
+        const sku = url.searchParams.get("sku") || "";
+        const items = await catalogMotorService.listCompatibilityForSku(sku);
+        json(res, 200, { ok: true, items });
+        return true;
+      }
+      if (pathname === "/api/v1/catalog/compat/equivalences") {
+        const sku = url.searchParams.get("sku") || "";
+        const items = await catalogMotorService.listValveEquivalences(sku, {
+          limit: url.searchParams.get("limit"),
+        });
+        json(res, 200, { ok: true, items });
+        return true;
+      }
+      json(res, 404, {
+        ok: false,
+        error: "not_found",
+        hint: "Rutas: /makes, /models?make=, /search?make=&model=&year=, /for-sku?sku=, /equivalences?sku=",
+      });
+      return true;
+    } catch (e) {
+      if (e && e.code === "BAD_REQUEST") {
+        json(res, 400, { ok: false, error: "bad_request", detail: e.message });
+        return true;
+      }
+      if (e && e.code === "CATALOG_MOTOR_SCHEMA_MISSING") {
+        json(res, 503, {
+          ok: false,
+          error: "catalog_motor_unavailable",
+          detail: "Ejecutar migración sql/catalog-motor-compatibility.sql",
+        });
+        return true;
+      }
+      console.error("[catalog compat]", e);
+      json(res, 500, { ok: false, error: "internal_error" });
+      return true;
+    }
   }
 
   if (pathname === "/api/v1/catalog") {

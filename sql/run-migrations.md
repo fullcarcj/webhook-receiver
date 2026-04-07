@@ -21,6 +21,9 @@ psql $DATABASE_URL -f sql/wms-audit-v2.sql
 
 # 6. Reservas de stock por órdenes ML (tabla ml_order_reservations)
 psql $DATABASE_URL -f sql/ml-reservations.sql
+
+# 7. Catálogo técnico — compatibilidad motores/válvulas (vehicle_makes, engines, valve_specs, vistas)
+psql $DATABASE_URL -f sql/catalog-motor-compatibility.sql
 ```
 
 ## Variables de entorno requeridas (ya deben existir)
@@ -56,4 +59,20 @@ SELECT column_name FROM information_schema.columns
 WHERE table_name = 'productos'
   AND column_name IN ('shipping_category_id','volume_cbm','landed_cost_usd');
 -- Esperado: 3 filas
+
+-- Tras el paso 7 (catálogo motor/válvulas):
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_name IN (
+    'vehicle_makes','vehicle_models','engines',
+    'motor_compatibility','valve_specs'
+  )
+ORDER BY table_name;
+-- Esperado: 5 filas
+
+SELECT viewname FROM pg_views
+WHERE schemaname = 'public'
+  AND viewname IN ('v_catalog_compatibility','v_valve_equivalences')
+ORDER BY viewname;
+-- Esperado: 2 filas
 ```

@@ -1,0 +1,7 @@
+LOGRO BANESCO EN RENDER
+========================
+Fecha: 2026-04-07 (UTC)
+Estado: ciclo monitor OK en Render — CSV procesado (insertados).
+
+Notas: Exportar tras ddlCuenta en el mismo iframe que el combo; headless forzado sin X11;
+Chromium vía node_modules/playwright-core/.local-browsers + executablePath.

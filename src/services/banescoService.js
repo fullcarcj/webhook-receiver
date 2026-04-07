@@ -216,8 +216,23 @@ function banescoChromiumLaunchOptions() {
   if (process.env.BANESCO_CHROMIUM_DISABLE_SITE_ISOLATION === "1") {
     args.push("--disable-features=IsolateOrigins,site-per-process");
   }
+  /** BANESCO_HEADLESS=0 abre ventana; en Linux sin X/Wayland (p. ej. Render) eso falla — forzar headless. */
+  const wantHeaded = process.env.BANESCO_HEADLESS === "0";
+  const onRender = Boolean(process.env.RENDER);
+  const hasDisplay =
+    Boolean(process.env.DISPLAY && String(process.env.DISPLAY).trim()) ||
+    Boolean(process.env.WAYLAND_DISPLAY && String(process.env.WAYLAND_DISPLAY).trim());
+  const linuxNoGui = process.platform === "linux" && !hasDisplay;
+  let headless = !wantHeaded;
+  if (wantHeaded && (onRender || linuxNoGui)) {
+    headless = true;
+    console.warn(
+      `[banesco] ${nowVET()} — Entorno sin servidor gráfico (RENDER o Linux sin DISPLAY). ` +
+        `Se ignora BANESCO_HEADLESS=0 y se usa headless.`
+    );
+  }
   const opts = {
-    headless: process.env.BANESCO_HEADLESS !== "0",
+    headless,
     args,
   };
   /**
@@ -1065,7 +1080,7 @@ async function doLogin() {
  * Flujo del portal: movimientos → ddlCuenta → pausa → clic «Exportar» → pausa → navegación a Exportar.aspx.
  * BANESCO_SKIP_MOVIMIENTOS_CUENTA=1 → ir directo a Exportar (solo si el banco no exige este paso).
  * BANESCO_CUENTA_SELECT_VALUE: value del <option> (ej. 1); si no va, se usa index 1 (saltar opción vacía).
- * Pausas: BANESCO_POST_CUENTA_SELECT_MS (default 1500), BANESCO_POST_EXPORTAR_BTN_MS (default 2000).
+ * Pausas: BANESCO_POST_CUENTA_SELECT_MS (default 1500), BANESCO_EXPORTAR_BTN_WAIT_MS (espera aparición del botón, default 25000), BANESCO_POST_EXPORTAR_BTN_MS (default 2000).
  * El botón «Exportar» en movimientos se resuelve solo con selectores internos (DefBtn, XPath, etc.).
  */
 async function navegarExportarSeleccionandoCuenta(page) {
@@ -1104,10 +1119,13 @@ async function navegarExportarSeleccionandoCuenta(page) {
 
   const sel = '#ctl00_cp_ddlCuenta, select[name="ctl00$cp$ddlCuenta"]';
   let loc = null;
+  /** Frame donde está ddlCuenta; Exportar suele estar en el mismo marco (no en page principal). */
+  let frameDdlCuenta = null;
   for (const frame of page.frames()) {
     const l = frame.locator(sel).first();
     if ((await l.count().catch(() => 0)) > 0) {
       loc = l;
+      frameDdlCuenta = frame;
       break;
     }
   }
@@ -1149,6 +1167,21 @@ async function navegarExportarSeleccionandoCuenta(page) {
     `[banesco] ${nowVET()} — Pausa ${pauseBeforeExportarBtnMs}ms antes del botón Exportar…`
   );
   await sleep(pauseBeforeExportarBtnMs);
+
+  const waitExportarMs = Number(process.env.BANESCO_EXPORTAR_BTN_WAIT_MS || 25000);
+  const waitCtx = frameDdlCuenta || page;
+  try {
+    await waitCtx
+      .locator(
+        '#content-right input[type="submit"][value="Exportar"], input[type="submit"][value="Exportar"]'
+      )
+      .first()
+      .waitFor({ state: "attached", timeout: waitExportarMs });
+  } catch (_) {
+    console.warn(
+      `[banesco] ${nowVET()} — Timeout esperando botón Exportar (${waitExportarMs}ms); se intenta clic igual.`
+    );
+  }
 
   /**
    * Clic en el submit «Exportar» del paso movimientos.
@@ -1354,10 +1387,17 @@ async function navegarExportarSeleccionandoCuenta(page) {
     return false;
   }
 
-  /** Marco principal primero: el panel #content-right suele estar ahí; si se recorre otro frame antes, el clic puede ser inútil. */
-  let clickedExportar = await tryClickExportarInContext(page);
+  /** Primero el mismo frame que ddlCuenta; luego principal; luego el resto de iframes. */
+  let clickedExportar = false;
+  if (frameDdlCuenta) {
+    clickedExportar = await tryClickExportarInContext(frameDdlCuenta);
+  }
+  if (!clickedExportar) {
+    clickedExportar = await tryClickExportarInContext(page);
+  }
   if (!clickedExportar) {
     for (const frame of page.frames()) {
+      if (frameDdlCuenta && frame === frameDdlCuenta) continue;
       if (frame === page.mainFrame()) continue;
       if (await tryClickExportarInContext(frame)) {
         clickedExportar = true;

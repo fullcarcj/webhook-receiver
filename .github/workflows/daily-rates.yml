@@ -2,7 +2,11 @@ name: Daily Rates Fetch
 
 on:
   schedule:
-    - cron: "30 8 * * 1-5"
+    - cron: '00 11 * * 1-5'
+  # 11:00 UTC = 07:00 AM VET (UTC-4)
+  # Antes corría a las 08:30 UTC = 04:30 AM VET — dentro de la ventana
+  # de caída del sistema (23:00→06:00 VET). Corregido para correr
+  # después de que el sistema vuelve a las 06:00 AM.
   workflow_dispatch:
 
 jobs:

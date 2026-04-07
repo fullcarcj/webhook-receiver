@@ -425,6 +425,20 @@ async function insertAuditLog(client, { rateId, action, fieldChanged, oldValue, 
 async function fetchAndSaveDailyRates(companyId = 1) {
   await ensureCurrencySchema();
   const today = new Date().toISOString().split("T")[0];
+
+  // Guard: si ya hay tasa válida del día, no volver a buscar.
+  // Cubre el caso de que el job corra dos veces (restart del
+  // servidor, retry del CI, o llamada manual del admin).
+  invalidateTodayRateCache();
+  const existing = await getTodayRate(companyId);
+  const rd = existing && existing.rate_date;
+  const rateDateStr =
+    rd instanceof Date ? rd.toISOString().split("T")[0] : rd != null ? String(rd).slice(0, 10) : null;
+  if (existing && existing.active_rate != null && rateDateStr === today) {
+    console.log("[currency] Tasa del día ya existe, omitiendo fetch.");
+    return { success: true, action: "ALREADY_EXISTS", skipped: true };
+  }
+
   const [bcvResult, binanceResult] = await Promise.allSettled([
     scrapeBCV().catch((err) => ({ rate: null, sourceUrl: bcvPrimaryUrl(), error: err.message })),
     fetchBinance().catch((err) => ({ rate: null, sourceUrl: BINANCE_P2P_URL, error: err.message })),

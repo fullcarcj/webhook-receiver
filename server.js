@@ -176,6 +176,8 @@ const { handleCurrencyApiRequest } = require("./src/routes/currency");
 const { handleShippingApiRequest } = require("./src/routes/shipping");
 const { handleWmsApiRequest } = require("./src/routes/wms");
 const { handleWalletApiRequest } = require("./src/routes/wallet");
+const { handleBankBanescoRequest } = require("./src/routes/bankBanesco");
+const { rejectDuringDowntime, isInDowntime, msUntilSystemUp } = require("./src/utils/sessionGuard");
 const {
   reserveForOrder,
   commitReservation,
@@ -1618,6 +1620,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/health") {
+    const down = isInDowntime();
+    const msLeft = msUntilSystemUp();
+    res.writeHead(down ? 503 : 200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(
+      JSON.stringify({
+        status: down ? "DOWNTIME" : "OK",
+        time_vet: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
+        retry_after_seconds: down ? Math.ceil(msLeft / 1000) : 0,
+      })
+    );
+    return;
+  }
+
+  if (req.method === "POST" && (url.pathname === "/api/currency/override" || url.pathname === "/api/currency/fetch")) {
+    if (rejectDuringDowntime(req, res)) return;
+  }
+
   if (await handleCurrencyApiRequest(req, res, url)) {
     return;
   }
@@ -1631,6 +1651,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleWalletApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleBankBanescoRequest(req, res, url)) {
     return;
   }
 

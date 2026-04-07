@@ -1,0 +1,48 @@
+# Blueprint Render — https://render.com/docs/blueprint-spec
+# Conectá el repo en Render → New → Blueprint → elegí esta rama y este archivo.
+#
+# Secretos (NO van en el repo): configurarlos en el dashboard del servicio o como
+# variables “sync from dashboard”: ADMIN_SECRET, CRON_SECRET, OAUTH_CLIENT_ID,
+# OAUTH_CLIENT_SECRET, FRONTEND_API_KEY, WASENDER_*, FILEMAKER_*, RENDER_URL (para GitHub Actions), etc.
+#
+# Si ya tenés PostgreSQL externo (Neon, otro Render, etc.):
+#   - Borrá la sección `databases:` de abajo.
+#   - Quitá la variable DATABASE_URL que usa `fromDatabase`.
+#   - Añadí DATABASE_URL manualmente en Environment del servicio web.
+#
+version: "1"
+
+services:
+  - type: web
+    name: webhook-receiver
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    # Agregar instalación de Chromium después del npm ci
+    buildCommand: npm ci && npx playwright install chromium --with-deps
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: webhook-receiver-db
+          property: connectionString
+      # ── Banesco Monitor ──────────────────────────────
+      # Valores reales: configurar en Render dashboard, no en este archivo
+      - key: BANESCO_USER
+        sync: false
+      - key: BANESCO_PASS
+        sync: false
+      - key: BANK_ACCOUNT_ID
+        value: "1"
+      - key: BANESCO_MONITOR_ENABLED
+        value: "1"
+
+databases:
+  - name: webhook-receiver-db
+    databaseName: webhook_receiver
+    user: webhook_user
+    plan: starter

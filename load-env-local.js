@@ -15,6 +15,7 @@
  * FRONTEND_RATE_LIMIT_WINDOW_MS: ventana en ms (default 60000). GET /api/v1/health no cuenta para el límite del catálogo.
  * Wasender webhooks: WASENDER_WEBHOOK_SECRET o WASENDER_X_WEBHOOK_SIGNATURE (= cabecera X-Webhook-Signature); ver wasender-webhook-signature.js.
  * Postgres remoto suele exigir TLS: la app activa ssl en el cliente salvo localhost o PGSSLMODE=disable.
+ * Banesco: estado de cuenta vía CSV desde el portal; BANESCO_STATEMENT_CSV_DIR carpeta para esos archivos. Ver src/config/banesco.js y GET /api/bank/banesco/status (X-Admin-Secret).
  */
 const fs = require("fs");
 const path = require("path");

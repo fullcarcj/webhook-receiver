@@ -1,11 +1,15 @@
 require("../../load-env-local");
 
 const crypto = require("crypto");
+const https = require("https");
+const { URL } = require("url");
 const { EventEmitter } = require("events");
 const { pool } = require("../../db-postgres");
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8_000;
+/** BCV devuelve HTML grande (~400KB); 8s suele ser poco desde cloud / redes lentas */
+const BCV_FETCH_TIMEOUT_MS_DEFAULT = 28_000;
 const FETCH_MAX_RETRIES = 3;
 const BINANCE_P2P_URL = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search";
 /** Página de intervención (misma que suele usarse en FileMaker); override: BCV_URL en env */
@@ -86,10 +90,15 @@ function median(values) {
 }
 
 async function fetchWithRetry(url, options = {}, attempt = 1) {
+  const timeoutMs =
+    typeof options.timeoutMs === "number" && options.timeoutMs > 0
+      ? options.timeoutMs
+      : FETCH_TIMEOUT_MS;
+  const { timeoutMs: _timeoutDrop, ...fetchOptions } = options;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
+    const res = await fetch(url, { ...fetchOptions, signal: controller.signal });
     clearTimeout(timer);
     if (res.status >= 400 && res.status < 500) {
       throw Object.assign(new Error(`HTTP ${res.status} - permanent error, no retry`), {
@@ -107,23 +116,81 @@ async function fetchWithRetry(url, options = {}, attempt = 1) {
   }
 }
 
+/**
+ * GET HTTPS sin undici/fetch (evita timeouts y TLS distintos en algunos entornos).
+ * BCV_TLS_INSECURE=1 → rejectUnauthorized: false (solo si la cadena del sitio falla en el servidor).
+ */
+function fetchBcvHtmlNative(urlString, timeoutMs, insecureTls) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try {
+      u = new URL(urlString);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    if (u.protocol !== "https:") {
+      reject(new Error("bcv_url_must_be_https"));
+      return;
+    }
+    const opts = {
+      hostname: u.hostname,
+      port: u.port || 443,
+      path: `${u.pathname}${u.search}`,
+      method: "GET",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+        "Accept-Language": "es-VE,es;q=0.9",
+        Accept: "text/html,application/xhtml+xml",
+      },
+      ...(insecureTls ? { rejectUnauthorized: false } : {}),
+    };
+    const req = https.request(opts, (res) => {
+      if (res.statusCode >= 400 && res.statusCode < 500) {
+        reject(Object.assign(new Error(`HTTP ${res.statusCode}`), { permanent: true }));
+        return;
+      }
+      if (res.statusCode >= 400) {
+        reject(new Error(`HTTP ${res.statusCode}`));
+        return;
+      }
+      let raw = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => {
+        raw += c;
+      });
+      res.on("end", () => resolve(raw));
+    });
+    req.on("error", reject);
+    const timer = setTimeout(() => {
+      req.destroy();
+      reject(new Error("bcv_fetch_timeout"));
+    }, timeoutMs);
+    req.on("close", () => clearTimeout(timer));
+    req.end();
+  });
+}
+
 function bcvPrimaryUrl() {
   const fromEnv = process.env.BCV_URL != null ? String(process.env.BCV_URL).trim() : "";
   return fromEnv || BCV_URL_DEFAULT;
 }
 
 function extractBcvRateFromHtml(html) {
+  const h = String(html || "").replace(/\u00a0/g, " ");
   const patterns = [
-    // Intervención cambiaria: #dolar es un div; la tasa está en un <strong> dentro del bloque
-    /<div[^>]*\bid="dolar"[^>]*>[\s\S]*?<strong>\s*([\d.,]+)\s*<\/strong>/i,
-    /<strong[^>]*id="dolar"[^>]*>([\d.,]+)<\/strong>/i,
+    // Bloque USD: columna centrado con el número (más específico que el primer <strong> genérico)
+    /<div[^>]*\bid=['"]dolar['"][^>]*>[\s\S]*?<div[^>]*class="[^"]*centrado[^"]*"[^>]*>\s*<strong[^>]*>\s*([\d.,]+)\s*<\/strong>/i,
+    /<div[^>]*\bid=['"]dolar['"][^>]*>[\s\S]*?<strong[^>]*>\s*([\d.,]+)\s*<\/strong>/i,
+    /<strong[^>]*id=['"]dolar['"][^>]*>([\d.,]+)<\/strong>/i,
     /id\s*=\s*["']dolar["'][^>]*>([\d.,]+)</i,
     /D[oó]lar\s+estadounidense[\s\S]{0,800}?<strong[^>]*>([\d.,]+)<\/strong>/i,
     /USD[\s\S]{0,600}?<strong[^>]*>([\d.,]+)<\/strong>/i,
     /D[oó]lar[\s\S]{0,600}?<strong[^>]*>([\d.,]+)<\/strong>/i,
   ];
   for (const pattern of patterns) {
-    const match = html.match(pattern);
+    const match = h.match(pattern);
     if (match && match[1]) {
       const value = parseVenezuelanNumber(match[1]);
       if (value) return value;
@@ -136,23 +203,30 @@ async function scrapeBCV() {
   const primary = bcvPrimaryUrl();
   const urls = [...new Set([primary, BCV_URL_FALLBACK])];
   let lastSource = primary;
+  const timeoutMs = Math.max(
+    10_000,
+    Number(process.env.BCV_FETCH_TIMEOUT_MS) || BCV_FETCH_TIMEOUT_MS_DEFAULT
+  );
+  const insecureTls = process.env.BCV_TLS_INSECURE === "1";
   for (const url of urls) {
     lastSource = url;
+    let html = "";
     try {
-      const res = await fetchWithRetry(url, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-          "Accept-Language": "es-VE,es;q=0.9",
-          Accept: "text/html,application/xhtml+xml",
-        },
-      });
-      const html = await res.text();
-      const rate = extractBcvRateFromHtml(html);
-      if (rate) return { rate, sourceUrl: url };
-    } catch {
-      /* siguiente URL */
+      html = await fetchBcvHtmlNative(url, timeoutMs, insecureTls);
+    } catch (e) {
+      console.warn("[bcv scrape] GET falló:", url, e && e.message ? e.message : e);
+      continue;
     }
+    if (!html || html.length < 800) {
+      console.warn("[bcv scrape] HTML corto o vacío:", url, "len=", html ? html.length : 0);
+      continue;
+    }
+    if (!/id=['"]dolar['"]/i.test(html)) {
+      console.warn("[bcv scrape] sin bloque #dolar en HTML (posible captcha/redirección):", url);
+    }
+    const rate = extractBcvRateFromHtml(html);
+    if (rate) return { rate, sourceUrl: url };
+    console.warn("[bcv scrape] no se pudo parsear tasa Bs/USD:", url, "html_len=", html.length);
   }
   return { rate: null, sourceUrl: lastSource };
 }

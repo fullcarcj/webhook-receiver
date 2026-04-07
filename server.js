@@ -175,6 +175,7 @@ const { handlePublicFrontendRequest } = require("./public-frontend-api");
 const { handleCurrencyApiRequest } = require("./src/routes/currency");
 const { handleShippingApiRequest } = require("./src/routes/shipping");
 const { handleWmsApiRequest } = require("./src/routes/wms");
+const { handleWalletApiRequest } = require("./src/routes/wallet");
 const {
   reserveForOrder,
   commitReservation,
@@ -1550,6 +1551,8 @@ const server = http.createServer(async (req, res) => {
           "POST /filemaker/inventario-productos o POST /mensajes-inventario-productos (JSON producto + FILEMAKER_INVENTARIO_PRODUCTOS_SECRET) — upsert tabla productos; GET inventario sigue en /inventario-productos?k=ADMIN_SECRET",
         catalogo_publico_frontend:
           "API pública /api/v1: GET /api/v1 (índice), GET /api/v1/health, GET /api/v1/catalog?search=&limit=&offset= — catálogo con cabecera X-API-KEY (=FRONTEND_API_KEY); CORS FRONTEND_CORS_ORIGINS; rate limit FRONTEND_RATE_LIMIT_*; solo id, sku, nombre, precio_venta, stock · compat motor/válvulas: GET /api/v1/catalog/compat/makes|/models?make=|/search?make=&model=&year=&displacement_l=|/for-sku?sku=|/equivalences?sku= (misma X-API-KEY; requiere sql/catalog-motor-compatibility.sql)",
+        api_wallet_admin:
+          "Customer wallet (X-Admin-Secret): GET /api/wallet/summary?customer_id=|ml_buyer_id=&currency= · GET /drift · GET /customers · GET /customer?id= · GET /transactions?customer_id= · POST /customers, /link-ml-buyer, /wallets/ensure, /transactions, /transactions/confirm, /transactions/cancel — npm run test-wallet; npm run test-wallet-http (servidor arriba; requiere sql/customer-wallet.sql)",
         envio_auto_postventa:
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:
@@ -1624,6 +1627,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleWmsApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleWalletApiRequest(req, res, url)) {
     return;
   }
 

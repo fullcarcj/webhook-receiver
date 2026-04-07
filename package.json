@@ -36,7 +36,9 @@
     "upload-firebase-webp": "node scripts/upload-firebase-webp.js",
     "sync-imagenes-cantidad-json": "node scripts/sync-imagenes-cantidad-from-json.js",
     "test-pack-webhook": "node scripts/test-pack-webhook-sim.js",
-    "fetch-rates": "node src/jobs/dailyRatesFetch.js"
+    "fetch-rates": "node src/jobs/dailyRatesFetch.js",
+    "test-wallet": "node scripts/test-wallet.js",
+    "test-wallet-http": "node scripts/test-wallet.js --http"
   },
   "engines": {
     "node": ">=18"

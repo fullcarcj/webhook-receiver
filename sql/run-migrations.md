@@ -24,6 +24,9 @@ psql $DATABASE_URL -f sql/ml-reservations.sql
 
 # 7. Catálogo técnico — compatibilidad motores/válvulas (vehicle_makes, engines, valve_specs, vistas)
 psql $DATABASE_URL -f sql/catalog-motor-compatibility.sql
+
+# 8. Customer wallet — CRM customers + billetera (wallet_transactions, vista v_customer_wallet_summary)
+psql $DATABASE_URL -f sql/customer-wallet.sql
 ```
 
 ## Variables de entorno requeridas (ya deben existir)
@@ -75,4 +78,32 @@ WHERE schemaname = 'public'
   AND viewname IN ('v_catalog_compatibility','v_valve_equivalences')
 ORDER BY viewname;
 -- Esperado: 2 filas
+
+-- Tras el paso 8 (customer wallet):
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_name IN (
+    'customers','customer_ml_buyers',
+    'customer_wallets','wallet_transactions'
+  )
+ORDER BY table_name;
+-- Esperado: 4 filas
+
+SELECT viewname FROM pg_views
+WHERE schemaname = 'public' AND viewname = 'v_customer_wallet_summary';
+-- Esperado: 1 fila
+```
+
+## Pruebas API wallet (Node)
+
+Con `DATABASE_URL` y migración aplicada:
+
+```bash
+npm run test-wallet
+```
+
+Con servidor en marcha, `ADMIN_SECRET` y opcional `BASE_URL` (por defecto `http://127.0.0.1:3001`):
+
+```bash
+npm run test-wallet-http
 ```

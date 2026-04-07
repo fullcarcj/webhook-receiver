@@ -4,6 +4,7 @@
   "description": "Receptor de webhooks (orders_v2 y similares)",
   "main": "server.js",
   "scripts": {
+    "postinstall": "npx playwright install chromium",
     "start": "node server.js",
     "dev": "node --watch server.js",
     "exchange-code": "node exchange-auth-code.js",

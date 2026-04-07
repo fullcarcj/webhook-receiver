@@ -10,6 +10,11 @@
 #   - Quitá la variable DATABASE_URL que usa `fromDatabase`.
 #   - Añadí DATABASE_URL manualmente en Environment del servicio web.
 #
+# Playwright (Banesco): PLAYWRIGHT_BROWSERS_PATH=0 debe existir en build y runtime.
+# Si el servicio se creó a mano (sin Blueprint), en Dashboard → Environment añadí:
+#   PLAYWRIGHT_BROWSERS_PATH = 0
+# Luego Manual Deploy (clear build cache opcional) para que npm ci + playwright install dejen Chromium en node_modules.
+#
 version: "1"
 
 services:
@@ -19,11 +24,13 @@ services:
     plan: starter
     region: oregon
     branch: main
-    # Agregar instalación de Chromium después del npm ci
+    # postinstall descarga Chromium; --with-deps instala libs del SO (Linux). PLAYWRIGHT_BROWSERS_PATH=0 guarda el binario dentro de node_modules para el slug de Render (no solo ~/.cache).
     buildCommand: npm ci && npx playwright install chromium --with-deps
     startCommand: npm start
     healthCheckPath: /health
     envVars:
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"
       - key: NODE_VERSION
         value: "20"
       - key: DATABASE_URL

@@ -1,5 +1,6 @@
 # Recordatorio mañana (Venezuela 7:30): retiro + feedback pendiente en ambos lados.
-# UTC 11:30 (America/Caracas UTC-4). Manual: workflow_dispatch.
+# Cron UTC = 11:30 → hora local America/Caracas 7:30 (UTC−4). Si cambiás ML_RETIRO_MORNING_SEND_AT, recalculá UTC.
+# Manual: workflow_dispatch.
 # Requiere secret DATABASE_URL. ML_RETIRO_ENABLED=1 en el job.
 # Sin ML_RETIRO_ORDER_STATUS: incluye órdenes ML status pending y confirmed (no cancelled/invalid).
 
@@ -41,4 +42,7 @@ jobs:
           ML_RETIRO_SLOT: "morning"
           ML_RETIRO_LOOKBACK_DAYS: "14"
           ML_RETIRO_TIMEZONE: "America/Caracas"
+          # Hora local de envío (referencia; debe coincidir con el cron UTC de arriba). Opcional: ML_RETIRO_ENFORCE_SEND_AT=1
+          ML_RETIRO_MORNING_SEND_AT: "07:30"
+          ML_RETIRO_ENFORCE_SEND_AT: "0"
         run: node ml-retiro-broadcast.js --all --slot=morning

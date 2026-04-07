@@ -1,4 +1,5 @@
-# Recordatorio tarde (Venezuela 14:20): despacho hasta 17:00, delivery, tasa BCV. UTC 18:20 (America/Caracas UTC-4).
+# Recordatorio tarde (Venezuela 14:20): despacho hasta 17:00, delivery, tasa BCV. Cron UTC 18:20 = 14:20 Caracas (UTC−4).
+# Si cambiás ML_RETIRO_AFTERNOON_SEND_AT, recalculá el cron UTC.
 # Requiere secret DATABASE_URL. ML_RETIRO_ENABLED=1 en el job.
 
 name: Retiro ML — tarde
@@ -39,4 +40,6 @@ jobs:
           ML_RETIRO_LOOKBACK_DAYS: "14"
           ML_RETIRO_ORDER_STATUS: "confirmed"
           ML_RETIRO_TIMEZONE: "America/Caracas"
+          ML_RETIRO_AFTERNOON_SEND_AT: "14:20"
+          ML_RETIRO_ENFORCE_SEND_AT: "0"
         run: node ml-retiro-broadcast.js --all --slot=afternoon

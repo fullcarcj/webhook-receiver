@@ -15,7 +15,12 @@
  * Además, regla global: no más de **ML_AUTO_MESSAGE_MAX** mensajes automáticos al mismo comprador el **mismo día**
  * (post-venta + calificación + retiro; ver `ml-auto-message-cap.js`).
  *
- * Horarios programados (Venezuela, America/Caracas): 7:30 y 14:20 — ver .github/workflows/retiro-broadcast-*.yml.
+ * Horarios en GitHub Actions: cron en UTC en .github/workflows/retiro-broadcast-*.yml (mañana ≈ 7:30 Caracas, tarde ≈ 14:20).
+ * Hora local esperada (referencia; igual que documentás el cron del recordatorio C en rating-request-daily.yml):
+ *   ML_RETIRO_MORNING_SEND_AT=07:30
+ *   ML_RETIRO_AFTERNOON_SEND_AT=14:20
+ * Si cambiás la hora, recalculá el cron UTC y actualizá esas variables. Opcional: ML_RETIRO_ENFORCE_SEND_AT=1 para no enviar
+ * si el reloj local (ML_RETIRO_TIMEZONE) no está cerca de esa hora (útil si el job corre cada X minutos).
  *
  * Env:
  *   ML_RETIRO_ENABLED=1
@@ -23,6 +28,9 @@
  *   ML_RETIRO_LOOKBACK_DAYS=14          — órdenes con date_created en ventana
  *   ML_RETIRO_ORDER_STATUS=confirmed  — opcional (filtra ml_orders.status)
  *   ML_RETIRO_TIMEZONE=America/Caracas — día civil para deduplicar
+ *   ML_RETIRO_MORNING_SEND_AT / ML_RETIRO_AFTERNOON_SEND_AT — HH:MM hora local de referencia (documentación; ver ENFORCE)
+ *   ML_RETIRO_ENFORCE_SEND_AT=0|1      — si 1, sale sin enviar si la hora local no cae en la ventana (±ML_RETIRO_SEND_AT_WINDOW_MINUTES)
+ *   ML_RETIRO_SEND_AT_WINDOW_MINUTES=8 — ventana alrededor de la hora esperada del slot
  *   ML_RETIRO_DELAY_MS=400
  *   ML_RETIRO_OPTION_ID=OTHER         — tipo B (OTHER o SEND_INVOICE_LINK; independiente de ML_POST_SALE_OPTION_ID)
  *
@@ -140,6 +148,80 @@ function defaultDelayMs() {
 function defaultTimezone() {
   const t = process.env.ML_RETIRO_TIMEZONE;
   return t != null && String(t).trim() !== "" ? String(t).trim() : "America/Caracas";
+}
+
+function parseHHMM(s) {
+  const t = String(s || "").trim();
+  const m = /^(\d{1,2}):(\d{2})$/.exec(t);
+  if (!m) return null;
+  const hh = parseInt(m[1], 10);
+  const mm = parseInt(m[2], 10);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return hh * 60 + mm;
+}
+
+function getLocalMinutesFromMidnight(tz) {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date());
+  const hp = parts.find((p) => p.type === "hour");
+  const mp = parts.find((p) => p.type === "minute");
+  if (!hp || !mp) return null;
+  const h = parseInt(hp.value, 10);
+  const m = parseInt(mp.value, 10);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
+}
+
+function circularDiffMinutes(a, b) {
+  const d = Math.abs(a - b);
+  return Math.min(d, 1440 - d);
+}
+
+/**
+ * Si ML_RETIRO_ENFORCE_SEND_AT=1 y hay HH:MM para el slot, devuelve true cuando NO debe enviarse (salir 0).
+ * @param {'morning'|'afternoon'} slot
+ * @param {string} tz
+ */
+function shouldSkipDueToSendAtEnforcement(slot, tz) {
+  if (process.env.ML_RETIRO_ENFORCE_SEND_AT !== "1") return false;
+  const raw =
+    slot === "morning"
+      ? process.env.ML_RETIRO_MORNING_SEND_AT
+      : slot === "afternoon"
+        ? process.env.ML_RETIRO_AFTERNOON_SEND_AT
+        : null;
+  if (raw == null || String(raw).trim() === "") return false;
+  const target = parseHHMM(raw);
+  if (target == null) {
+    console.warn("[retiro-broadcast] ML_RETIRO_*_SEND_AT inválido, se ignora ENFORCE:", raw);
+    return false;
+  }
+  const winRaw = Number(process.env.ML_RETIRO_SEND_AT_WINDOW_MINUTES);
+  const windowMin = Number.isFinite(winRaw) && winRaw >= 1 && winRaw <= 180 ? winRaw : 8;
+  const now = getLocalMinutesFromMidnight(tz);
+  if (now == null) {
+    console.warn("[retiro-broadcast] No se pudo leer hora local para tz=", tz);
+    return false;
+  }
+  const diff = circularDiffMinutes(now, target);
+  if (diff > windowMin) {
+    console.log(
+      "[retiro-broadcast] ENFORCE_SEND_AT: omitido (slot=%s). Hora local en %s no está cerca de %s (±%s min; ahora≈%s min desde medianoche, objetivo=%s).",
+      slot,
+      tz,
+      String(raw).trim(),
+      windowMin,
+      now,
+      target
+    );
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -459,6 +541,23 @@ async function main() {
     process.exit(1);
   }
 
+  const tzLog = defaultTimezone();
+  const sendAtRef =
+    slot === "morning" ? process.env.ML_RETIRO_MORNING_SEND_AT : process.env.ML_RETIRO_AFTERNOON_SEND_AT;
+  if (sendAtRef != null && String(sendAtRef).trim() !== "") {
+    console.log(
+      "[retiro-broadcast] Hora local de referencia (%s): ML_RETIRO_%s_SEND_AT=%s (ENFORCE=%s)",
+      tzLog,
+      slot === "morning" ? "MORNING" : "AFTERNOON",
+      String(sendAtRef).trim(),
+      process.env.ML_RETIRO_ENFORCE_SEND_AT === "1" ? "1" : "0"
+    );
+  }
+
+  if (shouldSkipDueToSendAtEnforcement(slot, tzLog)) {
+    process.exit(0);
+  }
+
   const results = [];
   for (const uid of targets) {
     const r = await runRetiroBroadcastForUser(uid, { orderStatus, slot });
@@ -492,6 +591,8 @@ module.exports = {
   RETIRO_MORNING_BODIES,
   RETIRO_AFTERNOON_BODIES,
   lookbackDays,
+  parseHHMM,
+  shouldSkipDueToSendAtEnforcement,
   sinceIso,
   pickRandomTemplate,
 };

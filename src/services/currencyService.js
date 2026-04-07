@@ -8,7 +8,9 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8_000;
 const FETCH_MAX_RETRIES = 3;
 const BINANCE_P2P_URL = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search";
-const BCV_URL = "https://www.bcv.org.ve/";
+/** Página de intervención (misma que suele usarse en FileMaker); override: BCV_URL en env */
+const BCV_URL_DEFAULT = "https://www.bcv.org.ve/politica-cambiaria/intervencion-cambiaria";
+const BCV_URL_FALLBACK = "https://www.bcv.org.ve/";
 const MAX_RATE_SANITY = 10_000_000;
 const MIN_RATE_SANITY = 0.000001;
 
@@ -105,29 +107,54 @@ async function fetchWithRetry(url, options = {}, attempt = 1) {
   }
 }
 
-async function scrapeBCV() {
-  const res = await fetchWithRetry(BCV_URL, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-      "Accept-Language": "es-VE,es;q=0.9",
-      Accept: "text/html,application/xhtml+xml",
-    },
-  });
-  const html = await res.text();
+function bcvPrimaryUrl() {
+  const fromEnv = process.env.BCV_URL != null ? String(process.env.BCV_URL).trim() : "";
+  return fromEnv || BCV_URL_DEFAULT;
+}
+
+function extractBcvRateFromHtml(html) {
   const patterns = [
+    // Intervención cambiaria: #dolar es un div; la tasa está en un <strong> dentro del bloque
+    /<div[^>]*\bid="dolar"[^>]*>[\s\S]*?<strong>\s*([\d.,]+)\s*<\/strong>/i,
     /<strong[^>]*id="dolar"[^>]*>([\d.,]+)<\/strong>/i,
-    /USD[\s\S]*?<strong>([\d.,]+)<\/strong>/i,
-    /D[oó]lar[\s\S]*?<strong>([\d.,]+)<\/strong>/i,
+    /id\s*=\s*["']dolar["'][^>]*>([\d.,]+)</i,
+    /D[oó]lar\s+estadounidense[\s\S]{0,800}?<strong[^>]*>([\d.,]+)<\/strong>/i,
+    /USD[\s\S]{0,600}?<strong[^>]*>([\d.,]+)<\/strong>/i,
+    /D[oó]lar[\s\S]{0,600}?<strong[^>]*>([\d.,]+)<\/strong>/i,
   ];
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (match && match[1]) {
       const value = parseVenezuelanNumber(match[1]);
-      if (value) return { rate: value, sourceUrl: BCV_URL };
+      if (value) return value;
     }
   }
-  return { rate: null, sourceUrl: BCV_URL };
+  return null;
+}
+
+async function scrapeBCV() {
+  const primary = bcvPrimaryUrl();
+  const urls = [...new Set([primary, BCV_URL_FALLBACK])];
+  let lastSource = primary;
+  for (const url of urls) {
+    lastSource = url;
+    try {
+      const res = await fetchWithRetry(url, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+          "Accept-Language": "es-VE,es;q=0.9",
+          Accept: "text/html,application/xhtml+xml",
+        },
+      });
+      const html = await res.text();
+      const rate = extractBcvRateFromHtml(html);
+      if (rate) return { rate, sourceUrl: url };
+    } catch {
+      /* siguiente URL */
+    }
+  }
+  return { rate: null, sourceUrl: lastSource };
 }
 
 async function fetchBinance() {
@@ -325,10 +352,10 @@ async function fetchAndSaveDailyRates(companyId = 1) {
   await ensureCurrencySchema();
   const today = new Date().toISOString().split("T")[0];
   const [bcvResult, binanceResult] = await Promise.allSettled([
-    scrapeBCV().catch((err) => ({ rate: null, sourceUrl: BCV_URL, error: err.message })),
+    scrapeBCV().catch((err) => ({ rate: null, sourceUrl: bcvPrimaryUrl(), error: err.message })),
     fetchBinance().catch((err) => ({ rate: null, sourceUrl: BINANCE_P2P_URL, error: err.message })),
   ]);
-  const bcv = bcvResult.value || { rate: null, sourceUrl: BCV_URL };
+  const bcv = bcvResult.value || { rate: null, sourceUrl: bcvPrimaryUrl() };
   const binance = binanceResult.value || { rate: null, sourceUrl: BINANCE_P2P_URL };
   const bothFailed = bcv.rate === null && binance.rate === null;
   const action = bothFailed ? "FETCH_FAILED" : "AUTO_FETCH";
@@ -548,6 +575,7 @@ module.exports = {
   parseVenezuelanNumber,
   invalidateTodayRateCache,
   fetchAndSaveDailyRates,
+  scrapeBCV,
   manualOverride,
   getTodayRate,
   getRateHistory,

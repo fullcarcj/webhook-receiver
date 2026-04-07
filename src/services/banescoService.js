@@ -14,6 +14,10 @@ const URL_LOGIN =
 const URL_EXPORTAR =
   process.env.BANESCO_EXPORT_URL ||
   "https://www.banesconline.com/Mantis/WebSite/ConsultaMovimientosCuenta/Exportar.aspx";
+/** Tras login: movimientos de cuenta → ddlCuenta → botón «Exportar» → Exportar.aspx. Override: BANESCO_MOVIMIENTOS_CUENTA_URL */
+const URL_MOVIMIENTOS_CUENTA =
+  process.env.BANESCO_MOVIMIENTOS_CUENTA_URL ||
+  "https://www.banesconline.com/Mantis/WebSite/consultamovimientoscuenta/movimientoscuenta.aspx";
 /** Botón «Aceptar» en Exportar.aspx (postback ASP.NET); login usa #bAceptar. Override: BANESCO_EXPORT_BTN_SELECTOR */
 const SEL_BTN_EXPORTAR_DESCARGA =
   '#ctl00_cp_btnOk, input[name="ctl00$cp$btnOk"], input.DefBtn[type="submit"][value="Aceptar"], ' +
@@ -961,6 +965,337 @@ async function doLogin() {
 }
 
 /**
+ * Flujo del portal: movimientos → ddlCuenta → pausa → clic «Exportar» → pausa → navegación a Exportar.aspx.
+ * BANESCO_SKIP_MOVIMIENTOS_CUENTA=1 → ir directo a Exportar (solo si el banco no exige este paso).
+ * BANESCO_CUENTA_SELECT_VALUE: value del <option> (ej. 1); si no va, se usa index 1 (saltar opción vacía).
+ * Pausas: BANESCO_POST_CUENTA_SELECT_MS (default 1500), BANESCO_POST_EXPORTAR_BTN_MS (default 2000).
+ * El botón «Exportar» en movimientos se resuelve solo con selectores internos (DefBtn, XPath, etc.).
+ */
+async function navegarExportarSeleccionandoCuenta(page) {
+  if (String(process.env.BANESCO_SKIP_MOVIMIENTOS_CUENTA || "").trim() === "1") {
+    console.log(
+      `[banesco] ${nowVET()} — BANESCO_SKIP_MOVIMIENTOS_CUENTA=1 → Exportar.aspx directo`
+    );
+    await page.goto(URL_EXPORTAR, {
+      waitUntil: "networkidle",
+      timeout: Number(process.env.BANESCO_MOVIMIENTOS_GOTO_TIMEOUT_MS || 45000),
+    });
+    if (page.url().toLowerCase().includes("login")) {
+      throw new Error("SESSION_EXPIRED");
+    }
+    return;
+  }
+
+  if (page.url().toLowerCase().includes("exportar.aspx")) {
+    console.log(`[banesco] ${nowVET()} — Ya en Exportar.aspx`);
+    return;
+  }
+
+  const gotoMs = Number(process.env.BANESCO_MOVIMIENTOS_GOTO_TIMEOUT_MS || 45000);
+  console.log(`[banesco] ${nowVET()} — Abriendo movimientos de cuenta → ${URL_MOVIMIENTOS_CUENTA}`);
+  await page.goto(URL_MOVIMIENTOS_CUENTA, {
+    waitUntil: "networkidle",
+    timeout: gotoMs,
+  });
+  if (page.url().toLowerCase().includes("login")) {
+    throw new Error("SESSION_EXPIRED");
+  }
+  if (page.url().toLowerCase().includes("exportar.aspx")) {
+    console.log(`[banesco] ${nowVET()} — Redirigido a Exportar.aspx sin abrir ddlCuenta`);
+    return;
+  }
+
+  const sel = '#ctl00_cp_ddlCuenta, select[name="ctl00$cp$ddlCuenta"]';
+  let loc = null;
+  for (const frame of page.frames()) {
+    const l = frame.locator(sel).first();
+    if ((await l.count().catch(() => 0)) > 0) {
+      loc = l;
+      break;
+    }
+  }
+  if (!loc) {
+    if (page.url().toLowerCase().includes("exportar.aspx")) {
+      return;
+    }
+    throw new Error(
+      "No se encontró ddlCuenta (#ctl00_cp_ddlCuenta). Probá BANESCO_SKIP_MOVIMIENTOS_CUENTA=1 o BANESCO_MOVIMIENTOS_CUENTA_URL."
+    );
+  }
+
+  const rawVal = process.env.BANESCO_CUENTA_SELECT_VALUE;
+  const valueToUse =
+    rawVal != null && String(rawVal).trim() !== "" ? String(rawVal).trim() : null;
+  const timeoutNav = Number(process.env.BANESCO_CUENTA_NAV_TIMEOUT_MS || 60000);
+
+  console.log(`[banesco] ${nowVET()} — Seleccionando cuenta en ddlCuenta…`);
+
+  try {
+    if (valueToUse) {
+      await loc.selectOption({ value: valueToUse }, { timeout: 15000, force: true });
+    } else {
+      await loc.selectOption({ index: 1 }, { timeout: 15000, force: true });
+    }
+  } catch (e1) {
+    console.warn(`[banesco] ${nowVET()} — ddlCuenta: (${e1.message || e1})`);
+    if (!valueToUse) {
+      await loc
+        .selectOption({ label: /Cuenta Corriente|C\/Intereses/i }, { timeout: 12000, force: true })
+        .catch(() => {});
+    }
+  }
+
+  await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+
+  const pauseBeforeExportarBtnMs = Number(process.env.BANESCO_POST_CUENTA_SELECT_MS || 1500);
+  console.log(
+    `[banesco] ${nowVET()} — Pausa ${pauseBeforeExportarBtnMs}ms antes del botón Exportar…`
+  );
+  await sleep(pauseBeforeExportarBtnMs);
+
+  /**
+   * Clic en el submit «Exportar» del paso movimientos.
+   * El botón real está en el panel #content-right (tablas ASP.NET); un selector global puede
+   * acertar otro control o un duplicado y el postback no navega a Exportar.aspx.
+   * DevTools: div#content-right > table.TDat > td.NoBr.Cent con «Consultar» + «Exportar» (sin id en Exportar).
+   * Fallback nth si cambia el árbol: SEL_EXPORTAR_MOVIMIENTOS_TABLA.
+   */
+  const SEL_EXPORTAR_MOVIMIENTOS_TABLA =
+    "#content-right > table:nth-child(14) > tbody > tr:nth-child(6) > td > input:nth-child(2)";
+
+  async function tryClickExportarInContext(ctx) {
+    /** Prioridad: TDat / misma celda que Consultar; luego #content-right genérico. */
+    const attempts = [
+      {
+        label: "css hermano de Consultar (btnMostrar)",
+        loc: () =>
+          ctx.locator(
+            '#content-right input#ctl00_cp_btnMostrar ~ input[value="Exportar"]'
+          ),
+      },
+      {
+        label: "css table.TDat td.NoBr.Cent Exportar",
+        loc: () =>
+          ctx.locator(
+            '#content-right table.TDat td.NoBr.Cent input[type="submit"][value="Exportar"]'
+          ),
+      },
+      {
+        label: "css table.TDat td Exportar",
+        loc: () =>
+          ctx.locator(
+            '#content-right table.TDat td input[type="submit"][value="Exportar"]'
+          ),
+      },
+      {
+        label: "xpath TDat celda Cent Exportar",
+        loc: () =>
+          ctx.locator(
+            "xpath=//div[@id='content-right']//table[contains(@class,'TDat')]//td[contains(@class,'Cent')]//input[@type='submit' and @value='Exportar']"
+          ),
+      },
+      {
+        label: "css #content-right DefBtn+submit+Exportar",
+        loc: () =>
+          ctx.locator('#content-right input.DefBtn[type="submit"][value="Exportar"]'),
+      },
+      {
+        label: "css #content-right submit Exportar",
+        loc: () =>
+          ctx.locator('#content-right input[type="submit"][value="Exportar"]'),
+      },
+      {
+        label: "css #content-right tabla nth→Exportar",
+        loc: () => ctx.locator(SEL_EXPORTAR_MOVIMIENTOS_TABLA),
+      },
+      {
+        label: "css DefBtn+submit+Exportar (global)",
+        loc: () => ctx.locator('input.DefBtn[type="submit"][value="Exportar"]'),
+      },
+      {
+        label: "css DefBtn+Exportar (global)",
+        loc: () => ctx.locator('input.DefBtn[value="Exportar"]'),
+      },
+      {
+        label: "xpath submit DefBtn exacto",
+        loc: () =>
+          ctx.locator(
+            "xpath=//input[@type='submit' and @value='Exportar' and @class='DefBtn']"
+          ),
+      },
+      {
+        label: "xpath name ctl26",
+        loc: () =>
+          ctx.locator(
+            "xpath=//input[@type='submit' and @name='ctl00$cp$ctl26' and @value='Exportar']"
+          ),
+      },
+      { label: "getByRole(button,Exportar)", loc: () => ctx.getByRole("button", { name: "Exportar" }) },
+      {
+        label: "xpath DefBtn contains class",
+        loc: () =>
+          ctx.locator(
+            "xpath=//input[contains(@class,'DefBtn') and @type='submit' and @value='Exportar']"
+          ),
+      },
+      {
+        label: "xpath submit Exportar",
+        loc: () => ctx.locator("xpath=//input[@type='submit' and @value='Exportar']"),
+      },
+      {
+        label: "css submit Exportar",
+        loc: () => ctx.locator('input[type="submit"][value="Exportar"]'),
+      },
+    ];
+
+    try {
+      const didFirst = await ctx.evaluate((selTabla) => {
+        /** Solo clic en el DOM (eventos + HTMLElement.click); sin WebForm_DoPostBack/__doPostBack. */
+        function fireRealClick(el) {
+          if (!el) return false;
+          try {
+            el.dispatchEvent(
+              new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window })
+            );
+            el.dispatchEvent(
+              new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window })
+            );
+            el.dispatchEvent(
+              new MouseEvent("click", { bubbles: true, cancelable: true, view: window })
+            );
+          } catch (_) {
+            /* ignore */
+          }
+          if (typeof el.click === "function") el.click();
+          return true;
+        }
+        function findExportarInput() {
+          const q = [
+            () =>
+              document.querySelector(
+                '#content-right input#ctl00_cp_btnMostrar ~ input[value="Exportar"]'
+              ),
+            () =>
+              document.querySelector(
+                '#content-right table.TDat td.NoBr.Cent input[type="submit"][value="Exportar"]'
+              ),
+            () =>
+              document.querySelector(
+                '#content-right table.TDat td[class*="NoBr"][class*="Cent"] input[type="submit"][value="Exportar"]'
+              ),
+            () =>
+              document.querySelector(
+                '#content-right table.TDat td input[type="submit"][value="Exportar"]'
+              ),
+            () =>
+              document.evaluate(
+                "//div[@id='content-right']//table[contains(@class,'TDat')]//td[contains(@class,'Cent')]//input[@type='submit' and @value='Exportar']",
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+              ).singleNodeValue,
+            () => (selTabla ? document.querySelector(selTabla) : null),
+            () =>
+              document.querySelector(
+                '#content-right input.DefBtn[type="submit"][value="Exportar"]'
+              ),
+            () =>
+              document.querySelector('#content-right input[type="submit"][value="Exportar"]'),
+            () =>
+              document.querySelector('input.DefBtn[type="submit"][value="Exportar"]'),
+            () => document.querySelector('input[type="submit"][value="Exportar"]'),
+          ];
+          for (const fn of q) {
+            try {
+              const n = fn();
+              if (n) return n;
+            } catch (_) {
+              /* ignore */
+            }
+          }
+          return null;
+        }
+        const el = findExportarInput();
+        if (!el) return false;
+        fireRealClick(el);
+        return "dom-click";
+      }, SEL_EXPORTAR_MOVIMIENTOS_TABLA);
+      if (didFirst) {
+        console.log(
+          `[banesco] ${nowVET()} — Clic Exportar (evaluate DOM primero: ${didFirst})`
+        );
+        return true;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+
+    for (const { label, loc } of attempts) {
+      const btn = loc().first();
+      const n = await btn.count().catch(() => 0);
+      if (n === 0) continue;
+      try {
+        await btn.scrollIntoViewIfNeeded({ timeout: 8000 }).catch(() => {});
+        await btn.click({ timeout: 18000, force: true });
+        console.log(`[banesco] ${nowVET()} — Clic Exportar (${label})`);
+        return true;
+      } catch (e1) {
+        try {
+          await btn.evaluate((el) => {
+            if (el && typeof el.click === "function") el.click();
+          });
+          console.log(`[banesco] ${nowVET()} — Clic Exportar via evaluate (${label})`);
+          return true;
+        } catch (e2) {
+          console.warn(
+            `[banesco] ${nowVET()} — Exportar falló (${label}): ${e1.message || e1}`
+          );
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Marco principal primero: el panel #content-right suele estar ahí; si se recorre otro frame antes, el clic puede ser inútil. */
+  let clickedExportar = await tryClickExportarInContext(page);
+  if (!clickedExportar) {
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame()) continue;
+      if (await tryClickExportarInContext(frame)) {
+        clickedExportar = true;
+        break;
+      }
+    }
+  }
+  if (!clickedExportar) {
+    throw new Error(
+      "No se encontró o no se pudo hacer clic en el botón Exportar tras ddlCuenta."
+    );
+  }
+
+  const pauseAfterExportarMs = Number(process.env.BANESCO_POST_EXPORTAR_BTN_MS || 2000);
+  console.log(
+    `[banesco] ${nowVET()} — Esperando ${pauseAfterExportarMs}ms por redirección a Exportar.aspx…`
+  );
+  await sleep(pauseAfterExportarMs);
+
+  await page.waitForURL(/Exportar\.aspx/i, { timeout: timeoutNav });
+  await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
+
+  if (page.url().toLowerCase().includes("login")) {
+    throw new Error("SESSION_EXPIRED");
+  }
+  if (!page.url().toLowerCase().includes("exportar.aspx")) {
+    console.warn(
+      `[banesco] ${nowVET()} — URL tras Exportar no es Exportar.aspx: ${page.url()} — se intenta continuar`
+    );
+  } else {
+    console.log(`[banesco] ${nowVET()} — En Exportar.aspx ✓`);
+  }
+}
+
+/**
  * Descarga del TXT: _configurarFormulario (mismos clics que el flujo acordado: iframe + radios +
  * delimitador |) + Promise.all(waitForEvent("download"), clic en Aceptar visible) y stream en memoria (latin1).
  */
@@ -986,10 +1321,7 @@ async function downloadTxt(cookies) {
   const page = await context.newPage();
 
   try {
-    await page.goto(URL_EXPORTAR, {
-      waitUntil: "networkidle",
-      timeout: 30000,
-    });
+    await navegarExportarSeleccionandoCuenta(page);
 
     if (page.url().toLowerCase().includes("login")) {
       throw new Error("SESSION_EXPIRED");
@@ -1027,10 +1359,7 @@ async function downloadTxt(cookies) {
         console.log(
           `[banesco] ${nowVET()} — Re-abriendo Exportar y re-aplicando parámetros (misma selección; sin segunda descarga)…`
         );
-        await page.goto(URL_EXPORTAR, {
-          waitUntil: "networkidle",
-          timeout: 30000,
-        });
+        await navegarExportarSeleccionandoCuenta(page);
         if (page.url().toLowerCase().includes("login")) {
           console.warn(
             `[banesco] ${nowVET()} — Post-descarga: sesión expirada al re-armar UI (el archivo ya se obtuvo).`

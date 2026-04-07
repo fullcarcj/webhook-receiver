@@ -72,8 +72,31 @@ async function handleWmsApiRequest(req, res, url) {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
-      const data = await getPickingList(skus);
-      writeJson(res, 200, { ok: true, ...data });
+      if (skus.length === 0) {
+        writeJson(res, 400, {
+          ok: false,
+          error: "Se requiere al menos un SKU",
+          example: "?skus=SKU-001,SKU-002",
+        });
+        return true;
+      }
+      const orderParam = url.searchParams.get("order");
+      let orderOpts = {};
+      if (orderParam != null && String(orderParam).trim() !== "") {
+        const n = Number(orderParam);
+        if (Number.isFinite(n) && n > 0) orderOpts = { orderId: n };
+      }
+      try {
+        const data = await getPickingList(skus, orderOpts);
+        writeJson(res, 200, { ok: true, ...data });
+      } catch (e) {
+        const msg = e && e.message ? String(e.message) : "error";
+        if (msg.includes("skus debe ser")) {
+          writeJson(res, 400, { ok: false, error: msg });
+        } else {
+          throw e;
+        }
+      }
       return true;
     }
 

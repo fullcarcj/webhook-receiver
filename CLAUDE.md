@@ -86,7 +86,7 @@ Sin OAuth en el job, los POST a la API de ML pueden fallar al renovar token.
 ### WMS (bins y stock)
 
 - Servicio: `src/services/wmsService.js`.
-- Rutas: `src/routes/wms.js` montadas en `server.js` bajo `/api/wms` (lecturas públicas de stock/picking/bin; ajustes y movimientos con `X-Admin-Secret`). Reservas por **orden ML** (tabla `ml_order_reservations`): `POST /api/wms/ml-order/reserve`, `…/commit`, `…/release` (solo admin; no sustituyen al webhook `orders_v2`).
+- Rutas: `src/routes/wms.js` montadas en `server.js` bajo `/api/wms` (lecturas públicas de stock/picking/bin; ajustes y movimientos con `X-Admin-Secret`). Reservas por **orden ML** (tabla `ml_order_reservations`): `POST /api/wms/ml-order/reserve`, `…/commit`, `…/release` (solo admin; no sustituyen al webhook `orders_v2`). **Picking:** `GET /api/wms/picking-list?skus=SKU-1,SKU-2` (opcional `order=`), hasta 200 SKUs por request, respuesta `warehouses` + `missing_stock` (sin error HTTP si falta stock).
 - SQL: `sql/wms-bins.sql` (jerarquía warehouse → aisle → shelf → bin, `bin_stock`, `stock_movements_audit`, vistas `v_stock_by_sku` y `v_picking_route`); parche de auditoría avanzada: `sql/wms-audit-v2.sql` (ENUM `movement_reason`, trigger INSERT/UPDATE/DELETE, `delta_*` generados, `last_counted_at`, `app.movement_notes` en sesión).
 - `bin_code`: con un solo almacén activo por empresa el código es corto (`A01-E1-N1`); con varios almacenes activos se antepone `warehouses.code` (`SM-A01-E1-N1`).
 

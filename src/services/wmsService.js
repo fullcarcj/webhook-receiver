@@ -200,28 +200,88 @@ async function getStockBySku(sku) {
   return rows[0] || null;
 }
 
-async function getPickingList(skus) {
+const PICKING_LIST_MAX_SKUS = 200;
+
+/**
+ * Rutas de picking desde `v_picking_route` (orden serpentín: warehouse_id, pick_sort_order).
+ * Enriquece columnas no incluidas en la vista vía JOIN (sin duplicar la lógica de la vista en SQL).
+ * @param {string[]} skus
+ * @param {{ orderId?: number|string|null }} [options]
+ */
+async function getPickingList(skus, options = {}) {
   if (!Array.isArray(skus) || skus.length === 0) {
-    return { grouped: {}, rows: [] };
+    throw new Error("skus debe ser un array no vacío");
   }
-  const clean = skus.map((s) => String(s).trim()).filter(Boolean);
-  if (clean.length === 0) return { grouped: {}, rows: [] };
+  const clean = [...new Set(skus.map((s) => String(s).trim()).filter(Boolean))];
+  if (clean.length === 0) {
+    throw new Error("skus debe ser un array no vacío");
+  }
+
+  const inputCount = clean.length;
+  const safeSkus = clean.slice(0, PICKING_LIST_MAX_SKUS);
+  const warning =
+    inputCount > PICKING_LIST_MAX_SKUS
+      ? `Se procesaron ${PICKING_LIST_MAX_SKUS} de ${inputCount} SKUs solicitados`
+      : undefined;
 
   const { rows } = await pool.query(
-    `SELECT *
-     FROM v_picking_route
-     WHERE producto_sku = ANY($1::text[])
-     ORDER BY warehouse_id, pick_sort_order, bin_code`,
-    [clean]
+    `SELECT
+       vr.producto_sku,
+       p.descripcion,
+       bs.qty_available,
+       bs.qty_reserved,
+       vr.bin_code,
+       wb.level,
+       ws.shelf_code,
+       ws.shelf_number,
+       wa.aisle_code,
+       wa.aisle_number,
+       vr.warehouse_code,
+       vr.warehouse_id,
+       vr.pick_sort_order
+     FROM v_picking_route vr
+     JOIN bin_stock bs ON bs.bin_id = vr.bin_id AND bs.producto_sku = vr.producto_sku
+     JOIN productos p ON p.sku = vr.producto_sku
+     JOIN warehouse_bins wb ON wb.id = vr.bin_id
+     JOIN warehouse_shelves ws ON ws.id = wb.shelf_id
+     JOIN warehouse_aisles wa ON wa.id = ws.aisle_id
+     WHERE vr.producto_sku = ANY($1::text[])
+     ORDER BY vr.warehouse_id, vr.pick_sort_order`,
+    [safeSkus]
   );
 
-  const grouped = {};
-  for (const r of rows) {
-    const code = r.warehouse_code || "_";
-    if (!grouped[code]) grouped[code] = [];
-    grouped[code].push(r);
+  const foundSkus = new Set(rows.map((r) => r.producto_sku));
+  const missing = safeSkus.filter((s) => !foundSkus.has(s));
+
+  const warehouses = {};
+  for (const row of rows) {
+    const wh = row.warehouse_code != null && String(row.warehouse_code).trim() !== "" ? String(row.warehouse_code) : "_";
+    if (!warehouses[wh]) warehouses[wh] = [];
+    warehouses[wh].push({
+      sku: row.producto_sku,
+      descripcion: row.descripcion,
+      bin_code: row.bin_code,
+      aisle: row.aisle_code,
+      shelf: row.shelf_code,
+      level: row.level != null ? Number(row.level) : null,
+      qty_available: Number(row.qty_available),
+      qty_reserved: Number(row.qty_reserved),
+      pick_sort_order: Number(row.pick_sort_order),
+    });
   }
-  return { grouped, rows };
+
+  const out = {
+    warehouses,
+    total_locations: rows.length,
+    missing_stock: missing,
+  };
+  if (warning) out.warning = warning;
+  const oid = options.orderId;
+  if (oid != null && String(oid).trim() !== "") {
+    const n = Number(oid);
+    if (Number.isFinite(n) && n > 0) out.order = n;
+  }
+  return out;
 }
 
 async function getMovementHistory({ sku, binId, fromDate, toDate, page, pageSize }) {

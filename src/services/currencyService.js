@@ -342,8 +342,8 @@ async function fetchAndSaveDailyRates(companyId = 1) {
           bcv_fetched_at, bcv_source_url, binance_fetched_at, binance_source_url)
        VALUES ($1,$2,$3,$4,
          CASE
-           WHEN $3 IS NOT NULL THEN 'BCV'::rate_type
-           WHEN $4 IS NOT NULL THEN 'BINANCE'::rate_type
+           WHEN ($3::numeric) IS NOT NULL THEN 'BCV'::rate_type
+           WHEN ($4::numeric) IS NOT NULL THEN 'BINANCE'::rate_type
            ELSE 'BCV'::rate_type
          END,
          $5,$6,$7,$8)
@@ -361,12 +361,12 @@ async function fetchAndSaveDailyRates(companyId = 1) {
       [
         Number(companyId) || 1,
         today,
-        bcv.rate,
-        binance.rate,
-        bcv.rate ? new Date() : null,
-        bcv.sourceUrl,
-        binance.rate ? new Date() : null,
-        binance.sourceUrl,
+        bcv.rate ?? null,
+        binance.rate ?? null,
+        bcv.rate != null ? new Date() : null,
+        bcv.sourceUrl ?? null,
+        binance.rate != null ? new Date() : null,
+        binance.sourceUrl ?? null,
       ]
     );
     const rateId = rows[0] ? rows[0].id : null;

@@ -16,6 +16,18 @@
  * Wasender webhooks: WASENDER_WEBHOOK_SECRET o WASENDER_X_WEBHOOK_SIGNATURE (= cabecera X-Webhook-Signature); ver wasender-webhook-signature.js.
  * Postgres remoto suele exigir TLS: la app activa ssl en el cliente salvo localhost o PGSSLMODE=disable.
  * Banesco: estado de cuenta vía CSV desde el portal; BANESCO_STATEMENT_CSV_DIR carpeta para esos archivos. Ver src/config/banesco.js y GET /api/bank/banesco/status (X-Admin-Secret).
+ * Monitor automático: BANESCO_MONITOR_ENABLED, BANESCO_MONITOR_INTERVAL_SEC (segundos entre descargas, default 60, mín. 15).
+ * Ver ventana del navegador (login + Exportar): BANESCO_HEADLESS=0; por defecto headless.
+ * Tras descargar el CSV, re-mostrar el formulario con la misma selección (iframe suele vaciarse al Aceptar): por defecto activo; BANESCO_EXPORT_RESTORE_UI_AFTER_DOWNLOAD=0 lo desactiva. Pausa BANESCO_EXPORT_RESTORE_UI_PAUSE_MS (default 1500).
+ * CSV movimientos 6 columnas: si Banesco exporta Crédito|Débito (col.4–5) en vez de Débito|Crédito, BANESCO_CSV_SIXCOL_CREDITO_FIRST=1 o dejar que banescoService elija por heurística (solo un importe en col.4 o 5).
+ * Playwright login: BANESCO_BOTON_ACEPTAR_PASO1_SELECTOR y BANESCO_BOTON_ACEPTAR_PASO2_SELECTOR (CSS) si el clic en Aceptar falla; BANESCO_STEP_SCREENSHOTS / BANESCO_SCREENSHOT_DIR.
+ * Exportar movimientos: BANESCO_DOWNLOAD_EVENT_TIMEOUT_MS (ms, default 10000) si waitForEvent download hace timeout.
+ * Capturas post-login (Exportar.aspx): BANESCO_EXPORT_STEP_SCREENSHOTS=1 y opcional BANESCO_EXPORT_SCREENSHOT_DIR (default ./banesco-export-debug).
+ * Guardar en disco cada descarga exitosa (mismo bytes que el portal): BANESCO_SAVE_DOWNLOAD_DIR=ruta/carpeta → escribe banesco-last-download.txt (sobrescribe).
+ * Playwright/Chromium carpeta de descargas: BANESCO_PLAYWRIGHT_DOWNLOADS_DIR o BANESCO_DOWNLOADS_DIR; si no, BANESCO_SAVE_DOWNLOAD_DIR o data/banesco-downloads. Tras abrir la página se envía CDP Browser.setDownloadBehavior (desactivar con BANESCO_SKIP_CDP_DOWNLOAD=1).
+ * Sin canal, Playwright usa Chromium del paquete (ventana "Chrome for Testing"). Chrome/Edge del sistema: BANESCO_PLAYWRIGHT_CHANNEL=chrome o =msedge (también BANESCO_USE_SYSTEM_CHROME=chrome).
+ * Headless / diálogos: BANESCO_CHROMIUM_DISABLE_SITE_ISOLATION=1 añade --disable-features=IsolateOrigins,site-per-process (solo si hace falta; opt-in).
+ * Botón descarga en Exportar: por defecto #ctl00_cp_btnOk; override con BANESCO_EXPORT_BTN_SELECTOR (CSS).
  */
 const fs = require("fs");
 const path = require("path");

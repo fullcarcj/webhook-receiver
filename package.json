@@ -38,12 +38,14 @@
     "test-pack-webhook": "node scripts/test-pack-webhook-sim.js",
     "fetch-rates": "node src/jobs/dailyRatesFetch.js",
     "test-wallet": "node scripts/test-wallet.js",
-    "test-wallet-http": "node scripts/test-wallet.js --http"
+    "test-wallet-http": "node scripts/test-wallet.js --http",
+    "test-banesco": "node scripts/test-banesco-cycle.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "playwright": "^1.44.0",
     "better-sqlite3": "^11.7.0",
     "firebase-admin": "^13.0.2",
     "p-limit": "^6.2.0",

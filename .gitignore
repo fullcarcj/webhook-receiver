@@ -3,6 +3,8 @@ oauth-env.json
 firebase-key.json
 ml-token.json
 data/
+banesco-debug/
+banesco-export-debug/
 log.txt
 wasender-webhook.log
 node_modules/

@@ -177,6 +177,7 @@ const { handleShippingApiRequest } = require("./src/routes/shipping");
 const { handleWmsApiRequest } = require("./src/routes/wms");
 const { handleWalletApiRequest } = require("./src/routes/wallet");
 const { handleBankBanescoRequest } = require("./src/routes/bankBanesco");
+const { startBanescoMonitor } = require("./src/jobs/banescoMonitor");
 const { rejectDuringDowntime, isInDowntime, msUntilSystemUp } = require("./src/utils/sessionGuard");
 const {
   reserveForOrder,
@@ -5855,13 +5856,14 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Estado IA prueba (modo/hora): http://localhost:${PORT}/preguntas-ia-auto-status?k=TU_ADMIN_SECRET`);
     console.log(`Reintentar IA sobre pending (JSON): http://localhost:${PORT}/preguntas-ia-auto-retry?k=TU_ADMIN_SECRET`);
     console.log(`Publicaciones ML (listings por cuenta): http://localhost:${PORT}/publicaciones-ml?k=TU_ADMIN_SECRET`);
+    console.log(`Banesco (conexión / monitor): http://localhost:${PORT}/banesco?k=TU_ADMIN_SECRET`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
     console.log(`Órdenes ML (sync-orders): http://localhost:${PORT}/ordenes-ml?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes pack órdenes (BD): http://localhost:${PORT}/mensajes-pack-orden?k=TU_ADMIN_SECRET`);
     console.log(`Detalle ventas web (.ve): http://localhost:${PORT}/ventas-detalle-web?k=TU_ADMIN_SECRET`);
   } else {
     console.warn(
-      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /wasender-webhooks /fetches /buyers /inventario-productos /mensajes-postventa /mensajes-tipo-e-whatsapp /mensajes-tipo-f-whatsapp /envios-whatsapp-tipo-e /envios-postventa /envios-tipos-abc /mensajes-tipo-g /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /ventas-detalle-web responderán 503. " +
+      "[config] ADMIN_SECRET vacío o no cargado: /cuentas /hooks /wasender-webhooks /fetches /buyers /inventario-productos /mensajes-postventa /mensajes-tipo-e-whatsapp /mensajes-tipo-f-whatsapp /envios-whatsapp-tipo-e /envios-postventa /envios-tipos-abc /mensajes-tipo-g /mensajes-pack-orden /recordatorios-calificacion /preguntas-ml /preguntas-ml-refresh /preguntas-ml-sync-pending /preguntas-ia-auto-log /preguntas-ia-auto-status /preguntas-ia-auto-retry /publicaciones-ml /banesco /ventas-detalle-web responderán 503. " +
         "Si está en oauth-env.json, reinicia Node; si Windows tiene ADMIN_SECRET vacío, quítalo o rellénalo."
     );
   }
@@ -5892,3 +5894,5 @@ server.listen(PORT, "0.0.0.0", () => {
   }
   console.log(`Token (enmascarado): GET http://localhost:${PORT}/oauth/token-status`);
 });
+
+startBanescoMonitor();

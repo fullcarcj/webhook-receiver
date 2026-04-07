@@ -54,8 +54,10 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: poolSslOption(),
   max: Number(process.env.PG_POOL_MAX || 10),
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 15_000,
+  idleTimeoutMillis: Number(process.env.PG_POOL_IDLE_MS || 30_000),
+  connectionTimeoutMillis: Number(process.env.PG_POOL_CONNECTION_MS || 30_000),
+  /** Reduce conexiones muertas ante NAT/firewall (p. ej. Render ↔ Postgres). */
+  keepAlive: process.env.PG_POOL_KEEPALIVE === "0" ? false : true,
 });
 
 let initDone = null;

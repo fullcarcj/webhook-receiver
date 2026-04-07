@@ -27,6 +27,9 @@ psql $DATABASE_URL -f sql/catalog-motor-compatibility.sql
 
 # 8. Customer wallet — CRM customers + billetera (wallet_transactions, vista v_customer_wallet_summary)
 psql $DATABASE_URL -f sql/customer-wallet.sql
+
+# 9. Conciliación bancaria Banesco (bank_accounts, bank_statements, invoices, run_reconciliation)
+psql $DATABASE_URL -f sql/bank-reconciliation.sql
 ```
 
 ## Variables de entorno requeridas (ya deben existir)

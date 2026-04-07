@@ -59,12 +59,19 @@ Workflows en `.github/workflows/`. Necesitan:
 
 Sin OAuth en el job, los POST a la API de ML pueden fallar al renovar token.
 
+**Tipo B (retiro):** `.github/workflows/retiro-broadcast-morning.yml` y `retiro-broadcast-afternoon.yml`. Horarios por defecto (America/Caracas, UTC−4): **mañana 7:30** (`cron` UTC `30 11 * * *`), **tarde 14:20** (`20 18 * * *`). La hora local de referencia se documenta con `ML_RETIRO_MORNING_SEND_AT` / `ML_RETIRO_AFTERNOON_SEND_AT`; si cambiás la hora, recalculá el cron en UTC en el YAML. Opcional `ML_RETIRO_ENFORCE_SEND_AT=1` + `ML_RETIRO_SEND_AT_WINDOW_MINUTES` para que el script no envíe fuera de esa ventana (p. ej. jobs que corren cada pocos minutos).
+
+**Tipo C (calificación):** `rating-request-daily.yml` — por defecto **8:30 Caracas** (`30 12 * * *` UTC). La hora no viene de una variable de entorno; se cambia editando el `cron` del workflow (igual que el retiro respecto al YAML).
+
 ### Currency (tasas + catálogo en Bs)
 
 - Servicio: `src/services/currencyService.js`.
 - Rutas: `src/routes/currency.js` montadas en `server.js` bajo `/api/currency`.
 - SQL: `sql/currency-management.sql` (+ optimización en `sql/currency-optimization.sql`).
 - Job/CI: `src/jobs/dailyRatesFetch.js`, workflow `.github/workflows/daily-rates.yml`.
+- **`POST /api/currency/fetch`:** en el servidor, auth con `Authorization: Bearer <CRON_SECRET>` **o** cabecera `X-Admin-Secret` (mismo valor que `ADMIN_SECRET`). `CRON_SECRET` debe existir en producción (p. ej. Render) y coincidir con el secret de GitHub si el workflow dispara el endpoint.
+- **GitHub → tasas:** el workflow usa `secrets.RENDER_URL` (URL raíz del servicio, sin path), `secrets.CRON_SECRET` y comprueba `secrets.DATABASE_URL`; hace `GET /health` y luego `POST …/api/currency/fetch`. `RENDER_URL` no es variable del proceso Node en cloud; solo secret del repo para el `curl` desde Actions.
+- **BCV:** scrape con cliente **HTTPS nativo** (Node), timeout largo por defecto. URL por defecto: página de intervención cambiaria del BCV; override con `BCV_URL`. Opcionales: `BCV_FETCH_TIMEOUT_MS`, `BCV_TLS_INSECURE=1` si falla la verificación TLS del sitio (último recurso).
 - Regla operativa: precios en Bs se calculan en runtime (vista/queries), no se persisten por SKU.
 
 ### Shipping + Landed Cost (flete dinámico)
@@ -94,12 +101,12 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | DB | `DATABASE_URL` (obligatoria) |
 | Webhooks | `WEBHOOK_SAVE_DB`, `ML_WEBHOOK_FETCH_RESOURCE`, `ML_WEBHOOK_FETCH_VENTAS_DETALLE` |
 | WMS reservas ML | `ML_WMS_ORDER_RESERVATIONS_ENABLED=1` — tras GET `orders_v2` reserva/libera stock según estado (`src/services/reservationService.js`); requiere migración `sql/ml-reservations.sql` |
-| Currency | `CRON_SECRET` (auth de `POST /api/currency/fetch`), `CURRENCY_COMPANY_IDS` opcional |
+| Currency | `CRON_SECRET` (`Authorization: Bearer` en `POST /api/currency/fetch`), `ADMIN_SECRET` vía `X-Admin-Secret` en el mismo endpoint; `BCV_URL`, `BCV_FETCH_TIMEOUT_MS`, `BCV_TLS_INSECURE`; en GitHub Actions: secrets `RENDER_URL`, `CRON_SECRET`, `DATABASE_URL` (`daily-rates.yml`); `CURRENCY_COMPANY_IDS` opcional |
 | Preguntas IA | `ML_QUESTIONS_IA_AUTO_ENABLED`, ventana/horario en `ML_QUESTIONS_IA_AUTO_*` |
 | WhatsApp | `WASENDER_ENABLED`, `WASENDER_API_KEY`, `WASENDER_API_BASE_URL`, `ML_WHATSAPP_TIPO_F_ENABLED`, plantillas E/F en BD o env |
 | Post-venta A | `ML_AUTO_SEND_POST_SALE`, `ML_AUTO_SEND_TOPICS`, `ML_POST_SALE_*` |
-| Retiro B | `ML_RETIRO_ENABLED`, `ML_RETIRO_SLOT`, `ML_RETIRO_TIMEZONE`, `ML_RETIRO_MORNING_SEND_AT` / `ML_RETIRO_AFTERNOON_SEND_AT` (referencia hora local; cron en `.github/workflows/retiro-broadcast-*.yml`), opcional `ML_RETIRO_ENFORCE_SEND_AT` … |
-| Calificación C | `ML_RATING_REQUEST_ENABLED`, `ML_RATING_REQUEST_LOOKBACK_DAYS`, … |
+| Retiro B | `ML_RETIRO_ENABLED`, `ML_RETIRO_SLOT`, `ML_RETIRO_TIMEZONE`, `ML_RETIRO_LOOKBACK_DAYS`, `ML_RETIRO_MORNING_SEND_AT` / `ML_RETIRO_AFTERNOON_SEND_AT` (referencia HH:MM local), `ML_RETIRO_ENFORCE_SEND_AT`, `ML_RETIRO_SEND_AT_WINDOW_MINUTES`; hora real de ejecución = **cron UTC** en los workflows |
+| Calificación C | `ML_RATING_REQUEST_ENABLED`, `ML_RATING_REQUEST_LOOKBACK_DAYS`, …; hora diaria = **cron** en `rating-request-daily.yml` |
 | FileMaker | `FILEMAKER_TIPO_G_SECRET`, `FILEMAKER_INVENTARIO_PRODUCTOS_SECRET` |
 | API pública catálogo | `FRONTEND_API_KEY`, `FRONTEND_CORS_ORIGINS`, rate limit |
 
@@ -133,4 +140,4 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 
 ---
 
-*Última revisión orientativa: mantener alineado con `package.json` y workflows en `.github/workflows/`.*
+*Última revisión: 2026-04 — alinear con `package.json`, `ml-retiro-broadcast.js`, `src/services/currencyService.js` y workflows en `.github/workflows/`.*

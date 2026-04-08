@@ -5862,6 +5862,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Reintentar IA sobre pending (JSON): http://localhost:${PORT}/preguntas-ia-auto-retry?k=TU_ADMIN_SECRET`);
     console.log(`Publicaciones ML (listings por cuenta): http://localhost:${PORT}/publicaciones-ml?k=TU_ADMIN_SECRET`);
     console.log(`Banesco (conexión / monitor): http://localhost:${PORT}/banesco?k=TU_ADMIN_SECRET`);
+    console.log(`Banesco JSON conexión: http://localhost:${PORT}/banesco-connection?k=TU_ADMIN_SECRET`);
     console.log(`Extractos bank_statements: http://localhost:${PORT}/statements?k=TU_ADMIN_SECRET`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
     console.log(`Órdenes ML (sync-orders): http://localhost:${PORT}/ordenes-ml?k=TU_ADMIN_SECRET`);

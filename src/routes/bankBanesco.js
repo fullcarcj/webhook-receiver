@@ -169,6 +169,20 @@ async function handleBankBanescoRequest(req, res, url) {
     return handleBanescoHtmlPage(req, res, url);
   }
 
+  /** Alias corto: mismo JSON que GET /api/bank/banesco/connection (?k= o X-Admin-Secret). */
+  const pathNorm = url.pathname.replace(/\/+$/, "") || "/";
+  if (req.method === "GET" && pathNorm === "/banesco-connection") {
+    if (!ensureAdminJson(req, res, url)) return true;
+    try {
+      const snap = await getBanescoConnectionSnapshot();
+      writeJson(res, 200, { ok: true, ...snap });
+    } catch (e) {
+      console.error("[banesco-connection]", e);
+      writeJson(res, 500, { ok: false, error: e.message || String(e) });
+    }
+    return true;
+  }
+
   if (!url.pathname.startsWith("/api/bank/banesco")) return false;
 
   try {
@@ -189,6 +203,7 @@ async function handleBankBanescoRequest(req, res, url) {
         bank: "Banesco",
         configured,
         available_endpoints: [
+          "GET /banesco-connection?k=ADMIN_SECRET",
           "GET /api/bank/banesco/status?k=ADMIN_SECRET",
           "GET /api/bank/banesco/connection?k=ADMIN_SECRET",
           "GET /api/bank/statements?k=ADMIN_SECRET",

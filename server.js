@@ -5874,7 +5874,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[db] PostgreSQL: ${dbPath}`);
   const forwards = getForwardPostUrls();
-  console.log(`Escuchando en http://localhost:${PORT} (todas las interfaces, para tunel loclx/ngrok)`);
+  console.log(`Escuchando en http://localhost:${PORT} (0.0.0.0 — todas las interfaces)`);
   console.log(`Webhook POST: http://localhost:${PORT}${WEBHOOK_PATH}`);
   console.log(
     `Wasender webhook: mismo POST que ML ${WEBHOOK_PATH} (detección por cuerpo) o dedicadas: ${Array.from(

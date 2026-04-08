@@ -48,7 +48,8 @@ async function main() {
     console.log("En Windows: definila en oauth-env.json o $env:DATABASE_URL antes de npm run.");
     section("Checklist si \"no envía nada\"");
     console.log("- En Render deben existir las mismas variables (CRM_WA_WELCOME_ENABLED, WASENDER_*, DATABASE_URL).");
-    console.log("- El webhook de Wasender debe apuntar a la URL de TU servicio (p. ej. https://…/wasender-webhook).");
+    console.log("- El webhook de Wasender debe usar la URL HTTPS de tu instancia (p. ej. Render); no hace falta túnel ni escuchar en local.");
+    console.log("- Ruta típica: …/wasender-webhook (la que configuraste en Wasender).");
     console.log("- Sin mensaje entrante guardado en crm_messages no se dispara trySendCrmWaWelcome.");
     console.log("\n--- Fin ---\n");
     process.exit(0);

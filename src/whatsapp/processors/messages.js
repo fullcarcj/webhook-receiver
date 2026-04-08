@@ -58,8 +58,6 @@ async function handle(normalized) {
     });
     const chatId = chatRow.id;
 
-    let insertedInbound = false;
-
     if (eventType === "messages.update" && normalized.messageId) {
       await client.query(
         `UPDATE crm_messages
@@ -86,7 +84,6 @@ async function handle(normalized) {
       );
 
       if (ins.rows.length) {
-        insertedInbound = true;
         await client.query(
           `UPDATE crm_chats SET unread_count = unread_count + 1, updated_at = NOW() WHERE id = $1`,
           [chatId]
@@ -96,11 +93,8 @@ async function handle(normalized) {
 
     await client.query("COMMIT");
 
-    if (
-      insertedInbound &&
-      eventType === "messages.received" &&
-      (normalized.type || "text") !== "reaction"
-    ) {
+    /* Bienvenida: no depender de INSERT RETURNING (webhook duplicado = conflict sin fila). */
+    if (eventType === "messages.received" && (normalized.type || "text") !== "reaction") {
       setImmediate(() => {
         trySendCrmWaWelcome({
           chatId,

@@ -1,13 +1,22 @@
 "use strict";
 
 const pino = require("pino");
-const { pool } = require("../../db");
+const { pool, insertMlWhatsappWasenderLog } = require("../../db");
 const { sendWasenderTextMessage } = require("../../wasender-client");
 const { normalizePhoneToE164 } = require("../../ml-whatsapp-phone");
 const { resolveWasenderRuntimeConfig } = require("../../ml-whatsapp-tipo-ef");
 const { sanitizeWaPersonName, isLikelyChatNotName } = require("../whatsapp/waNameCandidate");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "crmWaWelcome" });
+
+let _hintLoggedWasenderOff = false;
+
+/** Activo salvo desactivación explícita (0 / false / no / off). */
+function isCrmWelcomeFeatureEnabled() {
+  const v = String(process.env.CRM_WA_WELCOME_ENABLED ?? "").trim().toLowerCase();
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+  return true;
+}
 
 function isPlaceholderCustomerName(fullName) {
   const s = fullName != null ? String(fullName).trim() : "";
@@ -38,7 +47,7 @@ function hasRealNameForGreeting(fullName) {
  * Requiere CRM_WA_WELCOME_ENABLED=1 y Wasender configurado (misma lógica que tipo E/F).
  */
 async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
-  if (String(process.env.CRM_WA_WELCOME_ENABLED || "").trim() !== "1") {
+  if (!isCrmWelcomeFeatureEnabled()) {
     return { ok: false, outcome: "disabled" };
   }
   const cid = Number(chatId);
@@ -49,13 +58,19 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
 
   const cfg = await resolveWasenderRuntimeConfig();
   if (!cfg.enabled) {
+    if (!_hintLoggedWasenderOff) {
+      _hintLoggedWasenderOff = true;
+      log.warn(
+        "crm_welcome: Wasender no habilitado o sin WASENDER_API_KEY — revisar WASENDER_ENABLED / BD ml_wasender_settings"
+      );
+    }
     return { ok: false, outcome: "wasender_off" };
   }
 
   let row;
   try {
     const r = await pool.query(
-      `SELECT c.wa_welcome_sent_at, cu.full_name
+      `SELECT c.wa_welcome_sent_at, cu.full_name, cu.primary_ml_buyer_id
        FROM crm_chats c
        LEFT JOIN customers cu ON cu.id = c.customer_id
        WHERE c.id = $1`,
@@ -70,7 +85,11 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
     throw e;
   }
 
-  if (!row || row.wa_welcome_sent_at != null) {
+  if (!row) {
+    return { ok: false, outcome: "no_chat_row" };
+  }
+
+  if (row.wa_welcome_sent_at != null) {
     return { ok: false, outcome: "already_sent" };
   }
 
@@ -99,6 +118,31 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
     return { ok: false, outcome: "bad_phone" };
   }
 
+  /** Reserva atómica: evita doble envío (webhooks duplicados o carreras). */
+  let claim;
+  try {
+    claim = await pool.query(
+      `UPDATE crm_chats SET wa_welcome_sent_at = NOW() WHERE id = $1 AND wa_welcome_sent_at IS NULL RETURNING id`,
+      [cid]
+    );
+  } catch (e) {
+    if (e && e.code === "42703") {
+      log.warn("crm_welcome: columna wa_welcome_sent_at ausente — ejecutar npm run db:crm-wa-welcome");
+      return { ok: false, outcome: "schema" };
+    }
+    throw e;
+  }
+
+  if (!claim.rows.length) {
+    return { ok: false, outcome: "already_sent" };
+  }
+
+  const buyerId =
+    row.primary_ml_buyer_id != null && Number.isFinite(Number(row.primary_ml_buyer_id))
+      ? Number(row.primary_ml_buyer_id)
+      : null;
+
+  /* Mismo POST que el texto en E/F: wasender-client.sendWasenderTextMessage → { to, text } */
   const res = await sendWasenderTextMessage({
     apiBaseUrl: cfg.apiBaseUrl,
     apiKey: cfg.apiKey,
@@ -106,24 +150,63 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
     text,
   });
 
+  const msgId =
+    res.json && res.json.data && res.json.data.msgId != null ? Number(res.json.data.msgId) : null;
+  const preview = text.slice(0, 200);
+
   if (!res.ok) {
-    log.warn({ status: res.status, to }, "crm_welcome: Wasender no OK");
+    try {
+      await pool.query(`UPDATE crm_chats SET wa_welcome_sent_at = NULL WHERE id = $1`, [cid]);
+    } catch (_e) {
+      /* ignore */
+    }
+    try {
+      await insertMlWhatsappWasenderLog({
+        message_kind: "F",
+        ml_user_id: null,
+        buyer_id: buyerId,
+        order_id: null,
+        ml_question_id: null,
+        phone_e164: to,
+        phone_source: null,
+        outcome: "api_error",
+        http_status: res.status,
+        response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
+        error_message: `HTTP ${res.status}`,
+        text_preview: preview,
+        tipo_e_activation_source: "crm_wa_welcome",
+      });
+    } catch (_e) {
+      /* ignore */
+    }
+    log.warn({ status: res.status, to, body: res.bodyText && String(res.bodyText).slice(0, 500) }, "crm_welcome: Wasender no OK");
     return { ok: false, outcome: "send_failed", httpStatus: res.status };
   }
 
   try {
-    await pool.query(`UPDATE crm_chats SET wa_welcome_sent_at = NOW() WHERE id = $1 AND wa_welcome_sent_at IS NULL`, [
-      cid,
-    ]);
-  } catch (e) {
-    if (e && e.code === "42703") {
-      log.warn("crm_welcome: no se pudo marcar wa_welcome_sent_at (migración pendiente)");
-    } else {
-      throw e;
-    }
+    await insertMlWhatsappWasenderLog({
+      message_kind: "F",
+      ml_user_id: null,
+      buyer_id: buyerId,
+      order_id: null,
+      ml_question_id: null,
+      phone_e164: to,
+      phone_source: null,
+      outcome: "success",
+      http_status: res.status,
+      wasender_msg_id: Number.isFinite(msgId) ? msgId : null,
+      response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
+      text_preview: preview,
+      tipo_e_activation_source: "crm_wa_welcome",
+    });
+  } catch (_e) {
+    /* ignore */
   }
 
-  log.info({ chatId: cid, customerId: custId, kind: hasRealNameForGreeting(fullName) ? "greet" : "ask" }, "crm_welcome: enviado");
+  log.info(
+    { chatId: cid, customerId: custId, kind: hasRealNameForGreeting(fullName) ? "greet" : "ask" },
+    "crm_welcome: enviado"
+  );
   return { ok: true, outcome: "sent" };
 }
 

@@ -121,6 +121,13 @@ async function handle(normalized) {
     /* Bienvenida: primero saludo/pedido de nombre; si antes se pidió nombre y ahora hay nombre en customers → saludo con nombre. */
     if (eventType === "messages.received" && (normalized.type || "text") !== "reaction") {
       setImmediate(() => {
+        const ctx = { chatId, customerId, phoneRaw: normalized.fromPhone };
+        const logSkip = (step, r) => {
+          if (!r || r.ok) return;
+          const o = r.outcome;
+          if (o === "already_sent" || o === "not_pending") return;
+          msgLog.info({ ...ctx, step, outcome: o }, "crm_welcome_no_enviado");
+        };
         Promise.resolve()
           .then(() =>
             trySendCrmWaWelcome({
@@ -129,15 +136,17 @@ async function handle(normalized) {
               phoneRaw: normalized.fromPhone,
             })
           )
-          .then(() =>
-            trySendCrmWaWelcomeAfterName({
+          .then((r) => {
+            logSkip("trySendCrmWaWelcome", r);
+            return trySendCrmWaWelcomeAfterName({
               chatId,
               customerId,
               phoneRaw: normalized.fromPhone,
-            })
-          )
+            });
+          })
+          .then((r) => logSkip("trySendCrmWaWelcomeAfterName", r))
           .catch((err) => {
-            msgLog.error({ err }, "trySendCrmWaWelcome");
+            msgLog.error({ err, ...ctx }, "trySendCrmWaWelcome");
           });
       });
     }

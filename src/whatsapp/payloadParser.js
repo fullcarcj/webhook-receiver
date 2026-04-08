@@ -299,7 +299,12 @@ function parseWebhookJobs(body) {
     evOut = "messages.sent";
   } else if (ev === "messages.upsert") {
     evOut = norm.toPhone ? "messages.sent" : "messages.received";
-  } else if (ev === "messages.received" || ev === "messages-personal.received") {
+  } else if (
+    ev === "messages.received" ||
+    ev === "message.received" ||
+    ev === "messages-personal.received"
+  ) {
+    /** Wasender a veces usa `message.received`; sin esto no hay processor → no bienvenida CRM. */
     evOut = "messages.received";
   }
 

@@ -35,4 +35,8 @@ assert.strictEqual(n.messageId, "ABC123");
 assert.strictEqual(n.contactName, "María Test");
 assert.strictEqual(n.content.text, "Hola");
 
+const bodySingular = { ...body, event: "message.received" };
+const jobsSingular = parseWebhookJobs(bodySingular);
+assert.strictEqual(jobsSingular[0].eventType, "messages.received");
+
 console.log("wasender-payload-parser: OK");

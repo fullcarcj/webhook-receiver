@@ -55,7 +55,7 @@ async function linkIdentity(db, customerId, source, externalId) {
 function buildWaMlBuyerTipoECheck(source, data, normalizedPhone, fullNameInsert) {
   if (source !== "whatsapp") return null;
   const raw =
-    (data.name && String(data.name).trim()) ||
+    (resolveNameForEnrich(data, source) || "").trim() ||
     (fullNameInsert && String(fullNameInsert).trim()) ||
     "";
   if (!raw || isWaPhonePlaceholderFullName(raw) || raw === "Cliente WhatsApp" || raw === "Cliente") return null;
@@ -80,8 +80,29 @@ function computeInsertFullName(data, source, normalizedExternalId, normalizedPho
   return `${source}-${normalizedExternalId}`;
 }
 
-async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2) {
-  const name = data.name && String(data.name).trim() ? String(data.name).trim() : null;
+/**
+ * Nombre para UPDATE customers: data.name (texto del mensaje ya validado por pickWaFullNameCandidate)
+ * o, en WhatsApp, contact_name (pushName saneado) si no hay name — antes enrich ignoraba contact_name
+ * y full_name quedaba en "Cliente WhatsApp" para siempre.
+ */
+function resolveNameForEnrich(data, source) {
+  if (data.name != null && String(data.name).trim() !== "") {
+    return String(data.name).trim();
+  }
+  if (source !== "whatsapp" || data.contact_name == null || String(data.contact_name).trim() === "") {
+    return null;
+  }
+  const cn = String(data.contact_name).trim();
+  const asPerson = sanitizeWaPersonName(cn);
+  if (asPerson) return asPerson;
+  const display = sanitizeContactDisplayName(cn);
+  if (display && !isWaContactNameBlockedForFullName(display)) return display;
+  return null;
+}
+
+async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2, source = "mercadolibre") {
+  const resolved = resolveNameForEnrich(data, source);
+  const name = resolved && String(resolved).trim() ? String(resolved).trim() : null;
   const email = data.email ? String(data.email).toLowerCase().trim() : null;
   const hasP2 = await customersHasPhone2Column(db);
 
@@ -191,7 +212,7 @@ async function resolveCustomer(identity, options = {}) {
 
   if (identityRows.length) {
     const customerId = Number(identityRows[0].customer_id);
-    await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2);
+    await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2, source);
     const waMlBuyerTipoECheck = buildWaMlBuyerTipoECheck(source, data, normalizedPhone, null);
     return {
       customerId,
@@ -224,7 +245,7 @@ async function resolveCustomer(identity, options = {}) {
     if (phoneRows.length) {
       const customerId = Number(phoneRows[0].customer_id);
       await linkIdentity(db, customerId, source, normalizedExternalId);
-      await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2);
+      await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2, source);
       log.info({ customerId, source, external_id: normalizedExternalId }, "resolveCustomer: healing por teléfono");
       const waMlBuyerTipoECheck = buildWaMlBuyerTipoECheck(source, data, normalizedPhone, null);
       return {
@@ -248,7 +269,7 @@ async function resolveCustomer(identity, options = {}) {
     if (docRows.length) {
       const customerId = Number(docRows[0].customer_id);
       await linkIdentity(db, customerId, source, normalizedExternalId);
-      await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2);
+      await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2, source);
       const waMlBuyerTipoECheck = buildWaMlBuyerTipoECheck(source, data, normalizedPhone, null);
       return {
         customerId,
@@ -270,7 +291,7 @@ async function resolveCustomer(identity, options = {}) {
     if (emailRows.length) {
       const customerId = Number(emailRows[0].customer_id);
       await linkIdentity(db, customerId, source, normalizedExternalId);
-      await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2);
+      await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2, source);
       const waMlBuyerTipoECheck = buildWaMlBuyerTipoECheck(source, data, normalizedPhone, null);
       return {
         customerId,
@@ -293,7 +314,10 @@ async function resolveCustomer(identity, options = {}) {
       try {
         const pre = await tryWhatsappSalesNameMatchBeforeNewCustomer(conn, {
           normalizedPhone,
-          fullNameRaw: data.name,
+          fullNameRaw:
+            (data.name && String(data.name).trim()) ||
+            (data.contact_name && String(data.contact_name).trim()) ||
+            null,
           normalizedExternalId,
         });
         if (pre) {
@@ -322,7 +346,7 @@ async function resolveCustomer(identity, options = {}) {
       const dupId = await findCustomerIdByPhoneAndPersonName(conn, phoneToSearch, fullName);
       if (dupId) {
         await linkIdentity(conn, dupId, source, normalizedExternalId);
-        await enrichCustomer(conn, dupId, data, normalizedPhone, normalizedPhone2);
+        await enrichCustomer(conn, dupId, data, normalizedPhone, normalizedPhone2, source);
         if (ownClient) await conn.query("COMMIT");
         log.info(
           { customerId: dupId, source, external_id: normalizedExternalId },

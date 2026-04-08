@@ -77,7 +77,7 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
   const fullName = row.full_name != null ? String(row.full_name) : "";
   const askTemplate =
     process.env.CRM_WA_WELCOME_ASK_NAME ||
-    "Por favor indíquenos su nombre y apellido para completar su registro.";
+    "Hola! Bienvenido a Solomotor3k ¿Cuál es su nombre y apellido?";
   const greetTemplate =
     process.env.CRM_WA_WELCOME_GREETING ||
     "Hola {{nombre}}, ¿en qué podemos ayudarte?";

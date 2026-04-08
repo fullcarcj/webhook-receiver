@@ -183,6 +183,7 @@ const { handleSalesApiRequest } = require("./src/handlers/salesApiHandler");
 const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory");
 const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./src/handlers/customerLoyalty");
 const { handleCustomersApiRequest } = require("./src/routes/customers");
+const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
 const { handleCrmApiRequest } = require("./src/routes/crm");
 const { handleBankBanescoRequest } = require("./src/routes/bankBanesco");
 const { handleBankStatementsRequest } = require("./src/routes/bankStatements");
@@ -1699,6 +1700,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleCustomersApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleChatApiRequest(req, res, url)) {
     return;
   }
 

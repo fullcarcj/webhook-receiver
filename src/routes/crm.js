@@ -2,7 +2,8 @@
 
 const pino = require("pino");
 const { timingSafeCompare } = require("../services/currencyService");
-const { findOrCreateCustomer, listWhatsappLogs, mapSchemaError } = require("../services/crmIdentityService");
+const { listWhatsappLogs, mapSchemaError } = require("../services/crmIdentityService");
+const { routeWebhook } = require("../whatsapp/hookRouter");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const { pool } = require("../../db");
 
@@ -120,35 +121,12 @@ async function handleCrmApiRequest(req, res, url) {
       } catch (_e) {
         body = {};
       }
-      const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-      const contact = body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0];
-      const phone = msg?.from;
-      const name = contact?.profile?.name;
-      const msgId = msg?.id;
-
-      if (!msg) {
-        writeJson(res, 200, { status: "ok" });
-        return true;
-      }
-
-      const result = await findOrCreateCustomer({
-        phoneNumber: phone,
-        fullName: name,
-        messageId: msgId,
-        rawPayload: body,
-        fuzzyThreshold: 0.35,
-      });
-
-      const cust = result.customer || {};
-      const vehicles = Array.isArray(cust.vehicles) ? cust.vehicles : result.raw?.vehicles || [];
-      logger.info({
-        matchType: result.matchType,
-        customerId: cust.id,
-        isNew: result.isNew,
-        vehicles: vehicles.map((v) => v.label),
-      });
-
       writeJson(res, 200, { status: "ok" });
+      setImmediate(() => {
+        routeWebhook(body).catch((err) => {
+          logger.error({ err }, "whatsapp_hub_route");
+        });
+      });
       return true;
     } catch (e) {
       try {

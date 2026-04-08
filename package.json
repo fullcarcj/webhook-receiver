@@ -49,6 +49,7 @@
     "db:sales-ml": "node scripts/run-sales-ml-migration.js",
     "db:sales-global": "node scripts/run-sales-global-migration.js",
     "db:sales-all": "node scripts/run-sales-all-migrations.js",
+    "db:whatsapp-hub": "node scripts/run-whatsapp-hub-migration.js",
     "import-ml-sales": "node scripts/importMlOrdersToSales.js",
     "sales:stress": "node tests/sales_stress_test.js"
   },

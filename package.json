@@ -47,8 +47,10 @@
     "db:mostrador": "node scripts/run-mostrador-migration.js",
     "db:sales": "node scripts/run-sales-migration.js",
     "db:sales-ml": "node scripts/run-sales-ml-migration.js",
+    "db:sales-global": "node scripts/run-sales-global-migration.js",
+    "db:sales-all": "node scripts/run-sales-all-migrations.js",
     "import-ml-sales": "node scripts/importMlOrdersToSales.js",
-    "sales:stress": "node scripts/sales_stock_stress_test.js"
+    "sales:stress": "node tests/sales_stress_test.js"
   },
   "engines": {
     "node": ">=18"

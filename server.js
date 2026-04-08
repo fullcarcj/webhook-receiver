@@ -1574,7 +1574,7 @@ const server = http.createServer(async (req, res) => {
         api_crm_admin:
           "CRM (X-Admin-Secret): catálogo plano GET|POST /api/crm/brands, GET|POST /api/crm/models?brand_id=, GET|POST /api/crm/generations?model_id=, GET|POST /api/crm/compatibility · POST /api/customers/purchase (mostrador + puntos) · GET /api/crm/logs · WhatsApp GET|POST /webhook/whatsapp (WA_VERIFY_TOKEN) — migraciones sql/20260408_vehicles_catalog.sql + 20260408_mostrador_orders.sql",
         api_sales_omnicanal:
-          "Ventas omnicanal (X-Admin-Secret): POST /api/sales/create, GET /api/sales, /stats, POST /api/sales/import/ml (ml_orders→sales; SALES_ML_IMPORT_ENABLED=1, opc. SALES_ML_IMPORT_LOYALTY=1) — migraciones npm run db:sales && db:sales-ml; npm run sales:stress (STRESS_SKU, STRESS_CUSTOMER_ID)",
+          "Ventas globales (X-Admin-Secret): POST /api/sales/create (mostrador/social; customer opcional; payment_method; Bs vía tasas), GET /api/sales, /stats, PATCH estados pending|paid|shipped|cancelled, import ML — npm run db:sales && db:sales-ml && db:sales-global; crm_customer_identities + kits en productos.atributos.kit_components; npm run sales:stress",
         envio_auto_postventa:
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:

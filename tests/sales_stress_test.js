@@ -1,22 +1,23 @@
 #!/usr/bin/env node
 /**
- * Concurrencia: N ventas mostrador del mismo SKU (qty 1) y comprobación de stock final.
- * Env: STRESS_SKU, STRESS_CUSTOMER_ID, STRESS_PARALLEL (default 10), STRESS_INITIAL_STOCK (default 3).
+ * 10 ventas concurrentes del mismo SKU vía createOrder; verifica stock final (sin condiciones de carrera).
+ * Env: STRESS_SKU, STRESS_CUSTOMER_ID (opcional; sin él = consumidor final), STRESS_PARALLEL, STRESS_INITIAL_STOCK
  */
 "use strict";
 
 require("../load-env-local");
 const { pool } = require("../db");
-const salesService = require("../src/services/salesService");
+const { createOrder } = require("../src/services/salesService");
 
 async function main() {
   const sku = process.env.STRESS_SKU && String(process.env.STRESS_SKU).trim();
-  const customerId = Number(process.env.STRESS_CUSTOMER_ID);
+  const customerRaw = process.env.STRESS_CUSTOMER_ID;
+  const customerId = customerRaw != null && String(customerRaw).trim() !== "" ? Number(customerRaw) : undefined;
   const parallel = Math.max(2, Number(process.env.STRESS_PARALLEL || "10"));
   const initialStock = Math.max(1, Number(process.env.STRESS_INITIAL_STOCK || "3"));
 
-  if (!sku || !Number.isFinite(customerId) || customerId <= 0) {
-    console.error("Definir STRESS_SKU y STRESS_CUSTOMER_ID (cliente CRM existente)");
+  if (!sku) {
+    console.error("Definir STRESS_SKU");
     process.exit(1);
   }
 
@@ -30,11 +31,12 @@ async function main() {
 
   const results = await Promise.allSettled(
     Array.from({ length: parallel }, () =>
-      salesService.createSalesOrder({
+      createOrder({
         source: "mostrador",
         customerId,
         items: [{ sku, quantity: 1, unit_price_usd: 1 }],
         status: "paid",
+        paymentMethod: "cash",
       })
     )
   );
@@ -57,7 +59,7 @@ async function main() {
   console.log(JSON.stringify(summary, null, 2));
 
   if (!summary.passed) {
-    console.error("Fallo: stock final no coincide con ventas exitosas");
+    console.error("Fallo: stock final no coincide");
     process.exit(1);
   }
   if (ok > initialStock) {

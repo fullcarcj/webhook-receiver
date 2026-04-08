@@ -41,9 +41,19 @@ function ensureAdmin(req, res) {
   return true;
 }
 
+const paymentMethodEnum = z.enum([
+  "cash",
+  "card",
+  "transfer",
+  "mercadopago",
+  "pago_movil",
+  "other",
+  "unknown",
+]);
+
 const createBodySchema = z.object({
   source: z.enum(["mostrador", "social_media"]),
-  customer_id: z.number().int().positive(),
+  customer_id: z.number().int().positive().optional(),
   items: z
     .array(
       z.object({
@@ -55,12 +65,15 @@ const createBodySchema = z.object({
     .min(1),
   notes: z.string().max(2000).optional(),
   sold_by: z.string().max(100).optional(),
-  status: z.enum(["pending_payment", "paid"]).optional(),
+  status: z.enum(["pending", "paid", "pending_payment"]).optional(),
   external_order_id: z.string().min(1).max(200).optional(),
+  payment_method: paymentMethodEnum.optional(),
+  identity_external_id: z.string().min(1).max(255).optional(),
+  company_id: z.number().int().positive().optional(),
 });
 
 const patchBodySchema = z.object({
-  status: z.enum(["paid", "cancelled", "refunded"]),
+  status: z.enum(["paid", "cancelled", "shipped"]),
 });
 
 const importMlBodySchema = z.object({
@@ -182,7 +195,7 @@ async function handleSalesApiRequest(req, res, url) {
         return true;
       }
       const d = parsed.data;
-      const created = await salesService.createSalesOrder({
+      const created = await salesService.createOrder({
         source: d.source,
         customerId: d.customer_id,
         items: d.items,
@@ -190,6 +203,9 @@ async function handleSalesApiRequest(req, res, url) {
         soldBy: d.sold_by,
         status: d.status,
         externalOrderId: d.external_order_id,
+        paymentMethod: d.payment_method,
+        identityExternalId: d.identity_external_id,
+        companyId: d.company_id,
       });
       const code = created.idempotent ? 200 : 201;
       writeJson(res, code, {
@@ -232,7 +248,10 @@ async function handleSalesApiRequest(req, res, url) {
       return true;
     }
     if ((e && e.code === "SALES_SCHEMA_MISSING") || (e && e.code === "42P01")) {
-      writeJson(res, 503, { error: "schema_missing", detail: "Ejecutar sql/20260408_sales_orders.sql (npm run db:sales)" });
+      writeJson(res, 503, {
+        error: "schema_missing",
+        detail: "Migraciones: npm run db:sales && npm run db:sales-ml && npm run db:sales-global",
+      });
       return true;
     }
     if (e && e.code === "LOYALTY_SCHEMA_MISSING") {

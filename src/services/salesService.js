@@ -3,6 +3,8 @@
 const crypto = require("crypto");
 const { pool } = require("../../db");
 const loyaltyService = require("./loyaltyService");
+const { getTodayRate } = require("./currencyService");
+const { CustomerModel } = require("./crmIdentityService");
 
 const MANUAL_SOURCES = new Set(["mostrador", "social_media"]);
 
@@ -21,8 +23,34 @@ function mapErr(err) {
   return err;
 }
 
-async function loadItemsWithLocks(client, items) {
-  const resolved = [];
+/** Punto 8 / kits: `atributos.kit_components` = [{ sku, qty_per_unit }] por unidad vendida del kit. */
+function parseKitComponents(atributos) {
+  if (!atributos || typeof atributos !== "object") return null;
+  const raw = atributos.kit_components;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const out = [];
+  for (const x of raw) {
+    if (!x || typeof x !== "object") continue;
+    const sku = String(x.sku || "").trim();
+    if (!sku) continue;
+    const q = Number(x.qty_per_unit != null ? x.qty_per_unit : x.qty);
+    out.push({ sku, qty_per_unit: Number.isFinite(q) && q > 0 ? q : 1 });
+  }
+  return out.length ? out : null;
+}
+
+function mapSourceToCrmIdentitySource(source) {
+  const s = String(source || "").toLowerCase();
+  if (s === "mercadolibre") return "mercadolibre";
+  if (s === "mostrador") return "mostrador";
+  if (s === "ecommerce") return "ecommerce";
+  if (s === "social_media") return "social_media";
+  return "mostrador";
+}
+
+async function resolveSaleLinesAndStock(client, items) {
+  const linesForInsert = [];
+  const stockDecrements = [];
   for (const it of items) {
     const sku = String(it.sku || "").trim();
     if (!sku) {
@@ -38,7 +66,7 @@ async function loadItemsWithLocks(client, items) {
       throw e;
     }
     const pr = await client.query(
-      `SELECT id, sku, stock FROM productos WHERE sku = $1 FOR UPDATE`,
+      `SELECT id, sku, stock, atributos FROM productos WHERE sku = $1 FOR UPDATE`,
       [sku]
     );
     if (!pr.rows.length) {
@@ -47,26 +75,51 @@ async function loadItemsWithLocks(client, items) {
       throw e;
     }
     const row = pr.rows[0];
-    if (Number(row.stock) < qty) {
-      const e = new Error(`Stock insuficiente para ${sku} (disponible ${row.stock}, pedido ${qty})`);
-      e.code = "INSUFFICIENT_STOCK";
-      throw e;
-    }
     const lineTotal = Number((qty * unit).toFixed(2));
-    resolved.push({
+    linesForInsert.push({
       product_id: row.id,
       sku: row.sku,
       quantity: qty,
       unit_price_usd: unit,
       line_total_usd: lineTotal,
     });
+
+    const kit = parseKitComponents(row.atributos);
+    if (kit && kit.length) {
+      for (const comp of kit) {
+        const cr = await client.query(`SELECT id, sku, stock FROM productos WHERE sku = $1 FOR UPDATE`, [
+          comp.sku,
+        ]);
+        if (!cr.rows.length) {
+          const e = new Error(`Kit ${sku}: componente no encontrado (${comp.sku})`);
+          e.code = "NOT_FOUND";
+          throw e;
+        }
+        const need = qty * comp.qty_per_unit;
+        if (Number(cr.rows[0].stock) < need) {
+          const e = new Error(
+            `Stock insuficiente para componente ${comp.sku} del kit ${sku} (disponible ${cr.rows[0].stock}, necesario ${need})`
+          );
+          e.code = "INSUFFICIENT_STOCK";
+          throw e;
+        }
+        stockDecrements.push({ product_id: cr.rows[0].id, sku: cr.rows[0].sku, quantity: need });
+      }
+    } else {
+      if (Number(row.stock) < qty) {
+        const e = new Error(`Stock insuficiente para ${sku} (disponible ${row.stock}, pedido ${qty})`);
+        e.code = "INSUFFICIENT_STOCK";
+        throw e;
+      }
+      stockDecrements.push({ product_id: row.id, sku: row.sku, quantity: qty });
+    }
   }
-  return resolved;
+  return { linesForInsert, stockDecrements };
 }
 
-function sumTotalUsd(resolvedItems) {
+function sumLineTotals(linesForInsert) {
   let t = 0;
-  for (const it of resolvedItems) t += it.line_total_usd;
+  for (const it of linesForInsert) t += it.line_total_usd;
   return Number(t.toFixed(2));
 }
 
@@ -93,6 +146,34 @@ async function incrementStock(client, resolvedItems) {
       it.product_id,
       it.quantity,
     ]);
+  }
+}
+
+/** Repone stock al anular venta; respeta kits (mismas reglas que al vender). */
+async function incrementStockFromOrderLines(client, orderLines) {
+  for (const it of orderLines) {
+    if (it.product_id == null) continue;
+    const pr = await client.query(`SELECT id, sku, atributos FROM productos WHERE id = $1 FOR UPDATE`, [
+      it.product_id,
+    ]);
+    if (!pr.rows.length) continue;
+    const kit = parseKitComponents(pr.rows[0].atributos);
+    if (kit && kit.length) {
+      for (const comp of kit) {
+        const cr = await client.query(`SELECT id FROM productos WHERE sku = $1 FOR UPDATE`, [comp.sku]);
+        if (!cr.rows.length) continue;
+        const add = it.quantity * comp.qty_per_unit;
+        await client.query(`UPDATE productos SET stock = stock + $2, updated_at = NOW() WHERE id = $1`, [
+          cr.rows[0].id,
+          add,
+        ]);
+      }
+    } else {
+      await client.query(`UPDATE productos SET stock = stock + $2, updated_at = NOW() WHERE id = $1`, [
+        it.product_id,
+        it.quantity,
+      ]);
+    }
   }
 }
 
@@ -129,33 +210,70 @@ async function fetchOrderItems(client, salesOrderId) {
 }
 
 /**
+ * Venta omnicanal (transacción): orden + ítems + stock (kits vía atributos) + caja + fidelidad opcional.
  * @param {object} p
  * @param {'mostrador'|'social_media'} p.source
- * @param {number} p.customerId
+ * @param {number|undefined|null} [p.customerId] — omitir = consumidor final (sin puntos)
  * @param {Array<{sku:string,quantity:number,unit_price_usd:number}>} p.items
  * @param {string} [p.notes]
  * @param {string} [p.soldBy]
- * @param {'pending_payment'|'paid'} [p.status]
+ * @param {'pending'|'paid'} [p.status]
  * @param {string} [p.externalOrderId]
+ * @param {'cash'|'card'|'transfer'|'mercadopago'|'pago_movil'|'other'|'unknown'} [p.paymentMethod]
+ * @param {string} [p.identityExternalId] — clave en crm_customer_identities (default: external_order_id)
+ * @param {number} [p.companyId] — tasas Bs (currency)
  */
-async function createSalesOrder({ source, customerId, items, notes, soldBy, status, externalOrderId }) {
+async function createOrder({
+  source,
+  customerId,
+  items,
+  notes,
+  soldBy,
+  status,
+  externalOrderId,
+  paymentMethod,
+  identityExternalId,
+  companyId,
+}) {
   if (!MANUAL_SOURCES.has(source)) {
     const e = new Error("source no permitido para creación manual");
     e.code = "BAD_REQUEST";
     throw e;
   }
-  const st = status === "pending_payment" ? "pending_payment" : "paid";
-  const cid = Number(customerId);
-  if (!Number.isFinite(cid) || cid <= 0) {
-    const e = new Error("customer_id inválido");
-    e.code = "BAD_REQUEST";
-    throw e;
+  const st =
+    status === "pending" || status === "pending_payment" ? "pending" : "paid";
+  let cid = null;
+  if (customerId != null && customerId !== "") {
+    const n = Number(customerId);
+    if (!Number.isFinite(n) || n <= 0) {
+      const e = new Error("customer_id inválido");
+      e.code = "BAD_REQUEST";
+      throw e;
+    }
+    cid = n;
   }
 
   const extId =
     externalOrderId != null && String(externalOrderId).trim() !== ""
       ? String(externalOrderId).trim().slice(0, 200)
       : `local-${crypto.randomUUID()}`;
+
+  const pay =
+    paymentMethod != null && String(paymentMethod).trim() !== ""
+      ? String(paymentMethod).trim()
+      : st === "paid"
+        ? "unknown"
+        : null;
+
+  const compId = Number(companyId || process.env.SALES_CURRENCY_COMPANY_ID || "1") || 1;
+  let rate = null;
+  let totalBs = null;
+  try {
+    const rateRow = await getTodayRate(compId);
+    rate = rateRow && rateRow.active_rate != null ? Number(rateRow.active_rate) : null;
+  } catch (_e) {
+    rate = null;
+  }
 
   const client = await pool.connect();
   try {
@@ -171,49 +289,86 @@ async function createSalesOrder({ source, customerId, items, notes, soldBy, stat
       return { ...existing, idempotent: true };
     }
 
-    const cex = await client.query(`SELECT 1 FROM customers WHERE id = $1`, [cid]);
-    if (!cex.rows.length) {
-      await client.query("ROLLBACK");
-      const e = new Error("NOT_FOUND");
-      e.code = "NOT_FOUND";
-      throw e;
+    if (cid != null) {
+      const cex = await client.query(`SELECT 1 FROM customers WHERE id = $1`, [cid]);
+      if (!cex.rows.length) {
+        await client.query("ROLLBACK");
+        const e = new Error("NOT_FOUND");
+        e.code = "NOT_FOUND";
+        throw e;
+      }
     }
 
-    const resolved = await loadItemsWithLocks(client, items);
-    const totalUsd = sumTotalUsd(resolved);
+    const { linesForInsert, stockDecrements } = await resolveSaleLinesAndStock(client, items);
+    const totalAmountUsd = sumLineTotals(linesForInsert);
+    if (rate != null && Number.isFinite(rate) && rate > 0) {
+      totalBs = Number((totalAmountUsd * rate).toFixed(2));
+    }
 
     const ins = await client.query(
-      `INSERT INTO sales_orders (source, external_order_id, customer_id, status, total_usd, notes, sold_by, applies_stock, records_cash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, TRUE)
+      `INSERT INTO sales_orders (
+         source, external_order_id, customer_id, status,
+         total_amount_usd, total_amount_bs, exchange_rate_bs_per_usd, payment_method,
+         notes, sold_by, applies_stock, records_cash
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, TRUE)
        RETURNING id, created_at`,
-      [source, extId, cid, st, totalUsd.toFixed(2), notes ?? null, soldBy ?? null]
+      [
+        source,
+        extId,
+        cid,
+        st,
+        totalAmountUsd.toFixed(2),
+        totalBs != null ? totalBs.toFixed(2) : null,
+        rate != null && Number.isFinite(rate) ? rate : null,
+        pay,
+        notes ?? null,
+        soldBy ?? null,
+      ]
     );
     const orderId = ins.rows[0].id;
 
-    await insertItems(client, orderId, resolved);
-    await decrementStock(client, resolved);
+    await insertItems(client, orderId, linesForInsert);
+    await decrementStock(client, stockDecrements);
 
     let pointsEarned = 0;
     if (st === "paid") {
-      const earn = await loyaltyService.earnFromMlOrder({
-        customerId: cid,
-        orderId: `SALES-${orderId}`,
-        amountUsd: totalUsd,
-        source,
-        client,
-      });
-      pointsEarned = earn.points_earned || 0;
+      if (cid != null) {
+        const earn = await loyaltyService.earnFromMlOrder({
+          customerId: cid,
+          orderId: `SALES-${orderId}`,
+          amountUsd: totalAmountUsd,
+          source,
+          client,
+        });
+        pointsEarned = earn.points_earned || 0;
+      }
       await client.query(
         `UPDATE sales_orders SET loyalty_points_earned = $1, updated_at = NOW() WHERE id = $2`,
         [pointsEarned, orderId]
       );
       await client.query(
         `INSERT INTO sales_cash_movements (sales_order_id, amount_usd, movement_type) VALUES ($1, $2, 'sale')`,
-        [orderId, totalUsd.toFixed(2)]
+        [orderId, totalAmountUsd.toFixed(2)]
       );
     }
 
     await client.query("COMMIT");
+
+    if (cid != null) {
+      const extForCrm = identityExternalId != null && String(identityExternalId).trim() !== "" ? String(identityExternalId).trim() : extId;
+      try {
+        await CustomerModel.link({
+          customerId: cid,
+          source: mapSourceToCrmIdentitySource(source),
+          externalId: extForCrm,
+          isPrimary: false,
+          metadata: { sales_order_id: orderId, source },
+        });
+      } catch (_crm) {
+        /* CRM opcional si enum/migración no alineados */
+      }
+    }
 
     const out = await getSalesOrderById(orderId);
     return { ...out, idempotent: false };
@@ -229,6 +384,9 @@ async function createSalesOrder({ source, customerId, items, notes, soldBy, stat
   }
 }
 
+/** @deprecated usar createOrder */
+const createSalesOrder = createOrder;
+
 async function getSalesOrderById(id) {
   const oid = Number(id);
   if (!Number.isFinite(oid) || oid <= 0) {
@@ -238,7 +396,10 @@ async function getSalesOrderById(id) {
   }
   try {
     const { rows: orows } = await pool.query(
-      `SELECT id, source, external_order_id, customer_id, status, total_usd, loyalty_points_earned,
+      `SELECT id, source, external_order_id, customer_id, status,
+              total_amount_usd,
+              total_amount_bs, exchange_rate_bs_per_usd, payment_method,
+              loyalty_points_earned,
               notes, sold_by, created_at, updated_at,
               COALESCE(applies_stock, TRUE) AS applies_stock,
               COALESCE(records_cash, TRUE) AS records_cash,
@@ -263,7 +424,12 @@ async function getSalesOrderById(id) {
       external_order_id: o.external_order_id,
       customer_id: o.customer_id,
       status: o.status,
-      total_usd: Number(o.total_usd),
+      total_amount_usd: Number(o.total_amount_usd),
+      total_usd: Number(o.total_amount_usd),
+      total_amount_bs: o.total_amount_bs != null ? Number(o.total_amount_bs) : null,
+      exchange_rate_bs_per_usd:
+        o.exchange_rate_bs_per_usd != null ? Number(o.exchange_rate_bs_per_usd) : null,
+      payment_method: o.payment_method,
       loyalty_points_earned: o.loyalty_points_earned,
       notes: o.notes,
       sold_by: o.sold_by,
@@ -272,14 +438,18 @@ async function getSalesOrderById(id) {
       ml_user_id: o.ml_user_id,
       created_at: o.created_at,
       updated_at: o.updated_at,
-      items: irows.map((r) => ({
-        id: r.id,
-        product_id: r.product_id,
-        sku: r.sku,
-        quantity: r.quantity,
-        unit_price_usd: Number(r.unit_price_usd),
-        line_total_usd: Number(r.line_total_usd),
-      })),
+      items: irows.map((r) => {
+        const sub = Number(r.line_total_usd);
+        return {
+          id: r.id,
+          product_id: r.product_id,
+          sku: r.sku,
+          quantity: r.quantity,
+          unit_price_usd: Number(r.unit_price_usd),
+          line_total_usd: sub,
+          subtotal_usd: sub,
+        };
+      }),
     };
   } catch (e) {
     throw mapErr(e);
@@ -312,7 +482,7 @@ async function listSalesOrders({ limit = 50, offset = 0, source, status, from, t
   params.push(lim, off);
   try {
     const { rows } = await pool.query(
-      `SELECT id, source, external_order_id, customer_id, status, total_usd, loyalty_points_earned,
+      `SELECT id, source, external_order_id, customer_id, status, total_amount_usd, loyalty_points_earned,
               notes, sold_by, created_at
        FROM sales_orders ${where}
        ORDER BY created_at DESC
@@ -327,7 +497,8 @@ async function listSalesOrders({ limit = 50, offset = 0, source, status, from, t
         external_order_id: o.external_order_id,
         customer_id: o.customer_id,
         status: o.status,
-        total_usd: Number(o.total_usd),
+        total_amount_usd: Number(o.total_amount_usd),
+        total_usd: Number(o.total_amount_usd),
         loyalty_points_earned: o.loyalty_points_earned,
         notes: o.notes,
         sold_by: o.sold_by,
@@ -359,7 +530,8 @@ async function getSalesStats({ from, to }) {
     const { rows } = await pool.query(
       `SELECT source,
               COUNT(*)::bigint AS order_count,
-              COALESCE(SUM(total_usd), 0)::numeric AS total_usd
+              COALESCE(SUM(total_amount_usd), 0)::numeric AS total_amount_usd,
+              COALESCE(SUM(total_amount_bs), 0)::numeric AS total_amount_bs
        FROM sales_orders
        ${where}
        GROUP BY source
@@ -367,7 +539,8 @@ async function getSalesStats({ from, to }) {
       params
     );
     const { rows: sumRows } = await pool.query(
-      `SELECT COALESCE(SUM(total_usd), 0)::numeric AS total_usd,
+      `SELECT COALESCE(SUM(total_amount_usd), 0)::numeric AS total_amount_usd,
+              COALESCE(SUM(total_amount_bs), 0)::numeric AS total_amount_bs,
               COUNT(*)::bigint AS order_count
        FROM sales_orders ${where}`,
       params
@@ -376,10 +549,14 @@ async function getSalesStats({ from, to }) {
       by_source: rows.map((r) => ({
         source: r.source,
         order_count: Number(r.order_count),
-        total_usd: Number(r.total_usd),
+        total_amount_usd: Number(r.total_amount_usd),
+        total_usd: Number(r.total_amount_usd),
+        total_amount_bs: r.total_amount_bs != null ? Number(r.total_amount_bs) : null,
       })),
       total_orders: Number(sumRows[0].order_count),
-      total_usd: Number(sumRows[0].total_usd),
+      total_amount_usd: Number(sumRows[0].total_amount_usd),
+      total_usd: Number(sumRows[0].total_amount_usd),
+      total_amount_bs: sumRows[0].total_amount_bs != null ? Number(sumRows[0].total_amount_bs) : null,
     };
   } catch (e) {
     throw mapErr(e);
@@ -388,7 +565,7 @@ async function getSalesStats({ from, to }) {
 
 /**
  * @param {number} orderId
- * @param {'paid'|'cancelled'|'refunded'} newStatus
+ * @param {'paid'|'cancelled'|'shipped'} newStatus
  */
 async function patchSalesOrderStatus(orderId, newStatus) {
   const oid = Number(orderId);
@@ -403,7 +580,7 @@ async function patchSalesOrderStatus(orderId, newStatus) {
     await client.query("BEGIN");
 
     const { rows: orows } = await client.query(
-      `SELECT id, source, customer_id, status, total_usd, loyalty_points_earned,
+      `SELECT id, source, customer_id, status, total_amount_usd, loyalty_points_earned,
               COALESCE(applies_stock, TRUE) AS applies_stock,
               COALESCE(records_cash, TRUE) AS records_cash
        FROM sales_orders WHERE id = $1 FOR UPDATE`,
@@ -420,9 +597,10 @@ async function patchSalesOrderStatus(orderId, newStatus) {
     const appliesStock = order.applies_stock !== false;
     const recordsCash = order.records_cash !== false;
     const items = await fetchOrderItems(client, oid);
+    const totalAmt = Number(order.total_amount_usd);
 
     if (newStatus === "paid") {
-      if (cur !== "pending_payment") {
+      if (cur !== "pending") {
         await client.query("ROLLBACK");
         const e = new Error("transición inválida");
         e.code = "INVALID_TRANSITION";
@@ -435,11 +613,10 @@ async function patchSalesOrderStatus(orderId, newStatus) {
         throw e;
       }
       const cid = Number(order.customer_id);
-      const totalUsd = Number(order.total_usd);
       const earn = await loyaltyService.earnFromMlOrder({
         customerId: cid,
         orderId: `SALES-${oid}`,
-        amountUsd: totalUsd,
+        amountUsd: totalAmt,
         source: order.source,
         client,
       });
@@ -451,55 +628,59 @@ async function patchSalesOrderStatus(orderId, newStatus) {
       if (recordsCash) {
         await client.query(
           `INSERT INTO sales_cash_movements (sales_order_id, amount_usd, movement_type) VALUES ($1, $2, 'sale')`,
-          [oid, totalUsd.toFixed(2)]
+          [oid, totalAmt.toFixed(2)]
         );
       }
-    } else if (newStatus === "cancelled") {
-      if (cur !== "pending_payment") {
-        await client.query("ROLLBACK");
-        const e = new Error("transición inválida");
-        e.code = "INVALID_TRANSITION";
-        throw e;
-      }
-      if (appliesStock) {
-        await incrementStock(client, items);
-      }
-      await client.query(`UPDATE sales_orders SET status = 'cancelled', updated_at = NOW() WHERE id = $1`, [oid]);
-    } else if (newStatus === "refunded") {
+    } else if (newStatus === "shipped") {
       if (cur !== "paid") {
         await client.query("ROLLBACK");
         const e = new Error("transición inválida");
         e.code = "INVALID_TRANSITION";
         throw e;
       }
-      const pts = Number(order.loyalty_points_earned) || 0;
-      if (appliesStock) {
-        await incrementStock(client, items);
-      }
-      if (recordsCash) {
-        await client.query(
-          `INSERT INTO sales_cash_movements (sales_order_id, amount_usd, movement_type) VALUES ($1, $2, 'refund')`,
-          [oid, (-Number(order.total_usd)).toFixed(2)]
-        );
-      }
-      if (pts > 0) {
-        if (order.customer_id == null) {
-          await client.query("ROLLBACK");
-          const e = new Error("customer_id requerido para revertir puntos");
-          e.code = "BAD_REQUEST";
-          throw e;
+      await client.query(`UPDATE sales_orders SET status = 'shipped', updated_at = NOW() WHERE id = $1`, [oid]);
+    } else if (newStatus === "cancelled") {
+      if (cur === "pending") {
+        if (appliesStock) {
+          await incrementStockFromOrderLines(client, items);
         }
-        const cid = Number(order.customer_id);
-        await loyaltyService.adjustPointsWithClient(
-          client,
-          cid,
-          -pts,
-          `Reembolso venta omnicanal #${oid}`
+        await client.query(`UPDATE sales_orders SET status = 'cancelled', updated_at = NOW() WHERE id = $1`, [oid]);
+      } else if (cur === "paid" || cur === "shipped") {
+        const pts = Number(order.loyalty_points_earned) || 0;
+        if (appliesStock) {
+          await incrementStockFromOrderLines(client, items);
+        }
+        if (recordsCash) {
+          await client.query(
+            `INSERT INTO sales_cash_movements (sales_order_id, amount_usd, movement_type) VALUES ($1, $2, 'refund')`,
+            [oid, (-totalAmt).toFixed(2)]
+          );
+        }
+        if (pts > 0) {
+          if (order.customer_id == null) {
+            await client.query("ROLLBACK");
+            const e = new Error("customer_id requerido para revertir puntos");
+            e.code = "BAD_REQUEST";
+            throw e;
+          }
+          const cid = Number(order.customer_id);
+          await loyaltyService.adjustPointsWithClient(
+            client,
+            cid,
+            -pts,
+            `Anulación venta omnicanal #${oid}`
+          );
+        }
+        await client.query(
+          `UPDATE sales_orders SET status = 'cancelled', loyalty_points_earned = 0, updated_at = NOW() WHERE id = $1`,
+          [oid]
         );
+      } else {
+        await client.query("ROLLBACK");
+        const e = new Error("transición inválida");
+        e.code = "INVALID_TRANSITION";
+        throw e;
       }
-      await client.query(`UPDATE sales_orders SET status = 'refunded', loyalty_points_earned = 0, updated_at = NOW() WHERE id = $1`, [
-        oid,
-      ]);
     } else {
       await client.query("ROLLBACK");
       const e = new Error("estado no soportado");
@@ -544,8 +725,8 @@ function mlStatusToSalesStatus(mlStatus) {
     .trim();
   if (s === "cancelled" || s === "invalid") return "cancelled";
   if (s === "paid") return "paid";
-  if (s === "refunded" || s === "partially_refunded") return "refunded";
-  return "pending_payment";
+  if (s === "refunded" || s === "partially_refunded") return "cancelled";
+  return "pending";
 }
 
 /**
@@ -615,7 +796,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     }
 
     const ins = await client.query(
-      `INSERT INTO sales_orders (source, external_order_id, customer_id, status, total_usd, notes, sold_by,
+      `INSERT INTO sales_orders (source, external_order_id, customer_id, status, total_amount_usd, notes, sold_by,
         applies_stock, records_cash, ml_user_id, loyalty_points_earned)
        VALUES ('mercadolibre', $1, $2, $3, $4, $5, NULL, FALSE, FALSE, $6, $7)
        RETURNING id`,
@@ -687,6 +868,7 @@ async function importSalesOrdersFromMlTable({ mlUserId, limit = 50, offset = 0 }
 }
 
 module.exports = {
+  createOrder,
   createSalesOrder,
   getSalesOrderById,
   listSalesOrders,

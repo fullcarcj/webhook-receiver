@@ -17,6 +17,8 @@ Receptor HTTP de webhooks de Mercado Libre (órdenes, mensajes, preguntas, ítem
 |--------|-----|
 | `npm start` / `node server.js` | Servidor |
 | `npm run sync-orders` / `sync-listings` / etc. | Sincronización ML |
+| `npm run import-ml-sales` / `import-ml-sales-http` | Import órdenes ML → ventas globales (CLI local o HTTP a Render) |
+| `npm run db:sales-all` | Migraciones módulo ventas (pg, sin `psql`) |
 | `npm run rating-request-daily` | Tipo C (calificación) — también en CI |
 | `npm run retiro-broadcast-morning` / `afternoon` | Tipo B — también en CI |
 | `npm run whatsapp-tipo-f` | Prueba manual tipo F |
@@ -90,6 +92,16 @@ Sin OAuth en el job, los POST a la API de ML pueden fallar al renovar token.
 - SQL: `sql/wms-bins.sql` (jerarquía warehouse → aisle → shelf → bin, `bin_stock`, `stock_movements_audit`, vistas `v_stock_by_sku` y `v_picking_route`); parche de auditoría avanzada: `sql/wms-audit-v2.sql` (ENUM `movement_reason`, trigger INSERT/UPDATE/DELETE, `delta_*` generados, `last_counted_at`, `app.movement_notes` en sesión).
 - `bin_code`: con un solo almacén activo por empresa el código es corto (`A01-E1-N1`); con varios almacenes activos se antepone `warehouses.code` (`SM-A01-E1-N1`).
 
+### Ventas globales (`sales_orders`)
+
+- **Servicio / rutas:** `src/services/salesService.js`, `src/handlers/salesApiHandler.js` montado en `server.js` bajo `/api/sales`.
+- **Migraciones:** `npm run db:sales-all` (o `db:sales`, `db:sales-ml`, `db:sales-global`) — scripts con driver `pg` (`scripts/run-sql-file-pg.js`).
+- **Auth admin:** `X-Admin-Secret` o `?k=` / `?secret=` (mismo `ADMIN_SECRET`); desactivar query con `ADMIN_SECRET_QUERY_AUTH=0` (`src/middleware/adminAuth.js`).
+- **Import desde ML:** `SALES_ML_IMPORT_ENABLED=1` en el servidor. Copia desde `ml_orders` → `sales_orders` (sin stock/caja por defecto).
+- **POST `/api/sales/import/ml`:** cuerpo JSON `ml_user_id` obligatorio; `order_id` opcional (una orden); sin `order_id` → lote con `limit`/`offset`. Filtro opcional **`ml_feedback_filter`** sobre columnas `feedback_sale` / `feedback_purchase` en `ml_orders` (texto `pending`): `none` | `feedback_sale_pending` | `feedback_purchase_pending` | `feedback_any_pending` | `feedback_both_pending`. Convención ML: *purchase* = calificación del comprador hacia el vendedor; *sale* = del vendedor hacia el comprador. Conviene tener `ml_orders` actualizado (`sync-orders`, `ml-order-feedback-sync`).
+- **CLI local (misma BD que el proceso):** `npm run import-ml-sales -- --ml-user-id=…` con `--ml-feedback-filter=feedback_any_pending` (ver `scripts/importMlOrdersToSales.js`).
+- **CLI contra URL desplegada:** `npm run import-ml-sales-http` con `SALES_IMPORT_BASE_URL` o `RENDER_URL`, `ADMIN_SECRET`, `ML_USER_ID`; opcional `IMPORT_USE_QUERY_K=1` para enviar el secreto en query (ver `scripts/import-ml-sales-http.js`).
+
 ## Variables de entorno (referencia rápida)
 
 Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-env-local.js` y en los módulos citados.
@@ -109,6 +121,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Calificación C | `ML_RATING_REQUEST_ENABLED`, `ML_RATING_REQUEST_LOOKBACK_DAYS`, …; hora diaria = **cron** en `rating-request-daily.yml` |
 | FileMaker | `FILEMAKER_TIPO_G_SECRET`, `FILEMAKER_INVENTARIO_PRODUCTOS_SECRET` |
 | API pública catálogo | `FRONTEND_API_KEY`, `FRONTEND_CORS_ORIGINS`, rate limit |
+| Ventas globales / import ML | `SALES_ML_IMPORT_ENABLED`, `SALES_ML_IMPORT_LOYALTY` (opcional); migraciones `db:sales-all`; HTTP: `SALES_IMPORT_BASE_URL` / `RENDER_URL`, `SALES_IMPORT_TIMEOUT_MS` para `import-ml-sales-http` |
 | Banesco (monitor + CSV) | `BANESCO_MONITOR_ENABLED`, `BANESCO_USER`, `BANESCO_PASS`, `BANK_ACCOUNT_ID`; intervalo `BANESCO_MONITOR_INTERVAL_SEC`; ventana horaria portal `BANESCO_MONITOR_WINDOW_ENABLED`, `BANESCO_MONITOR_WINDOW_START` / `END` (ej. 05:00–23:00), `BANESCO_MONITOR_WINDOW_TZ` (default `America/Caracas`); Playwright: `PLAYWRIGHT_BROWSERS_PATH=0`, `postinstall` = `playwright install chromium`; local opcional `BANESCO_HEADLESS=0`; en Render sin X11 el código fuerza headless aunque `BANESCO_HEADLESS=0` |
 
 **Producción (p. ej. Render):** replicar las mismas claves que en local para el comportamiento esperado; el servidor no lee `oauth-env.json` en el cloud salvo que se suba (no recomendado).
@@ -158,7 +171,8 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Reservas ML ↔ bin_stock | `src/services/reservationService.js`, `sql/ml-reservations.sql`, enganche en `server.js` (topic `orders_v2` + fetch) |
 | Orden de migración SQL | `sql/run-migrations.md` |
 | Banesco monitor / CSV / statements | `src/services/banescoService.js`, `src/jobs/banescoMonitor.js`, `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`, `src/services/bankStatementsService.js`, `sql/bank-reconciliation.sql` |
+| Ventas globales + import ML | `src/services/salesService.js`, `src/handlers/salesApiHandler.js`, `scripts/importMlOrdersToSales.js`, `scripts/import-ml-sales-http.js`, `sql/20260408_sales_orders*.sql`, `20260409_sales_global.sql` |
 
 ---
 
-*Última revisión: 2026-04 — Render (`render.yaml`, Playwright), Banesco (ventana horaria, `/banesco-connection`, `/statements`, `bank_statements`), alineado con `package.json` y workflows.*
+*Última revisión: 2026-04 — Ventas globales (import ML, `ml_feedback_filter`, scripts HTTP), Render (`render.yaml`, Playwright), Banesco (ventana horaria, `/banesco-connection`, `/statements`, `bank_statements`), alineado con `package.json` y workflows.*

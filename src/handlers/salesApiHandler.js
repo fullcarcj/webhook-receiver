@@ -2,10 +2,11 @@
 
 const { z } = require("zod");
 const pino = require("pino");
-const { timingSafeCompare } = require("../services/currencyService");
 const { safeParse } = require("../middleware/validateCrm");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
+const { ensureAdmin } = require("../middleware/adminAuth");
 const salesService = require("../services/salesService");
+const orderService = require("../services/orderService");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info", name: "salesApi" });
 
@@ -26,19 +27,6 @@ async function parseJsonBody(req) {
   const txt = Buffer.concat(chunks).toString("utf8");
   if (!txt.trim()) return {};
   return JSON.parse(txt);
-}
-
-function ensureAdmin(req, res) {
-  const secret = process.env.ADMIN_SECRET;
-  if (!secret) {
-    writeJson(res, 503, { error: "define ADMIN_SECRET en el servidor" });
-    return false;
-  }
-  if (!timingSafeCompare(req.headers["x-admin-secret"], secret)) {
-    writeJson(res, 403, { error: "forbidden" });
-    return false;
-  }
-  return true;
 }
 
 const paymentMethodEnum = z.enum([
@@ -76,12 +64,48 @@ const patchBodySchema = z.object({
   status: z.enum(["paid", "cancelled", "shipped"]),
 });
 
-const importMlBodySchema = z.object({
-  ml_user_id: z.number().int().positive(),
-  order_id: z.number().int().positive().optional(),
-  limit: z.number().int().positive().max(500).optional(),
-  offset: z.number().int().nonnegative().optional(),
-});
+const importMlBodySchema = z
+  .object({
+    ml_user_id: z.number().int().positive().optional(),
+    /** Lote: importar candidatos de todas las cuentas en `ml_accounts` (no usar con `ml_user_id`). */
+    all_accounts: z.boolean().optional(),
+    order_id: z.number().int().positive().optional(),
+    limit: z.number().int().positive().max(500).optional(),
+    offset: z.number().int().nonnegative().optional(),
+    /** Solo importación por lotes (sin order_id). Filtra `ml_orders` por feedback pendiente. */
+    ml_feedback_filter: z
+      .enum([
+        "none",
+        "feedback_sale_pending",
+        "feedback_purchase_pending",
+        "feedback_any_pending",
+        "feedback_both_pending",
+        "feedback_purchase_strict",
+        "feedback_sale_strict",
+        "feedback_any_strict",
+        "feedback_both_strict",
+      ])
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    const hasOrder = data.order_id != null;
+    const hasUser = data.ml_user_id != null;
+    const all = data.all_accounts === true;
+    if (hasOrder && !hasUser) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "order_id requiere ml_user_id" });
+    }
+    if (hasOrder && all) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "order_id no se combina con all_accounts" });
+    }
+    if (!hasOrder) {
+      if (!all && !hasUser) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Indicá ml_user_id o all_accounts: true" });
+      }
+      if (all && hasUser) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "No combines all_accounts con ml_user_id" });
+      }
+    }
+  });
 
 function parseSalesPath(pathname) {
   const base = "/api/sales";
@@ -109,7 +133,7 @@ async function handleSalesApiRequest(req, res, url) {
 
   try {
     if (req.method === "GET" && (pathname === "/api/sales/stats" || segment === "stats")) {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       const from = url.searchParams.get("from") || undefined;
       const to = url.searchParams.get("to") || undefined;
       const stats = await salesService.getSalesStats({ from, to });
@@ -118,13 +142,14 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && (pathname === "/api/sales" || pathname === "/api/sales/")) {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       const limit = url.searchParams.get("limit");
       const offset = url.searchParams.get("offset");
       const source = url.searchParams.get("source") || undefined;
       const status = url.searchParams.get("status") || undefined;
       const from = url.searchParams.get("from") || undefined;
       const to = url.searchParams.get("to") || undefined;
+      const includeCompleted = url.searchParams.get("include_completed") === "1";
       const out = await salesService.listSalesOrders({
         limit: limit != null ? Number(limit) : undefined,
         offset: offset != null ? Number(offset) : undefined,
@@ -132,6 +157,7 @@ async function handleSalesApiRequest(req, res, url) {
         status,
         from,
         to,
+        excludeCompleted: !includeCompleted,
       });
       writeJson(res, 200, {
         data: out.rows,
@@ -139,6 +165,7 @@ async function handleSalesApiRequest(req, res, url) {
           total: out.total,
           limit: out.limit,
           offset: out.offset,
+          exclude_completed_default: !includeCompleted,
           timestamp: new Date().toISOString(),
         },
       });
@@ -146,7 +173,7 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && (pathname === "/api/sales/import/ml" || segment === "import/ml")) {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       let body = {};
       try {
         body = await parseJsonBody(req);
@@ -171,9 +198,11 @@ async function handleSalesApiRequest(req, res, url) {
         });
       } else {
         const data = await salesService.importSalesOrdersFromMlTable({
+          allAccounts: d.all_accounts === true,
           mlUserId: d.ml_user_id,
           limit: d.limit,
           offset: d.offset,
+          mlFeedbackFilter: d.ml_feedback_filter,
         });
         writeJson(res, 200, { data, meta: { timestamp: new Date().toISOString() } });
       }
@@ -181,7 +210,7 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && (pathname === "/api/sales/create" || segment === "create")) {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       let body = {};
       try {
         body = await parseJsonBody(req);
@@ -215,8 +244,41 @@ async function handleSalesApiRequest(req, res, url) {
       return true;
     }
 
+    if (req.method === "GET" && (segment === "alerts/pending" || pathname === "/api/sales/alerts/pending")) {
+      if (!ensureAdmin(req, res, url)) return true;
+      const type = url.searchParams.get("type") || "all";
+      const data = await orderService.listPendingRatingAlerts(type);
+      writeJson(res, 200, { data, meta: { timestamp: new Date().toISOString() } });
+      return true;
+    }
+
+    const historyMatch = segment && segment.match(/^(\d+)\/history$/);
+    if (req.method === "GET" && historyMatch) {
+      if (!ensureAdmin(req, res, url)) return true;
+      const id = Number(historyMatch[1]);
+      const rows = await orderService.getOrderHistory(id);
+      writeJson(res, 200, { data: rows, meta: { timestamp: new Date().toISOString() } });
+      return true;
+    }
+
+    const statusMatch = segment && segment.match(/^(\d+)\/status$/);
+    if (req.method === "PATCH" && statusMatch) {
+      if (!ensureAdmin(req, res, url)) return true;
+      const id = Number(statusMatch[1]);
+      let body = {};
+      try {
+        body = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const updated = await orderService.updateOrderStatus(id, body);
+      writeJson(res, 200, { data: updated, meta: { timestamp: new Date().toISOString() } });
+      return true;
+    }
+
     if (req.method === "GET" && segment && /^\d+$/.test(segment)) {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       const id = Number(segment);
       const row = await salesService.getSalesOrderById(id);
       writeJson(res, 200, { data: row, meta: { timestamp: new Date().toISOString() } });
@@ -224,7 +286,7 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "PATCH" && segment && /^\d+$/.test(segment)) {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       let body = {};
       try {
         body = await parseJsonBody(req);
@@ -243,6 +305,20 @@ async function handleSalesApiRequest(req, res, url) {
       return true;
     }
   } catch (e) {
+    if (e && e.code === "VALIDATION_ERROR") {
+      writeJson(res, e.status || 400, {
+        error: "VALIDATION_ERROR",
+        details: e.errors || [],
+      });
+      return true;
+    }
+    if (e && e.code === "INVALID_STATUS_TRANSITION") {
+      writeJson(res, 422, {
+        error: "INVALID_STATUS_TRANSITION",
+        message: String(e.message || ""),
+      });
+      return true;
+    }
     if (e && e.code === "NOT_FOUND") {
       writeJson(res, 404, { error: "NOT_FOUND" });
       return true;
@@ -268,7 +344,9 @@ async function handleSalesApiRequest(req, res, url) {
     if (e && e.code === "42703") {
       writeJson(res, 503, {
         error: "schema_missing",
-        detail: "Ejecutar npm run db:sales-ml (columnas applies_stock / records_cash)",
+        detail:
+          "Ejecutar migraciones de ventas; si faltan columnas de ciclo de vida: npm run db:orders-lifecycle. " +
+          "También: npm run db:sales-ml (applies_stock / records_cash)",
       });
       return true;
     }

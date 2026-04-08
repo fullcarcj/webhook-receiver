@@ -1,15 +1,25 @@
 #!/usr/bin/env node
+/**
+ * sql/20260409_sales_global.sql — driver `pg` (sin psql en PATH).
+ */
 "use strict";
-require("../load-env-local");
-const { spawnSync } = require("child_process");
+
 const path = require("path");
-const fs = require("fs");
-const url = process.env.DATABASE_URL && String(process.env.DATABASE_URL).trim();
-if (!url) {
-  console.error("[db:sales-global] DATABASE_URL no definida");
-  process.exit(1);
-}
+const { runSqlFile } = require("./run-sql-file-pg");
+
 const sqlPath = path.join(__dirname, "..", "sql", "20260409_sales_global.sql");
-if (!fs.existsSync(sqlPath)) process.exit(1);
-const r = spawnSync("psql", [url, "-v", "ON_ERROR_STOP=1", "-f", sqlPath], { stdio: "inherit", env: process.env });
-process.exit(r.status === 0 ? 0 : 1);
+
+(async () => {
+  try {
+    await runSqlFile(sqlPath);
+    console.log("[db:sales-global] OK");
+  } catch (e) {
+    if (e && e.code === "ENOENT_SQL") {
+      console.error("[db:sales-global] no existe", sqlPath);
+      process.exit(1);
+    }
+    console.error("[db:sales-global]", e.message);
+    if (e && e.detail) console.error("detail:", e.detail);
+    process.exit(1);
+  }
+})();

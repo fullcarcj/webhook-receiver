@@ -11,6 +11,7 @@
  * firebase-key.json: service account para scripts (p. ej. npm run upload-firebase-webp); no subir a git.
  * FRONTEND_API_KEY: solo lectura GET /api/v1/catalog (cabecera X-API-KEY); no sustituye ADMIN_SECRET.
  * ADMIN_SECRET_QUERY_AUTH: si 0 o false, ensureAdmin (src/middleware/adminAuth.js) solo acepta cabecera X-Admin-Secret; si no se define u otro valor, también ?k= / ?secret= (mismo ADMIN_SECRET) para GET en navegador y monitores.
+ * Ventas globales GET /api/sales: sin tablas → error schema_missing; ejecutar npm run db:sales-all (incluye `completed` y `customers.phone_2`) contra DATABASE_URL — scripts usan driver pg (scripts/run-sql-file-pg.js), no requieren psql en PATH.
  * Mismo X-API-Key sirve para GET /api/customers/:id/history|loyalty|profile (CORS en /api/customers*).
  * FRONTEND_CORS_ORIGINS (coma) + CRM_FRONTEND_ORIGIN o FRONTEND_ORIGIN: CORS CRM; http://localhost:5173 por defecto en catálogo.
  * Fidelización (sql/20260408_loyalty.sql): LOYALTY_POINTS_PER_USD, LOYALTY_LEVEL_SILVER|GOLD|VIP.

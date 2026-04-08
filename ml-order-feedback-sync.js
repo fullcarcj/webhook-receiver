@@ -112,6 +112,19 @@ async function upsertOrderFeedbackFromApiResponse(
     orderRowsUpdated = 1;
   }
 
+  if (process.env.SALES_ML_IMPORT_ENABLED === "1") {
+    setImmediate(() => {
+      try {
+        const salesService = require("./src/services/salesService");
+        salesService.syncMercadolibreSalesAfterMlOrderChange({ mlUserId: uid, orderId: oid }).catch((e) => {
+          console.error("[sales ml sync]", e && e.message ? e.message : e);
+        });
+      } catch (e) {
+        console.error("[sales ml sync]", e && e.message ? e.message : e);
+      }
+    });
+  }
+
   return { ok: true, upserted, orderRowsUpdated };
 }
 

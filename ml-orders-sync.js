@@ -171,6 +171,18 @@ async function syncOrdersForMlUser(mlUserId, options = {}) {
         if (row) {
           await upsertMlOrder(row);
           upserted++;
+          if (process.env.SALES_ML_IMPORT_ENABLED === "1") {
+            setImmediate(() => {
+              try {
+                const salesService = require("./src/services/salesService");
+                salesService
+                  .syncMercadolibreSalesAfterMlOrderChange({ mlUserId: mlUid, orderId: row.order_id })
+                  .catch((e) => console.error("[sales ml sync]", e && e.message ? e.message : e));
+              } catch (e) {
+                console.error("[sales ml sync]", e && e.message ? e.message : e);
+              }
+            });
+          }
           const fbRows = feedbackDetailRowsFromOrder(mlUid, ord.id, ord.feedback, {
             fetched_at: fetchedAt,
             source: "order_search",

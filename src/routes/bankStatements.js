@@ -8,6 +8,7 @@ const {
 } = require("./bankBanesco");
 const {
   listBankStatements,
+  getLatestBalancesSnapshot,
   RECONCILIATION_STATUSES,
 } = require("../services/bankStatementsService");
 
@@ -148,10 +149,15 @@ async function handleStatementsHtmlPage(req, res, url) {
 
   let rows;
   let total;
+  let balanceSnapshots;
   try {
-    const r = await listBankStatements(params);
-    rows = r.rows;
-    total = r.total;
+    const [listed, snapshots] = await Promise.all([
+      listBankStatements(params),
+      getLatestBalancesSnapshot(params),
+    ]);
+    rows = listed.rows;
+    total = listed.total;
+    balanceSnapshots = snapshots;
   } catch (e) {
     console.error("[bank statements]", e);
     res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
@@ -204,10 +210,58 @@ async function handleStatementsHtmlPage(req, res, url) {
     .muted { color: #64748b; font-size: 0.9rem; margin: 0.5rem 0 1rem; }
     .nav a { margin-right: 1rem; }
     code { background: #f1f5f9; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    .balance-banner {
+      background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%);
+      color: #f8fafc;
+      border-radius: 12px;
+      padding: 1rem 1.25rem 1.1rem;
+      margin-bottom: 1.25rem;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, 0.25);
+    }
+    .balance-banner .balance-label { margin: 0 0 0.35rem; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: #94a3b8; }
+    .balance-banner .balance-amount {
+      margin: 0;
+      font-size: 2rem;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+    }
+    .balance-banner .balance-cur { font-size: 1.1rem; font-weight: 600; color: #cbd5e1; margin-left: 0.35rem; }
+    .balance-banner .balance-meta { margin: 0.5rem 0 0; font-size: 0.8rem; color: #94a3b8; }
+    .balance-banner .balance-account { margin: 0 0 0.25rem; font-size: 0.9rem; color: #e2e8f0; font-weight: 600; }
+    .balance-banner .balance-empty { margin: 0; font-size: 0.95rem; color: #cbd5e1; }
+    .balance-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
   </style>
 </head>
 <body>
   <h1>Extractos bancarios</h1>
+  ${
+    balanceSnapshots.length === 0
+      ? `<div class="balance-banner" role="region" aria-label="Saldo disponible">
+    <p class="balance-label">Saldo según último balance_after (estos filtros)</p>
+    <p class="balance-empty">Sin movimientos coincidentes — no hay saldo que mostrar.</p>
+  </div>`
+      : `<div class="balance-grid" role="region" aria-label="Saldo disponible">
+  ${balanceSnapshots
+    .map((b) => {
+      const amt =
+        b.balance_after != null && String(b.balance_after).trim() !== ""
+          ? escapeHtml(String(b.balance_after))
+          : "—";
+      const cur = escapeHtml((b.account_currency || "VES").trim());
+      const acct = escapeHtml(b.account_number || "");
+      const asOf = formatTxDate(b);
+      return `<div class="balance-banner">
+    <p class="balance-label">Saldo disponible (último movimiento del filtro)</p>
+    ${balanceSnapshots.length > 1 ? `<p class="balance-account">Cuenta ${acct}</p>` : ""}
+    <p class="balance-amount">${amt}<span class="balance-cur">${cur}</span></p>
+    <p class="balance-meta">Según movimiento del ${escapeHtml(asOf || "—")} · balance_after</p>
+  </div>`;
+    })
+    .join("")}
+</div>`
+  }
   <p class="muted">Total en BD con estos filtros: <strong>${total}</strong> · mostrando ${rows.length} fila(s) · limit=${params.limit} offset=${params.offset}</p>
   <p class="nav">
     ${hasPrev ? `<a href="${escapeHtml(nav(prevOff))}">← Anterior</a>` : "<span>Anterior</span>"}

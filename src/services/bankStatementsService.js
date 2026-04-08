@@ -11,10 +11,10 @@ const RECONCILIATION_STATUSES = new Set([
 ]);
 
 /**
- * Lista movimientos de `bank_statements` con join a `bank_accounts`.
- * @param {{ bankAccountId: number|null, fromDate: string|null, toDate: string|null, reconciliationStatus: string|null, limit: number, offset: number }} p
+ * @param {{ bankAccountId: number|null, fromDate: string|null, toDate: string|null, reconciliationStatus: string|null }} p
+ * @returns {{ whereSql: string, values: unknown[] }}
  */
-async function listBankStatements(p) {
+function buildBankStatementsWhere(p) {
   const where = ["1=1"];
   const values = [];
   let n = 1;
@@ -36,7 +36,38 @@ async function listBankStatements(p) {
     values.push(p.reconciliationStatus);
   }
 
-  const whereSql = where.join(" AND ");
+  return { whereSql: where.join(" AND "), values };
+}
+
+/**
+ * Último `balance_after` por cuenta dentro de los mismos filtros (movimiento más reciente por fecha e id).
+ * @param {{ bankAccountId: number|null, fromDate: string|null, toDate: string|null, reconciliationStatus: string|null }} p
+ */
+async function getLatestBalancesSnapshot(p) {
+  const { whereSql, values } = buildBankStatementsWhere(p);
+  const r = await pool.query(
+    `SELECT DISTINCT ON (bs.bank_account_id)
+            bs.bank_account_id,
+            ba.account_number,
+            ba.currency::text AS account_currency,
+            bs.balance_after::text AS balance_after,
+            bs.tx_date
+     FROM bank_statements bs
+     INNER JOIN bank_accounts ba ON ba.id = bs.bank_account_id
+     WHERE ${whereSql}
+     ORDER BY bs.bank_account_id, bs.tx_date DESC, bs.id DESC`,
+    values
+  );
+  return r.rows;
+}
+
+/**
+ * Lista movimientos de `bank_statements` con join a `bank_accounts`.
+ * @param {{ bankAccountId: number|null, fromDate: string|null, toDate: string|null, reconciliationStatus: string|null, limit: number, offset: number }} p
+ */
+async function listBankStatements(p) {
+  const { whereSql, values } = buildBankStatementsWhere(p);
+  let n = values.length + 1;
 
   const countR = await pool.query(
     `SELECT count(*)::bigint AS c FROM bank_statements bs WHERE ${whereSql}`,
@@ -73,4 +104,8 @@ async function listBankStatements(p) {
   return { rows: dataR.rows, total };
 }
 
-module.exports = { listBankStatements, RECONCILIATION_STATUSES };
+module.exports = {
+  listBankStatements,
+  getLatestBalancesSnapshot,
+  RECONCILIATION_STATUSES,
+};

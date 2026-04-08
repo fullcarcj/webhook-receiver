@@ -729,6 +729,43 @@ function isMlItemsTopic(topic, resourceStr) {
 }
 
 /**
+ * Con `SALES_ML_IMPORT_ENABLED=1`: crea/actualiza `sales_orders` desde `ml_orders` y marca `completed`
+ * si `feedback_sale` (calificación del vendedor) es positiva. No bloquea la respuesta del webhook.
+ */
+function scheduleMercadolibreSalesSync(mlUserId, orderId) {
+  if (process.env.SALES_ML_IMPORT_ENABLED !== "1") return;
+  const uid = Number(mlUserId);
+  const oid = orderId != null ? Number(orderId) : NaN;
+  if (!Number.isFinite(uid) || uid <= 0 || !Number.isFinite(oid) || oid <= 0) return;
+  setImmediate(() => {
+    try {
+      const salesService = require("./src/services/salesService");
+      salesService.syncMercadolibreSalesAfterMlOrderChange({ mlUserId: uid, orderId: oid }).catch((e) => {
+        console.error("[sales ml sync]", e && e.message ? e.message : e);
+      });
+    } catch (e) {
+      console.error("[sales ml sync]", e && e.message ? e.message : e);
+    }
+  });
+}
+
+/** Opcional: enriquecer CRM/customer desde payload GET `/orders/{id}` (CRM + identidades). */
+function scheduleMlCustomerResolveFromOrderPayload(orderPayload) {
+  if (process.env.ML_CUSTOMER_RESOLVE_ON_WEBHOOK !== "1") return;
+  if (!orderPayload || typeof orderPayload !== "object") return;
+  setImmediate(() => {
+    try {
+      const { resolveMLCustomerFromOrder } = require("./src/services/mlIdentityService");
+      resolveMLCustomerFromOrder(orderPayload).catch((err) => {
+        console.error("[ml customer resolve]", err && err.message ? err.message : err);
+      });
+    } catch (e) {
+      console.error("[ml customer resolve]", e && e.message ? e.message : e);
+    }
+  });
+}
+
+/**
  * Para webhooks `messages`: si se puede resolver `order_id`, traer `/orders/{id}` y dejar la fila en `ml_orders`
  * aunque el topic original no sea `orders_v2`.
  */
@@ -762,6 +799,8 @@ async function ensureOrderRowFromMessagesWebhook(mlUserId, orderId) {
     return { ok: false, reason: "row_null" };
   }
   await upsertMlOrder(row);
+  scheduleMercadolibreSalesSync(row.ml_user_id, row.order_id);
+  scheduleMlCustomerResolveFromOrderPayload(res.data);
   const buyer = extractBuyerFromOrderPayload(res.data);
   if (buyer) {
     try {
@@ -974,6 +1013,8 @@ function scheduleTopicFetchFromWebhook(body) {
                 });
                 if (rowOrder) {
                   await upsertMlOrder(rowOrder);
+                  scheduleMercadolibreSalesSync(rowOrder.ml_user_id, rowOrder.order_id);
+                  scheduleMlCustomerResolveFromOrderPayload(parsed);
                 }
               } catch (eOrd) {
                 console.error("[ml orders webhook]", eOrd.message || eOrd);
@@ -1585,7 +1626,7 @@ const server = http.createServer(async (req, res) => {
         api_crm_admin:
           "CRM (X-Admin-Secret): catálogo plano GET|POST /api/crm/brands, GET|POST /api/crm/models?brand_id=, GET|POST /api/crm/generations?model_id=, GET|POST /api/crm/compatibility · POST /api/customers/purchase (mostrador + puntos) · GET /api/crm/logs · WhatsApp GET|POST /webhook/whatsapp (WA_VERIFY_TOKEN) — migraciones sql/20260408_vehicles_catalog.sql + 20260408_mostrador_orders.sql",
         api_sales_omnicanal:
-          "Ventas globales (X-Admin-Secret): POST /api/sales/create (mostrador/social; customer opcional; payment_method; Bs vía tasas), GET /api/sales, /stats, PATCH estados pending|paid|shipped|cancelled, import ML — npm run db:sales && db:sales-ml && db:sales-global; crm_customer_identities + kits en productos.atributos.kit_components; npm run sales:stress",
+          "Ventas globales (X-Admin-Secret o ?k= / ?secret=): GET /api/sales (?include_completed=1 para ver ventas ML en estado completed), POST /api/sales/create, /stats, PATCH pending|paid|shipped|cancelled, import ML — db:sales-all incluye estado completed (feedback vendedor positivo); crm_customer_identities + kits; npm run sales:stress",
         envio_auto_postventa:
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:

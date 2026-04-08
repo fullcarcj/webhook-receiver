@@ -1,15 +1,26 @@
 #!/usr/bin/env node
+/**
+ * Ejecuta sql/20260410_whatsapp_hub.sql contra DATABASE_URL.
+ * Usa el driver `pg`; no requiere `psql` en PATH.
+ */
 "use strict";
-require("../load-env-local");
-const { spawnSync } = require("child_process");
+
 const path = require("path");
-const fs = require("fs");
-const url = process.env.DATABASE_URL && String(process.env.DATABASE_URL).trim();
-if (!url) {
-  console.error("[db:whatsapp-hub] DATABASE_URL no definida");
-  process.exit(1);
-}
+const { runSqlFile } = require("./run-sql-file-pg");
+
 const sqlPath = path.join(__dirname, "..", "sql", "20260410_whatsapp_hub.sql");
-if (!fs.existsSync(sqlPath)) process.exit(1);
-const r = spawnSync("psql", [url, "-v", "ON_ERROR_STOP=1", "-f", sqlPath], { stdio: "inherit", env: process.env });
-process.exit(r.status === 0 ? 0 : 1);
+
+(async () => {
+  try {
+    await runSqlFile(sqlPath);
+    console.log("[db:whatsapp-hub] OK");
+  } catch (e) {
+    if (e && e.code === "ENOENT_SQL") {
+      console.error("[db:whatsapp-hub] no existe", sqlPath);
+      process.exit(1);
+    }
+    console.error("[db:whatsapp-hub]", e.message);
+    if (e && e.detail) console.error("detail:", e.detail);
+    process.exit(1);
+  }
+})();

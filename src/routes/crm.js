@@ -1,10 +1,10 @@
 "use strict";
 
 const pino = require("pino");
-const { timingSafeCompare } = require("../services/currencyService");
 const { listWhatsappLogs, mapSchemaError } = require("../services/crmIdentityService");
 const { routeWebhook } = require("../whatsapp/hookRouter");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
+const { ensureAdmin } = require("../middleware/adminAuth");
 const { pool } = require("../../db");
 
 const logger = pino({
@@ -34,20 +34,6 @@ async function parseJsonBody(req) {
   const txt = Buffer.concat(chunks).toString("utf8");
   if (!txt.trim()) return {};
   return JSON.parse(txt);
-}
-
-function ensureAdmin(req, res) {
-  const secret = process.env.ADMIN_SECRET;
-  if (!secret) {
-    writeJson(res, 503, { error: "define ADMIN_SECRET en el servidor" });
-    return false;
-  }
-  const provided = req.headers["x-admin-secret"];
-  if (!timingSafeCompare(provided, secret)) {
-    writeJson(res, 403, { error: "forbidden" });
-    return false;
-  }
-  return true;
 }
 
 function crmErrorStatus(err) {
@@ -145,7 +131,7 @@ async function handleCrmApiRequest(req, res, url) {
 
   applyCrmApiCorsHeaders(req, res);
 
-  if (!ensureAdmin(req, res)) return true;
+  if (!ensureAdmin(req, res, url)) return true;
 
   try {
     if (req.method === "GET" && pathname === "/api/crm/logs") {

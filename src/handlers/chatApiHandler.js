@@ -2,8 +2,8 @@
 
 const { z } = require("zod");
 const pino = require("pino");
-const { timingSafeCompare } = require("../services/currencyService");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
+const { ensureAdmin } = require("../middleware/adminAuth");
 const {
   listChats,
   getChatContext,
@@ -22,6 +22,23 @@ const patchSchema = z.object({
   unread_count: z.number().int().min(0).optional(),
   is_ai_generating: z.boolean().optional(),
 });
+
+const CRM_SCHEMA_BODY = {
+  error: "crm_schema_missing",
+  message:
+    "Faltan tablas CRM en la base de datos. Ejecutar en orden contra DATABASE_URL: npm run db:crm luego npm run db:whatsapp-hub (requiere psql en PATH).",
+  detail:
+    "Migraciones: sql/crm-solomotor3k.sql (db:crm) y sql/20260410_whatsapp_hub.sql (db:whatsapp-hub).",
+};
+
+function isCrmSchemaMissing(err) {
+  if (!err) return false;
+  if (err.code === "CRM_SCHEMA_MISSING") return true;
+  if (String(err.message || "") === "crm_schema_missing") return true;
+  const c = err.cause;
+  if (c && (c.code === "42P01" || c.code === "42704")) return true;
+  return false;
+}
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -42,20 +59,6 @@ async function parseJsonBody(req) {
   return JSON.parse(txt);
 }
 
-function ensureAdmin(req, res) {
-  const secret = process.env.ADMIN_SECRET;
-  if (!secret) {
-    writeJson(res, 503, { error: "define ADMIN_SECRET en el servidor" });
-    return false;
-  }
-  const provided = req.headers["x-admin-secret"];
-  if (!timingSafeCompare(provided, secret)) {
-    writeJson(res, 403, { error: "forbidden" });
-    return false;
-  }
-  return true;
-}
-
 /**
  * Rutas CRM WhatsApp Hub: /api/crm/chats*, /api/crm/system/wa-status
  * @returns {Promise<boolean>} true si la petición fue manejada
@@ -69,7 +72,7 @@ async function handleChatApiRequest(req, res, url) {
   const isDev = process.env.NODE_ENV !== "production";
   applyCrmApiCorsHeaders(req, res);
 
-  if (!ensureAdmin(req, res)) return true;
+  if (!ensureAdmin(req, res, url)) return true;
 
   try {
     if (req.method === "GET" && pathname === "/api/crm/chats") {
@@ -147,6 +150,10 @@ async function handleChatApiRequest(req, res, url) {
   } catch (e) {
     if (e && e.name === "ZodError") {
       writeJson(res, 422, { error: "validation_error", details: e.issues });
+      return true;
+    }
+    if (isCrmSchemaMissing(e)) {
+      writeJson(res, 503, CRM_SCHEMA_BODY);
       return true;
     }
     logger.error({ err: e }, "chat_api_error");

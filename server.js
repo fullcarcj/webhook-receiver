@@ -179,6 +179,7 @@ const { handleWalletApiRequest } = require("./src/routes/wallet");
 const { handleCrmApiPreflight } = require("./src/middleware/crmApiCors");
 const { handleVehicleApiRequest } = require("./src/handlers/vehicleApiHandler");
 const { handlePurchaseApiRequest } = require("./src/handlers/purchaseApiHandler");
+const { handleSalesApiRequest } = require("./src/handlers/salesApiHandler");
 const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory");
 const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./src/handlers/customerLoyalty");
 const { handleCustomersApiRequest } = require("./src/routes/customers");
@@ -1572,6 +1573,8 @@ const server = http.createServer(async (req, res) => {
           "Clientes CRM: CRUD admin (X-Admin-Secret) GET/POST/PUT/PATCH /api/customers… · historial+fidelidad+perfil unificado (X-Admin-Secret o X-API-Key=FRONTEND_API_KEY): GET /api/customers/:id/history, GET …/loyalty, GET …/profile, POST …/loyalty/adjust (solo admin) · POST /api/crm/loyalty/earn (solo admin, acumulación por orden) — CORS OPTIONS en /api/customers* y /api/crm/* — migraciones: sql/crm-solomotor3k.sql + sql/20260408_loyalty.sql (npm run db:loyalty)",
         api_crm_admin:
           "CRM (X-Admin-Secret): catálogo plano GET|POST /api/crm/brands, GET|POST /api/crm/models?brand_id=, GET|POST /api/crm/generations?model_id=, GET|POST /api/crm/compatibility · POST /api/customers/purchase (mostrador + puntos) · GET /api/crm/logs · WhatsApp GET|POST /webhook/whatsapp (WA_VERIFY_TOKEN) — migraciones sql/20260408_vehicles_catalog.sql + 20260408_mostrador_orders.sql",
+        api_sales_omnicanal:
+          "Ventas omnicanal (X-Admin-Secret): POST /api/sales/create, GET /api/sales, /stats, POST /api/sales/import/ml (ml_orders→sales; SALES_ML_IMPORT_ENABLED=1, opc. SALES_ML_IMPORT_LOYALTY=1) — migraciones npm run db:sales && db:sales-ml; npm run sales:stress (STRESS_SKU, STRESS_CUSTOMER_ID)",
         envio_auto_postventa:
           "ML_AUTO_SEND_POST_SALE=1, ML_AUTO_SEND_TOPICS=… · ML_POST_SALE_TOTAL_MESSAGES=1|2|3 (plantillas por id en post_sale_messages) · ML_POST_SALE_EXTRA_DELAY_MS · ML_POST_SALE_DISABLE_DEDUP=1 solo pruebas (sin deduplicación) · placeholders {{order_id}} {{buyer_id}} {{seller_id}} · recordatorio calificación: npm run rating-request-daily-all + ML_RATING_REQUEST_ENABLED=1 (lookback por defecto 6 días; ML_RATING_REQUEST_LOOKBACK_DAYS opcional)",
         log_envios_postventa:
@@ -1676,6 +1679,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handlePurchaseApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleSalesApiRequest(req, res, url)) {
     return;
   }
 

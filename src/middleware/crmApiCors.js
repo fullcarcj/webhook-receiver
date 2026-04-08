@@ -54,6 +54,7 @@ function applyCrmApiCorsHeaders(req, res) {
 function corsCrmPath(pathname) {
   return (
     pathname.startsWith("/api/customers") ||
+    pathname.startsWith("/api/sales") ||
     pathname === "/api/crm" ||
     pathname.startsWith("/api/crm/")
   );

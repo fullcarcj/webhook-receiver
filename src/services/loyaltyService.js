@@ -144,6 +144,47 @@ async function earnFromMlOrder({ customerId, orderId, amountUsd, source, client:
 /** Alias para purchaseService / prompts. */
 const earnPoints = earnFromMlOrder;
 
+/**
+ * Ajuste de puntos dentro de una transacción externa (p. ej. reembolso en salesService).
+ * @param {import("pg").PoolClient} client
+ */
+async function adjustPointsWithClient(client, customerId, pointsDelta, reason) {
+  const cid = Number(customerId);
+  if (!Number.isFinite(cid) || cid <= 0) {
+    const e = new Error("invalid_customer_id");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const delta = Number(pointsDelta);
+  if (!Number.isFinite(delta) || delta === 0) {
+    const e = new Error("invalid_points");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  await ensureAccount(client, cid);
+  const accRow = await client.query(
+    `SELECT points_balance FROM loyalty_accounts WHERE customer_id = $1 FOR UPDATE`,
+    [cid]
+  );
+  const prev = accRow.rows[0].points_balance;
+  const next = prev + delta;
+  if (next < 0) {
+    const e = new Error("INSUFFICIENT_POINTS");
+    e.code = "INSUFFICIENT_POINTS";
+    throw e;
+  }
+  const lvl = calcLevel(next);
+  await client.query(
+    `INSERT INTO loyalty_movements (customer_id, type, points, reason, reference_id)
+     VALUES ($1, 'adjust', $2, $3, NULL)`,
+    [cid, delta, reason]
+  );
+  await client.query(
+    `UPDATE loyalty_accounts SET points_balance = $1, level = $2 WHERE customer_id = $3`,
+    [next, lvl, cid]
+  );
+}
+
 async function adjustPoints(customerId, pointsDelta, reason) {
   const cid = Number(customerId);
   if (!Number.isFinite(cid) || cid <= 0) {
@@ -161,29 +202,7 @@ async function adjustPoints(customerId, pointsDelta, reason) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await ensureAccount(client, cid);
-    const accRow = await client.query(
-      `SELECT points_balance FROM loyalty_accounts WHERE customer_id = $1 FOR UPDATE`,
-      [cid]
-    );
-    const prev = accRow.rows[0].points_balance;
-    const next = prev + delta;
-    if (next < 0) {
-      await client.query("ROLLBACK");
-      const e = new Error("INSUFFICIENT_POINTS");
-      e.code = "INSUFFICIENT_POINTS";
-      throw e;
-    }
-    const lvl = calcLevel(next);
-    await client.query(
-      `INSERT INTO loyalty_movements (customer_id, type, points, reason, reference_id)
-       VALUES ($1, 'adjust', $2, $3, NULL)`,
-      [cid, delta, reason]
-    );
-    await client.query(
-      `UPDATE loyalty_accounts SET points_balance = $1, level = $2 WHERE customer_id = $3`,
-      [next, lvl, cid]
-    );
+    await adjustPointsWithClient(client, cid, delta, reason);
     await client.query("COMMIT");
     return getLoyaltySummary(cid);
   } catch (e) {
@@ -249,6 +268,7 @@ module.exports = {
   pointsToNextLevel,
   earnFromMlOrder,
   earnPoints,
+  adjustPointsWithClient,
   adjustPoints,
   getLoyaltySummary,
   mapErr,

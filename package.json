@@ -44,7 +44,11 @@
     "db:crm": "node scripts/run-crm-migration.js",
     "db:loyalty": "node scripts/run-loyalty-migration.js",
     "db:vehicles-compat": "node scripts/run-vehicles-compat-migration.js",
-    "db:mostrador": "node scripts/run-mostrador-migration.js"
+    "db:mostrador": "node scripts/run-mostrador-migration.js",
+    "db:sales": "node scripts/run-sales-migration.js",
+    "db:sales-ml": "node scripts/run-sales-ml-migration.js",
+    "import-ml-sales": "node scripts/importMlOrdersToSales.js",
+    "sales:stress": "node scripts/sales_stock_stress_test.js"
   },
   "engines": {
     "node": ">=18"

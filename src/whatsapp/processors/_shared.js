@@ -10,8 +10,9 @@ function normalizePhoneDigits(raw) {
 
 /**
  * @param {import("pg").Pool|import("pg").PoolClient} db
+ * @param {object} [extraData] — p. ej. `{ name: "Nombre Apellido" }` para enriquecer CRM y match ML tipo E
  */
-async function resolveCustomerId(db, phoneRaw) {
+async function resolveCustomerId(db, phoneRaw, extraData = {}) {
   const phone = normalizePhone(phoneRaw);
   if (!phone) {
     const e = new Error("phone inválido");
@@ -23,11 +24,14 @@ async function resolveCustomerId(db, phoneRaw) {
     {
       source: "whatsapp",
       external_id: phone,
-      data: { phone: phoneRaw },
+      data: { phone: phoneRaw, ...extraData },
     },
     { client: db }
   );
-  return Number(r.customerId);
+  return {
+    customerId: Number(r.customerId),
+    waMlBuyerTipoECheck: r.waMlBuyerTipoECheck || null,
+  };
 }
 
 /**

@@ -1,7 +1,12 @@
 "use strict";
 
+const pino = require("pino");
 const { pool } = require("../../../db");
 const { resolveCustomerId, upsertChat } = require("./_shared");
+const { pickWaFullNameCandidate } = require("../waNameCandidate");
+const { runWaMlBuyerMatchTipoE } = require("../../services/waMlBuyerMatchTipoE");
+
+const msgLog = pino({ level: process.env.LOG_LEVEL || "info", name: "whatsapp_messages" });
 
 function isPriority(normalized) {
   const t = normalized.content && normalized.content.text;
@@ -34,7 +39,12 @@ async function handle(normalized) {
   try {
     await client.query("BEGIN");
 
-    const customerId = await resolveCustomerId(client, normalized.fromPhone);
+    const nameExtra = pickWaFullNameCandidate(normalized);
+    const extra = {};
+    if (nameExtra.name) extra.name = nameExtra.name;
+    const cn = normalized.contactName != null ? String(normalized.contactName).trim() : "";
+    if (cn) extra.contact_name = cn;
+    const { customerId, waMlBuyerTipoECheck } = await resolveCustomerId(client, normalized.fromPhone, extra);
     const lastAt = new Date((normalized.timestamp || Math.floor(Date.now() / 1000)) * 1000);
     const preview = normalized.content?.text ? String(normalized.content.text).slice(0, 200) : "";
 
@@ -81,6 +91,17 @@ async function handle(normalized) {
     }
 
     await client.query("COMMIT");
+
+    if (waMlBuyerTipoECheck) {
+      setImmediate(() => {
+        runWaMlBuyerMatchTipoE({
+          ...waMlBuyerTipoECheck,
+          customerId,
+        }).catch((err) => {
+          msgLog.error({ err }, "runWaMlBuyerMatchTipoE");
+        });
+      });
+    }
   } catch (e) {
     try {
       await client.query("ROLLBACK");

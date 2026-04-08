@@ -10,7 +10,7 @@ async function handle(normalized) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const customerId = await resolveCustomerId(client, phone);
+    const { customerId } = await resolveCustomerId(client, phone);
     const lastAt = new Date((normalized.timestamp || Math.floor(Date.now() / 1000)) * 1000);
     const preview = normalized.content?.text ? String(normalized.content.text).slice(0, 200) : "";
 

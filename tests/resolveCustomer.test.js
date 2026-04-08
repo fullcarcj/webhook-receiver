@@ -14,6 +14,26 @@
 const assert = require("assert");
 const { normalizePhone, phonesMatch } = require("../src/utils/phoneNormalizer");
 
+function testSanitizeWaPersonName() {
+  const { sanitizeWaPersonName, isLikelyChatNotName, sanitizeContactDisplayName } = require("../src/whatsapp/waNameCandidate");
+  assert.strictEqual(sanitizeWaPersonName("Carlos Pérez"), "Carlos Pérez");
+  assert.strictEqual(sanitizeWaPersonName("Carlos Pérez 04141234567"), "Carlos Pérez");
+  assert.strictEqual(sanitizeWaPersonName("Ana María López"), "Ana María López");
+  assert.strictEqual(sanitizeWaPersonName("Pedro 99 García"), "Pedro García");
+  assert.strictEqual(sanitizeWaPersonName("5841234567890"), null);
+  assert.strictEqual(sanitizeWaPersonName("Carlos"), null);
+  assert.strictEqual(sanitizeWaPersonName("123 456"), null);
+  assert.strictEqual(isLikelyChatNotName("Carlos Pérez"), false);
+  assert.strictEqual(isLikelyChatNotName("Tienen filtro para Aveo"), true);
+  assert.strictEqual(isLikelyChatNotName("¿Cuánto cuesta?"), true);
+  assert.strictEqual(sanitizeContactDisplayName("Carlos"), "Carlos");
+  assert.strictEqual(sanitizeContactDisplayName("Fullcar CJ"), "Fullcar CJ");
+  assert.strictEqual(sanitizeContactDisplayName("584247110371"), null);
+  assert.strictEqual(sanitizeContactDisplayName("WA-584247110371"), null);
+  assert.strictEqual(/^WA-\d+$/i.test(" WA-584242701513".trim()), true, "trim evita guardar WA- por espacio inicial");
+  console.log("sanitizeWaPersonName: OK");
+}
+
 function testNormalizer() {
   assert.strictEqual(normalizePhone("+584121234567"), "584121234567");
   assert.strictEqual(normalizePhone("04121234567"), "584121234567");
@@ -52,6 +72,7 @@ async function testResolveIntegration() {
 }
 
 (async () => {
+  testSanitizeWaPersonName();
   testNormalizer();
   await testResolveIntegration();
   console.log("tests/resolveCustomer: done");

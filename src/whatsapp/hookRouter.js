@@ -3,6 +3,7 @@
 const pino = require("pino");
 const { parseWebhookJobs } = require("./payloadParser");
 const { findOrCreateCustomer } = require("../services/crmIdentityService");
+const { sanitizeWaPersonName } = require("./waNameCandidate");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -73,9 +74,11 @@ async function routeWebhook(body) {
 
   if (firstInbound && firstInbound.fromPhone) {
     try {
+      const rawCn = firstInbound.contactName != null ? String(firstInbound.contactName).trim() : "";
+      const safeCn = rawCn ? sanitizeWaPersonName(rawCn) : null;
       await findOrCreateCustomer({
         phoneNumber: firstInbound.fromPhone,
-        fullName: firstInbound.contactName || null,
+        fullName: safeCn || null,
         messageId: firstInbound.messageId || `hub-${Date.now()}`,
         rawPayload: body,
         fuzzyThreshold: 0.35,

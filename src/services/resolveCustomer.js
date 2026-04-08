@@ -5,8 +5,16 @@ const pino = require("pino");
 const { pool } = require("../../db");
 const { normalizePhone } = require("../utils/phoneNormalizer");
 const { customersHasPhone2Column } = require("../utils/customersPhone2");
+const { tryWhatsappSalesNameMatchBeforeNewCustomer } = require("./waMlBuyerMatchTipoE");
+const { sanitizeWaPersonName, sanitizeContactDisplayName } = require("../whatsapp/waNameCandidate");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "resolveCustomer" });
+
+/** Placeholder antiguo `WA-584…` o variante con espacios; no es nombre real. */
+function isWaPhonePlaceholderFullName(s) {
+  const t = String(s || "").trim();
+  return /^WA-\d+$/i.test(t);
+}
 
 const identitySchema = z.object({
   source: z.enum(["whatsapp", "mercadolibre", "mostrador"]),
@@ -14,6 +22,8 @@ const identitySchema = z.object({
   data: z
     .object({
       name: z.string().optional(),
+      /** Nombre de perfil WA (fallback legible si no hay `name` válido). */
+      contact_name: z.string().optional(),
       phone: z.string().optional(),
       phone2: z.string().optional(),
       email: z.string().optional(),
@@ -36,9 +46,20 @@ async function linkIdentity(db, customerId, source, externalId) {
   );
 }
 
-/**
- * @param {import("pg").Pool|import("pg").PoolClient} db
- */
+/** Tras nombre + teléfono reales por WhatsApp: match opcional con ML + tipo E (ver `waMlBuyerMatchTipoE.js`). */
+function buildWaMlBuyerTipoECheck(source, data, normalizedPhone, fullNameInsert) {
+  if (source !== "whatsapp") return null;
+  const raw =
+    (data.name && String(data.name).trim()) ||
+    (fullNameInsert && String(fullNameInsert).trim()) ||
+    "";
+  if (!raw || isWaPhonePlaceholderFullName(raw) || raw === "Cliente WhatsApp" || raw === "Cliente") return null;
+  const words = raw.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length < 2) return null;
+  if (!normalizedPhone) return null;
+  return { fullName: raw, waPhoneE164: normalizedPhone };
+}
+
 async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2) {
   const name = data.name && String(data.name).trim() ? String(data.name).trim() : null;
   const email = data.email ? String(data.email).toLowerCase().trim() : null;
@@ -49,6 +70,10 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
       `UPDATE customers SET
          full_name = CASE
            WHEN $2::text IS NOT NULL AND full_name LIKE 'WA-%' AND $2::text NOT LIKE 'WA-%'
+             THEN $2::text
+           WHEN $2::text IS NOT NULL AND TRIM(full_name) = 'Cliente WhatsApp' AND NOT ($2::text LIKE 'WA-%')
+             THEN $2::text
+           WHEN $2::text IS NOT NULL AND TRIM(full_name) = 'Cliente' AND NOT ($2::text LIKE 'WA-%')
              THEN $2::text
            WHEN $2::text IS NOT NULL AND COALESCE(TRIM(full_name), '') = ''
              THEN $2::text
@@ -76,6 +101,10 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
       `UPDATE customers SET
          full_name = CASE
            WHEN $2::text IS NOT NULL AND full_name LIKE 'WA-%' AND $2::text NOT LIKE 'WA-%'
+             THEN $2::text
+           WHEN $2::text IS NOT NULL AND TRIM(full_name) = 'Cliente WhatsApp' AND NOT ($2::text LIKE 'WA-%')
+             THEN $2::text
+           WHEN $2::text IS NOT NULL AND TRIM(full_name) = 'Cliente' AND NOT ($2::text LIKE 'WA-%')
              THEN $2::text
            WHEN $2::text IS NOT NULL AND COALESCE(TRIM(full_name), '') = ''
              THEN $2::text
@@ -105,7 +134,18 @@ async function resolveCustomer(identity, options = {}) {
     throw e;
   }
 
-  const { source, external_id: extRaw, data } = parsed.data;
+  const { source, external_id: extRaw } = parsed.data;
+  let data = { ...(parsed.data.data || {}) };
+  if (source === "whatsapp" && data.name != null && String(data.name).trim() !== "") {
+    const s = sanitizeWaPersonName(String(data.name));
+    if (s) data.name = s;
+    else delete data.name;
+  }
+  if (source === "whatsapp" && data.contact_name != null && String(data.contact_name).trim() !== "") {
+    const c = sanitizeContactDisplayName(String(data.contact_name));
+    if (c) data.contact_name = c;
+    else delete data.contact_name;
+  }
   const db = options.client || pool;
 
   let normalizedExternalId = extRaw;
@@ -132,11 +172,13 @@ async function resolveCustomer(identity, options = {}) {
   if (identityRows.length) {
     const customerId = Number(identityRows[0].customer_id);
     await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2);
+    const waMlBuyerTipoECheck = buildWaMlBuyerTipoECheck(source, data, normalizedPhone, null);
     return {
       customerId,
       isNew: false,
       matchLevel: "identity",
       healed: false,
+      ...(waMlBuyerTipoECheck ? { waMlBuyerTipoECheck } : {}),
     };
   }
 
@@ -164,7 +206,14 @@ async function resolveCustomer(identity, options = {}) {
       await linkIdentity(db, customerId, source, normalizedExternalId);
       await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2);
       log.info({ customerId, source, external_id: normalizedExternalId }, "resolveCustomer: healing por teléfono");
-      return { customerId, isNew: false, matchLevel: "phone", healed: true };
+      const waMlBuyerTipoECheck = buildWaMlBuyerTipoECheck(source, data, normalizedPhone, null);
+      return {
+        customerId,
+        isNew: false,
+        matchLevel: "phone",
+        healed: true,
+        ...(waMlBuyerTipoECheck ? { waMlBuyerTipoECheck } : {}),
+      };
     }
   }
 
@@ -180,7 +229,14 @@ async function resolveCustomer(identity, options = {}) {
       const customerId = Number(docRows[0].customer_id);
       await linkIdentity(db, customerId, source, normalizedExternalId);
       await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2);
-      return { customerId, isNew: false, matchLevel: "document", healed: true };
+      const waMlBuyerTipoECheck = buildWaMlBuyerTipoECheck(source, data, normalizedPhone, null);
+      return {
+        customerId,
+        isNew: false,
+        matchLevel: "document",
+        healed: true,
+        ...(waMlBuyerTipoECheck ? { waMlBuyerTipoECheck } : {}),
+      };
     }
   }
 
@@ -195,7 +251,14 @@ async function resolveCustomer(identity, options = {}) {
       const customerId = Number(emailRows[0].customer_id);
       await linkIdentity(db, customerId, source, normalizedExternalId);
       await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2);
-      return { customerId, isNew: false, matchLevel: "email", healed: true };
+      const waMlBuyerTipoECheck = buildWaMlBuyerTipoECheck(source, data, normalizedPhone, null);
+      return {
+        customerId,
+        isNew: false,
+        matchLevel: "email",
+        healed: true,
+        ...(waMlBuyerTipoECheck ? { waMlBuyerTipoECheck } : {}),
+      };
     }
   }
 
@@ -206,12 +269,47 @@ async function resolveCustomer(identity, options = {}) {
   try {
     if (ownClient) await conn.query("BEGIN");
 
-    const fullName =
-      data.name && !String(data.name).startsWith("WA-")
-        ? String(data.name).trim()
-        : normalizedPhone
-          ? `WA-${normalizedPhone}`
-          : `${source}-${normalizedExternalId}`;
+    if (source === "whatsapp") {
+      try {
+        const pre = await tryWhatsappSalesNameMatchBeforeNewCustomer(conn, {
+          normalizedPhone,
+          fullNameRaw: data.name,
+          normalizedExternalId,
+        });
+        if (pre) {
+          if (ownClient) await conn.query("COMMIT");
+          return {
+            customerId: pre.customerId,
+            isNew: pre.isNewCustomer,
+            matchLevel: "ml_sales_name_precheck",
+            healed: false,
+            waMlBuyerTipoECheck: {
+              fullName: pre.displayFullName,
+              waPhoneE164: normalizedPhone,
+              precheckDone: true,
+              orderRows: pre.orderRows,
+            },
+          };
+        }
+      } catch (e) {
+        log.error({ err: e }, "tryWhatsappSalesNameMatchBeforeNewCustomer: se continúa con alta normal");
+      }
+    }
+
+    const fullName = (() => {
+      const trimmedName = data.name != null ? String(data.name).trim() : "";
+      if (trimmedName && !isWaPhonePlaceholderFullName(trimmedName)) {
+        return trimmedName;
+      }
+      if (source === "whatsapp") {
+        if (data.contact_name) return String(data.contact_name).trim();
+        return "Cliente WhatsApp";
+      }
+      if (normalizedPhone) {
+        return "Cliente";
+      }
+      return `${source}-${normalizedExternalId}`;
+    })();
 
     // DECISIÓN: ML desde orden API se creaba como 'active'; WhatsApp/nuevo genérico como 'draft'.
     const crmStatus = source === "mercadolibre" ? "active" : "draft";
@@ -263,7 +361,14 @@ async function resolveCustomer(identity, options = {}) {
     if (ownClient) await conn.query("COMMIT");
 
     log.info({ customerId, source, fullName }, "resolveCustomer: cliente nuevo");
-    return { customerId, isNew: true, matchLevel: "created", healed: false };
+    const waMlBuyerTipoECheck = buildWaMlBuyerTipoECheck(source, data, normalizedPhone, fullName);
+    return {
+      customerId,
+      isNew: true,
+      matchLevel: "created",
+      healed: false,
+      ...(waMlBuyerTipoECheck ? { waMlBuyerTipoECheck } : {}),
+    };
   } catch (err) {
     if (ownClient) {
       try {

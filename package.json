@@ -40,12 +40,18 @@
     "fetch-rates": "node src/jobs/dailyRatesFetch.js",
     "test-wallet": "node scripts/test-wallet.js",
     "test-wallet-http": "node scripts/test-wallet.js --http",
-    "test-banesco": "node scripts/test-banesco-cycle.js"
+    "test-banesco": "node scripts/test-banesco-cycle.js",
+    "db:crm": "node scripts/run-crm-migration.js",
+    "db:loyalty": "node scripts/run-loyalty-migration.js",
+    "db:vehicles-compat": "node scripts/run-vehicles-compat-migration.js",
+    "db:mostrador": "node scripts/run-mostrador-migration.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "pino": "^9.6.0",
+    "zod": "^3.24.1",
     "playwright": "^1.44.0",
     "better-sqlite3": "^11.7.0",
     "firebase-admin": "^13.0.2",

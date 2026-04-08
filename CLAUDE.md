@@ -109,8 +109,28 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Calificación C | `ML_RATING_REQUEST_ENABLED`, `ML_RATING_REQUEST_LOOKBACK_DAYS`, …; hora diaria = **cron** en `rating-request-daily.yml` |
 | FileMaker | `FILEMAKER_TIPO_G_SECRET`, `FILEMAKER_INVENTARIO_PRODUCTOS_SECRET` |
 | API pública catálogo | `FRONTEND_API_KEY`, `FRONTEND_CORS_ORIGINS`, rate limit |
+| Banesco (monitor + CSV) | `BANESCO_MONITOR_ENABLED`, `BANESCO_USER`, `BANESCO_PASS`, `BANK_ACCOUNT_ID`; intervalo `BANESCO_MONITOR_INTERVAL_SEC`; ventana horaria portal `BANESCO_MONITOR_WINDOW_ENABLED`, `BANESCO_MONITOR_WINDOW_START` / `END` (ej. 05:00–23:00), `BANESCO_MONITOR_WINDOW_TZ` (default `America/Caracas`); Playwright: `PLAYWRIGHT_BROWSERS_PATH=0`, `postinstall` = `playwright install chromium`; local opcional `BANESCO_HEADLESS=0`; en Render sin X11 el código fuerza headless aunque `BANESCO_HEADLESS=0` |
 
 **Producción (p. ej. Render):** replicar las mismas claves que en local para el comportamiento esperado; el servidor no lee `oauth-env.json` en el cloud salvo que se suba (no recomendado).
+
+### Render (Blueprint y runtime)
+
+- **Archivo:** `render.yaml` (Blueprint): servicio web Node, `buildCommand` típico `npm ci && npx playwright install chromium --with-deps`, `startCommand` `npm start`, health `GET /health`.
+- **Variables en el servicio:** `DATABASE_URL` (o `fromDatabase` en el blueprint), `PLAYWRIGHT_BROWSERS_PATH=0` (Chromium dentro de `node_modules` para el slug), `NODE_VERSION`, secretos Banesco (`BANESCO_USER`, `BANESCO_PASS`, etc.), `ADMIN_SECRET`.
+- **Playwright en Linux:** `src/services/banescoService.js` fija `PLAYWRIGHT_BROWSERS_PATH` antes de `require('playwright')`, resuelve `executablePath` bajo `node_modules/playwright-core/.local-browsers`, relanza sin `channel` si Chrome del sistema no existe; sin `$DISPLAY` fuerza headless aunque se pida ventana.
+- **GitHub Actions → app:** p. ej. tasas BCV: `RENDER_URL` (solo en secrets del repo para `curl`), no es variable del proceso Node en Render.
+
+### Banesco (monitor, BD, HTTP)
+
+- **Código:** login/export CSV Playwright en `src/services/banescoService.js`; monitor en `src/jobs/banescoMonitor.js` (`setInterval` → `runCycle`). Fuera de la ventana horaria (`BANESCO_MONITOR_WINDOW_*`) `runCycle` omite login/descarga sin tocar la sesión en `bank_accounts`.
+- **Tabla:** `bank_statements` (+ `bank_accounts`); inserción desde el parser CSV en `banescoService`; conciliación `run_reconciliation` cuando hay inserts.
+- **Rutas HTTP** (auth: cabecera `X-Admin-Secret` **o** query `?k=` / `?secret=` igual a `ADMIN_SECRET` en JSON; HTML solo con `?k=` donde aplique):
+  - `GET /banesco-connection?k=…` — alias JSON de estado de conexión (mismo cuerpo que `/api/bank/banesco/connection`).
+  - `GET /api/bank/banesco/connection`, `GET /api/bank/banesco/status`.
+  - `GET /banesco?k=…` — página HTML estado; `?format=json` devuelve JSON.
+  - `GET /api/bank/statements` — listado JSON (`bank_account_id`, `from`, `to`, `reconciliation_status`, `limit`, `offset`).
+  - `GET /statements?k=…` — tabla HTML; `?format=json` mismo listado.
+- Handlers en `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`; consulta en `src/services/bankStatementsService.js`.
 
 ## Directrices para cambios de código
 
@@ -137,7 +157,8 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | WMS (ubicaciones / stock) | `src/services/wmsService.js`, `src/routes/wms.js`, `sql/wms-bins.sql` |
 | Reservas ML ↔ bin_stock | `src/services/reservationService.js`, `sql/ml-reservations.sql`, enganche en `server.js` (topic `orders_v2` + fetch) |
 | Orden de migración SQL | `sql/run-migrations.md` |
+| Banesco monitor / CSV / statements | `src/services/banescoService.js`, `src/jobs/banescoMonitor.js`, `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`, `src/services/bankStatementsService.js`, `sql/bank-reconciliation.sql` |
 
 ---
 
-*Última revisión: 2026-04 — alinear con `package.json`, `ml-retiro-broadcast.js`, `src/services/currencyService.js` y workflows en `.github/workflows/`.*
+*Última revisión: 2026-04 — Render (`render.yaml`, Playwright), Banesco (ventana horaria, `/banesco-connection`, `/statements`, `bank_statements`), alineado con `package.json` y workflows.*

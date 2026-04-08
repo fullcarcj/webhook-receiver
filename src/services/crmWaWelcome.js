@@ -134,6 +134,7 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
   }
 
   if (!row) {
+    log.warn({ chatId: cid }, "crm_welcome: no hay fila crm_chats");
     return { ok: false, outcome: "no_chat_row" };
   }
 
@@ -162,7 +163,10 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
 
   const to = normalizePhoneToE164(phoneRaw, cfg.defaultCountryCode);
   if (!to) {
-    log.warn({ phoneRaw }, "crm_welcome: teléfono no normalizable a E.164");
+    log.warn(
+      { phoneRaw, chatId: cid },
+      "crm_welcome: teléfono no normalizable a E.164 (revisar dígitos del webhook / default país en ml_wasender_settings)"
+    );
     return { ok: false, outcome: "bad_phone" };
   }
 

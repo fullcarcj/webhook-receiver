@@ -101,6 +101,23 @@ function pickMessageOrContactBlock(data, ev) {
       messageTimestamp: data.timestamp,
     };
   }
+  /** Wasender/Baileys suele mandar `data.messages` como array de { key, message, pushName? }. */
+  if (Array.isArray(data.messages) && data.messages.length > 0) {
+    const m0 = data.messages[0];
+    if (m0 && m0.key) {
+      return {
+        ...m0,
+        pushName: m0.pushName || m0.pushname || data.pushName || data.notify || null,
+        notify: m0.notify || data.notify || null,
+        messageTimestamp:
+          m0.messageTimestamp != null
+            ? m0.messageTimestamp
+            : data.messageTimestamp != null
+              ? data.messageTimestamp
+              : data.timestamp,
+      };
+    }
+  }
   if (
     data.messages &&
     typeof data.messages === "object" &&
@@ -156,6 +173,21 @@ function normalizeBaileysEnvelope(body) {
     n.fromPhone = digits;
   }
 
+  /** Entrante 1:1: si el webhook vino sin key útil pero hay jid en el sobre (Wasender). */
+  if (!n.fromPhone && !n.toPhone && dataTop && typeof dataTop === "object") {
+    const altJid =
+      dataTop.remoteJid ||
+      dataTop.chatId ||
+      (typeof dataTop.from === "string" ? dataTop.from : null) ||
+      (typeof dataTop.sender === "string" ? dataTop.sender : null);
+    if (altJid) {
+      const dAlt = normalizePhoneDigits(String(altJid).split("@")[0]);
+      if (dAlt) {
+        n.fromPhone = dAlt;
+      }
+    }
+  }
+
   n.messageId = key.id != null ? String(key.id) : `baileys-${Date.now()}`;
   n.timestamp =
     data.messageTimestamp != null
@@ -168,7 +200,12 @@ function normalizeBaileysEnvelope(body) {
           : Number(data.timestamp)
         : Math.floor(Date.now() / 1000);
   /** Nombre visible en WA (remitente). Wasender/Baileys: pushName o notify; a veces coincide con la marca del negocio. */
-  n.contactName = data.pushName || data.notify || null;
+  n.contactName =
+    data.pushName ||
+    data.notify ||
+    (dataTop && typeof dataTop === "object"
+      ? dataTop.pushName || dataTop.notify || dataTop.senderName || null
+      : null);
 
   if (ev.startsWith("contacts.")) {
     const jid = data.id || data.remoteJid || remote;

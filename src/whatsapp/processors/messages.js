@@ -9,6 +9,8 @@ const { trySendCrmWaWelcome, trySendCrmWaWelcomeAfterName } = require("../../ser
 
 const msgLog = pino({ level: process.env.LOG_LEVEL || "info", name: "whatsapp_messages" });
 
+let _nameSuggestedColumnWarned = false;
+
 function isPriority(normalized) {
   const t = normalized.content && normalized.content.text;
   if (!t) return false;
@@ -57,7 +59,12 @@ async function handle(normalized) {
         ]);
       } catch (e) {
         if (e && e.code === "42703") {
-          msgLog.debug("customers.name_suggested: columna ausente — npm run db:customers-name-suggested");
+          if (!_nameSuggestedColumnWarned) {
+            _nameSuggestedColumnWarned = true;
+            msgLog.warn(
+              "customers.name_suggested no existe en la BD; ejecutar en el servidor: npm run db:customers-name-suggested"
+            );
+          }
         } else {
           throw e;
         }

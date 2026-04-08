@@ -31,6 +31,28 @@ function ensureAdmin(req, res) {
   return true;
 }
 
+/**
+ * JSON API: cabecera X-Admin-Secret **o** query `k` / `secret` (misma clave que ADMIN_SECRET).
+ * Permite abrir en el navegador: `/api/...?k=TU_SECRET`.
+ */
+function ensureAdminJson(req, res, url) {
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret) {
+    writeJson(res, 503, { ok: false, error: "define ADMIN_SECRET en el servidor" });
+    return false;
+  }
+  const fromHeader = req.headers["x-admin-secret"];
+  if (timingSafeCompare(fromHeader, secret)) return true;
+  const fromQuery = url.searchParams.get("k") || url.searchParams.get("secret");
+  if (timingSafeCompare(fromQuery, secret)) return true;
+  writeJson(res, 403, {
+    ok: false,
+    error: "forbidden",
+    hint: "Cabecera X-Admin-Secret o query ?k= / ?secret= (ADMIN_SECRET)",
+  });
+  return false;
+}
+
 function ensureAdminHtml(req, res, url) {
   const secret = process.env.ADMIN_SECRET;
   const k = url.searchParams.get("k") || url.searchParams.get("secret");
@@ -125,7 +147,7 @@ async function handleBanescoHtmlPage(req, res, url) {
     snap.credentials_configured ? "configuradas" : "faltan"
   }</p>
   <p><strong>Último ciclo:</strong> ${escapeHtml(lastLine)}</p>
-  <p class="muted">JSON: <code>GET /api/bank/banesco/connection</code> con cabecera <code>X-Admin-Secret</code>, o esta misma URL con <code>?format=json&amp;k=…</code></p>
+  <p class="muted">JSON: esta página con <code>?format=json&amp;k=…</code>, o <code>GET /api/bank/banesco/connection?k=…</code> (también cabecera <code>X-Admin-Secret</code>).</p>
 </body>
 </html>`;
 
@@ -151,14 +173,14 @@ async function handleBankBanescoRequest(req, res, url) {
 
   try {
     if (req.method === "GET" && url.pathname === "/api/bank/banesco/connection") {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdminJson(req, res, url)) return true;
       const snap = await getBanescoConnectionSnapshot();
       writeJson(res, 200, { ok: true, ...snap });
       return true;
     }
 
     if (req.method === "GET" && url.pathname === "/api/bank/banesco/status") {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdminJson(req, res, url)) return true;
       const status = getPublicStatus();
       const configured =
         status.statement_csv_dir_configured || (status.has_api_user && status.has_api_password);
@@ -167,16 +189,17 @@ async function handleBankBanescoRequest(req, res, url) {
         bank: "Banesco",
         configured,
         available_endpoints: [
-          "GET /api/bank/banesco/status",
-          "GET /api/bank/banesco/connection",
-          "GET /api/bank/statements",
+          "GET /api/bank/banesco/status?k=ADMIN_SECRET",
+          "GET /api/bank/banesco/connection?k=ADMIN_SECRET",
+          "GET /api/bank/statements?k=ADMIN_SECRET",
           "GET /statements?k=ADMIN_SECRET",
           "GET /banesco?k=ADMIN_SECRET",
         ],
         status,
         next_steps_es: NEXT_STEPS_ES,
         note:
-          "GET /api/bank/banesco/connection y GET /banesco?k=… muestran si hay sesión válida en BD y el último ciclo del monitor. " +
+          "Autenticación JSON: cabecera X-Admin-Secret o ?k=ADMIN_SECRET en la URL. " +
+          "GET /api/bank/banesco/connection y GET /banesco?k=… muestran sesión y último ciclo. " +
           "No hay POST al banco desde estos endpoints.",
       });
       return true;
@@ -194,6 +217,7 @@ async function handleBankBanescoRequest(req, res, url) {
 module.exports = {
   handleBankBanescoRequest,
   ensureAdmin,
+  ensureAdminJson,
   writeJson,
   ensureAdminHtml,
   escapeHtml,

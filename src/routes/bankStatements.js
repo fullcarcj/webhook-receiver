@@ -1,7 +1,7 @@
 "use strict";
 
 const {
-  ensureAdmin,
+  ensureAdminJson,
   writeJson,
   ensureAdminHtml,
   escapeHtml,
@@ -223,7 +223,7 @@ async function handleStatementsHtmlPage(req, res, url) {
       ${rows.length ? rowsHtml : '<tr><td colspan="7">Sin filas</td></tr>'}
     </tbody>
   </table>
-  <p class="muted">JSON: misma URL con <code>?format=json</code> (y el resto de parámetros). API: <code>GET /api/bank/statements</code> + cabecera <code>X-Admin-Secret</code>.</p>
+  <p class="muted">JSON: misma URL con <code>?format=json</code>. API: <code>GET /api/bank/statements?k=…</code> (o cabecera <code>X-Admin-Secret</code>).</p>
 </body>
 </html>`;
 
@@ -233,7 +233,7 @@ async function handleStatementsHtmlPage(req, res, url) {
 }
 
 /**
- * GET /api/bank/statements — JSON (cabecera X-Admin-Secret).
+ * GET /api/bank/statements — JSON (X-Admin-Secret o ?k= / ?secret=).
  * GET /statements?k= — HTML tabla (o ?format=json).
  */
 async function handleBankStatementsRequest(req, res, url) {
@@ -249,7 +249,7 @@ async function handleBankStatementsRequest(req, res, url) {
     return true;
   }
 
-  if (!ensureAdmin(req, res)) return true;
+  if (!ensureAdminJson(req, res, url)) return true;
 
   try {
     if (url.pathname.replace(/\/+$/, "") !== "/api/bank/statements") {

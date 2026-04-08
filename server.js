@@ -184,6 +184,7 @@ const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory
 const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./src/handlers/customerLoyalty");
 const { handleCustomersApiRequest } = require("./src/routes/customers");
 const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
+const { routeWebhook: routeWhatsappHubFromBody } = require("./src/whatsapp/hookRouter");
 const { handleCrmApiRequest } = require("./src/routes/crm");
 const { handleBankBanescoRequest } = require("./src/routes/bankBanesco");
 const { handleBankStatementsRequest } = require("./src/routes/bankStatements");
@@ -687,6 +688,15 @@ async function handleWasenderWebhookPost(req, res, body, sourceLabel) {
     payload: body,
   });
   console.log("[wasender-webhook] id=%s event=%s source=%s", id, event, src);
+
+  if (String(process.env.WA_CRM_HUB_FROM_WASENDER || "1").trim() !== "0") {
+    setImmediate(() => {
+      routeWhatsappHubFromBody(body).catch((err) => {
+        console.error("[wasender->crm_hub]", err && err.message ? err.message : err);
+      });
+    });
+  }
+
   res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify({ ok: true, received: true, id }));
 }

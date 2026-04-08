@@ -87,9 +87,54 @@ function normalizeMetaStatus(st) {
   return n;
 }
 
+/**
+ * Wasender / Baileys: a veces el mensaje va en `data.messages` (objeto con `key` + `message`).
+ * Contactos: `data.contacts[]`.
+ */
+function pickMessageOrContactBlock(data, ev) {
+  if (ev.startsWith("contacts.") && Array.isArray(data.contacts) && data.contacts[0]) {
+    const c = data.contacts[0];
+    return {
+      key: { remoteJid: c.id, fromMe: false },
+      message: {},
+      pushName: c.notify,
+      messageTimestamp: data.timestamp,
+    };
+  }
+  if (
+    data.messages &&
+    typeof data.messages === "object" &&
+    !Array.isArray(data.messages) &&
+    data.messages.key
+  ) {
+    return data.messages;
+  }
+  return data;
+}
+
 function normalizeBaileysEnvelope(body) {
   const ev = String(body.event || body.type || "messages.received");
-  const data = body.data != null ? body.data : body;
+  const dataTop = body.data != null ? body.data : body;
+
+  /** Wasender API: confirmación de envío (`data.jid`, `data.msgId`) */
+  if (ev === "message.sent" || ev === "messages.sent") {
+    const d = dataTop && typeof dataTop === "object" ? dataTop : {};
+    const n = baseNormalized();
+    n.provider = "wasender";
+    n.eventType = "messages.sent";
+    n.rawPayload = body;
+    const jid = d.jid || "";
+    n.toPhone = normalizePhoneDigits(String(jid).split("@")[0]);
+    n.messageId = d.msgId != null ? String(d.msgId) : `wasender-sent-${Date.now()}`;
+    n.timestamp =
+      d.timestamp != null
+        ? Math.floor(Number(d.timestamp) / 1000)
+        : Math.floor(Date.now() / 1000);
+    n.sentBy = "wasender_api";
+    return n;
+  }
+
+  const data = pickMessageOrContactBlock(dataTop, ev);
   const n = baseNormalized();
   n.provider = "baileys";
   n.eventType = ev;
@@ -97,10 +142,14 @@ function normalizeBaileysEnvelope(body) {
 
   const key = data.key || {};
   const remote = key.remoteJid || "";
-  const digits = normalizePhoneDigits(remote.split("@")[0]);
+  let digits = normalizePhoneDigits(remote.split("@")[0]);
+  const pn = key.cleanedSenderPn || key.senderPn;
+  if (pn) {
+    digits = normalizePhoneDigits(String(pn).split("@")[0]) || digits;
+  }
   const fromMe = key.fromMe === true || key.fromMe === "true";
 
-  if (fromMe && (ev === "messages.sent" || ev.includes("sent"))) {
+  if (fromMe) {
     n.toPhone = digits;
     n.sentBy = "self";
   } else {
@@ -110,15 +159,23 @@ function normalizeBaileysEnvelope(body) {
   n.messageId = key.id != null ? String(key.id) : `baileys-${Date.now()}`;
   n.timestamp =
     data.messageTimestamp != null
-      ? Number(data.messageTimestamp)
+      ? Number(data.messageTimestamp) > 1e12
+        ? Math.floor(Number(data.messageTimestamp) / 1000)
+        : Number(data.messageTimestamp)
       : data.timestamp != null
-        ? Number(data.timestamp)
-        : n.timestamp;
+        ? Number(data.timestamp) > 1e12
+          ? Math.floor(Number(data.timestamp) / 1000)
+          : Number(data.timestamp)
+        : Math.floor(Date.now() / 1000);
   n.contactName = data.pushName || data.notify || null;
 
   if (ev.startsWith("contacts.")) {
     const jid = data.id || data.remoteJid || remote;
     n.fromPhone = normalizePhoneDigits(String(jid).split("@")[0]);
+    const pn2 = key.cleanedSenderPn || key.senderPn;
+    if (pn2) {
+      n.fromPhone = normalizePhoneDigits(String(pn2).split("@")[0]) || n.fromPhone;
+    }
     n.contactName = data.name || data.notify || n.contactName;
   }
 
@@ -199,6 +256,15 @@ function parseWebhookJobs(body) {
   const ev = String(body.event || "messages.received");
   const norm = normalizeBaileysEnvelope(body);
   let evOut = ev;
+
+  if (ev === "message.sent") {
+    evOut = "messages.sent";
+  } else if (ev === "messages.upsert") {
+    evOut = norm.toPhone ? "messages.sent" : "messages.received";
+  } else if (ev === "messages.received" || ev === "messages-personal.received") {
+    evOut = "messages.received";
+  }
+
   if (norm.type === "reaction") {
     evOut = "reactions.received";
   }

@@ -169,6 +169,8 @@ async function handleBankBanescoRequest(req, res, url) {
         available_endpoints: [
           "GET /api/bank/banesco/status",
           "GET /api/bank/banesco/connection",
+          "GET /api/bank/statements",
+          "GET /statements?k=ADMIN_SECRET",
           "GET /banesco?k=ADMIN_SECRET",
         ],
         status,
@@ -189,4 +191,10 @@ async function handleBankBanescoRequest(req, res, url) {
   }
 }
 
-module.exports = { handleBankBanescoRequest };
+module.exports = {
+  handleBankBanescoRequest,
+  ensureAdmin,
+  writeJson,
+  ensureAdminHtml,
+  escapeHtml,
+};

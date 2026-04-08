@@ -1,59 +1,40 @@
 "use strict";
 
 const { pool } = require("../../../db");
+const { normalizePhone } = require("../../utils/phoneNormalizer");
+const { resolveCustomer } = require("../../services/resolveCustomer");
 
 function normalizePhoneDigits(raw) {
-  const d = String(raw || "").replace(/\D/g, "");
-  return d || null;
+  return normalizePhone(raw);
 }
 
 /**
  * @param {import("pg").Pool|import("pg").PoolClient} db
  */
 async function resolveCustomerId(db, phoneRaw) {
-  const phone = normalizePhoneDigits(phoneRaw);
+  const phone = normalizePhone(phoneRaw);
   if (!phone) {
     const e = new Error("phone inválido");
     e.code = "BAD_REQUEST";
     throw e;
   }
 
-  const { rows } = await db.query(
-    `SELECT customer_id FROM crm_customer_identities
-     WHERE source = 'whatsapp'::crm_identity_source AND external_id = $1
-     LIMIT 1`,
-    [phone]
+  const r = await resolveCustomer(
+    {
+      source: "whatsapp",
+      external_id: phone,
+      data: { phone: phoneRaw },
+    },
+    { client: db }
   );
-  if (rows.length) return Number(rows[0].customer_id);
-
-  const { rows: nc } = await db.query(
-    `INSERT INTO customers (company_id, full_name, crm_status, phone, created_at, updated_at)
-     VALUES (1, $1, 'draft', $2, NOW(), NOW())
-     RETURNING id`,
-    [`WA-${phone}`, phone]
-  );
-  const newId = nc[0].id;
-
-  await db.query(
-    `INSERT INTO crm_customer_identities (customer_id, source, external_id, is_primary)
-     VALUES ($1, 'whatsapp'::crm_identity_source, $2, TRUE)
-     ON CONFLICT (source, external_id) DO NOTHING`,
-    [newId, phone]
-  );
-
-  const { rows: again } = await db.query(
-    `SELECT customer_id FROM crm_customer_identities
-     WHERE source = 'whatsapp'::crm_identity_source AND external_id = $1 LIMIT 1`,
-    [phone]
-  );
-  return Number(again[0].customer_id);
+  return Number(r.customerId);
 }
 
 /**
  * @param {import("pg").Pool|import("pg").PoolClient} db
  */
 async function upsertChat(db, { customerId, phone, lastMessageAt, lastMessageText, lastMessageType }) {
-  const p = normalizePhoneDigits(phone);
+  const p = normalizePhone(phone);
   if (!p) {
     const e = new Error("phone inválido");
     e.code = "BAD_REQUEST";

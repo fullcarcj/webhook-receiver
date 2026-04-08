@@ -50,6 +50,8 @@
     "db:sales-global": "node scripts/run-sales-global-migration.js",
     "db:sales-completed": "node scripts/run-sales-completed-migration.js",
     "db:customers-phone2": "node scripts/run-customers-phone2-migration.js",
+    "db:phone-normalization": "node scripts/run-phone-normalization-migration.js",
+    "dedupe-customers": "node scripts/deduplicateCustomers.js",
     "db:sales-all": "node scripts/run-sales-all-migrations.js",
     "db:orders-lifecycle": "node scripts/run-orders-lifecycle-migration.js",
     "check-pending-ratings": "node src/jobs/checkPendingRatings.js",
@@ -57,7 +59,8 @@
     "import-ml-sales": "node scripts/importMlOrdersToSales.js",
     "import-ml-sales:all": "node scripts/importMlOrdersToSales.js --all-accounts",
     "import-ml-sales-http": "node scripts/import-ml-sales-http.js",
-    "sales:stress": "node tests/sales_stress_test.js"
+    "sales:stress": "node tests/sales_stress_test.js",
+    "test:resolve-customer": "node tests/resolveCustomer.test.js"
   },
   "engines": {
     "node": ">=18"

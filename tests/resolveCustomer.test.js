@@ -14,8 +14,13 @@
 const assert = require("assert");
 const { normalizePhone, phonesMatch } = require("../src/utils/phoneNormalizer");
 
-function testSanitizeWaPersonName() {
-  const { sanitizeWaPersonName, isLikelyChatNotName, sanitizeContactDisplayName } = require("../src/whatsapp/waNameCandidate");
+async function testSanitizeWaPersonName() {
+  const {
+    sanitizeWaPersonName,
+    isLikelyChatNotName,
+    sanitizeContactDisplayName,
+    isWaContactNameBlockedForFullName,
+  } = require("../src/whatsapp/waNameCandidate");
   assert.strictEqual(sanitizeWaPersonName("Carlos Pérez"), "Carlos Pérez");
   assert.strictEqual(sanitizeWaPersonName("Carlos Pérez 04141234567"), "Carlos Pérez");
   assert.strictEqual(sanitizeWaPersonName("Ana María López"), "Ana María López");
@@ -35,6 +40,24 @@ function testSanitizeWaPersonName() {
   assert.strictEqual(sanitizeContactDisplayName("WA-584247110371"), null);
   assert.strictEqual(sanitizeContactDisplayName("Listo copiado gracias"), null);
   assert.strictEqual(/^WA-\d+$/i.test(" WA-584242701513".trim()), true, "trim evita guardar WA- por espacio inicial");
+  assert.strictEqual(isWaContactNameBlockedForFullName("Solomotor"), true);
+  assert.strictEqual(isWaContactNameBlockedForFullName("solomotor3k"), true);
+  assert.strictEqual(isWaContactNameBlockedForFullName("Juan Pérez"), false);
+
+  const { findCustomerIdByPhoneAndPersonName } = require("../src/services/customerDedupPhoneName");
+  assert.strictEqual(await findCustomerIdByPhoneAndPersonName({ query: async () => ({ rows: [] }) }, "58412", "Juan Pérez"), null);
+  assert.strictEqual(
+    await findCustomerIdByPhoneAndPersonName(
+      {
+        query: async () => ({
+          rows: [{ id: 99, full_name: "Juan Pérez" }],
+        }),
+      },
+      "584121234567",
+      "Juan Pérez"
+    ),
+    99
+  );
   console.log("sanitizeWaPersonName: OK");
 }
 
@@ -76,7 +99,7 @@ async function testResolveIntegration() {
 }
 
 (async () => {
-  testSanitizeWaPersonName();
+  await testSanitizeWaPersonName();
   testNormalizer();
   await testResolveIntegration();
   console.log("tests/resolveCustomer: done");

@@ -5,7 +5,7 @@ const { pool } = require("../../../db");
 const { resolveCustomerId, upsertChat } = require("./_shared");
 const { pickWaFullNameCandidate } = require("../waNameCandidate");
 const { runWaMlBuyerMatchTipoE } = require("../../services/waMlBuyerMatchTipoE");
-const { trySendCrmWaWelcome } = require("../../services/crmWaWelcome");
+const { trySendCrmWaWelcome, trySendCrmWaWelcomeAfterName } = require("../../services/crmWaWelcome");
 
 const msgLog = pino({ level: process.env.LOG_LEVEL || "info", name: "whatsapp_messages" });
 
@@ -46,6 +46,24 @@ async function handle(normalized) {
     const cn = normalized.contactName != null ? String(normalized.contactName).trim() : "";
     if (cn) extra.contact_name = cn;
     const { customerId, waMlBuyerTipoECheck } = await resolveCustomerId(client, normalized.fromPhone, extra);
+
+    /* pushName/notify crudo (Wasender): solo almacenaje en customers.name_suggested; no entra en resolveCustomer ni bienvenida. */
+    if (cn) {
+      const rawPush = cn.slice(0, 500);
+      try {
+        await client.query(`UPDATE customers SET name_suggested = $1, updated_at = NOW() WHERE id = $2`, [
+          rawPush,
+          customerId,
+        ]);
+      } catch (e) {
+        if (e && e.code === "42703") {
+          msgLog.debug("customers.name_suggested: columna ausente — npm run db:customers-name-suggested");
+        } else {
+          throw e;
+        }
+      }
+    }
+
     const lastAt = new Date((normalized.timestamp || Math.floor(Date.now() / 1000)) * 1000);
     const preview = normalized.content?.text ? String(normalized.content.text).slice(0, 200) : "";
 
@@ -93,16 +111,27 @@ async function handle(normalized) {
 
     await client.query("COMMIT");
 
-    /* Bienvenida: no depender de INSERT RETURNING (webhook duplicado = conflict sin fila). */
+    /* Bienvenida: primero saludo/pedido de nombre; si antes se pidió nombre y ahora hay nombre en customers → saludo con nombre. */
     if (eventType === "messages.received" && (normalized.type || "text") !== "reaction") {
       setImmediate(() => {
-        trySendCrmWaWelcome({
-          chatId,
-          customerId,
-          phoneRaw: normalized.fromPhone,
-        }).catch((err) => {
-          msgLog.error({ err }, "trySendCrmWaWelcome");
-        });
+        Promise.resolve()
+          .then(() =>
+            trySendCrmWaWelcome({
+              chatId,
+              customerId,
+              phoneRaw: normalized.fromPhone,
+            })
+          )
+          .then(() =>
+            trySendCrmWaWelcomeAfterName({
+              chatId,
+              customerId,
+              phoneRaw: normalized.fromPhone,
+            })
+          )
+          .catch((err) => {
+            msgLog.error({ err }, "trySendCrmWaWelcome");
+          });
       });
     }
 

@@ -3,7 +3,11 @@
 const { pool } = require("../../../db");
 const { findOrCreateCustomer } = require("../../services/crmIdentityService");
 const { normalizePhoneDigits } = require("./_shared");
-const { sanitizeWaPersonName, sanitizeContactDisplayName } = require("../waNameCandidate");
+const {
+  sanitizeWaPersonName,
+  sanitizeContactDisplayName,
+  isWaContactNameBlockedForFullName,
+} = require("../waNameCandidate");
 
 async function handle(normalized) {
   const ev = normalized.eventType || "contacts.upsert";
@@ -13,9 +17,10 @@ async function handle(normalized) {
   if (ev === "contacts.upsert" || ev === "contacts.update") {
     try {
       const cn = normalized.contactName ? sanitizeWaPersonName(String(normalized.contactName)) : null;
+      const disp = normalized.contactName ? sanitizeContactDisplayName(String(normalized.contactName)) : null;
       const label =
         cn ||
-        (normalized.contactName ? sanitizeContactDisplayName(String(normalized.contactName)) : null) ||
+        (disp && !isWaContactNameBlockedForFullName(disp) ? disp : null) ||
         "Cliente WhatsApp";
       await findOrCreateCustomer({
         phoneNumber: phone,
@@ -32,7 +37,7 @@ async function handle(normalized) {
   if (ev === "contacts.update" && normalized.contactName) {
     const raw = String(normalized.contactName);
     const safeName = sanitizeWaPersonName(raw) || sanitizeContactDisplayName(raw);
-    if (safeName) {
+    if (safeName && !isWaContactNameBlockedForFullName(safeName)) {
       await pool.query(
         `UPDATE customers c
          SET full_name = $1, updated_at = NOW()

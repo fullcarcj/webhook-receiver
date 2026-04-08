@@ -1,5 +1,19 @@
 "use strict";
 
+/**
+ * Flujo CRM bienvenida Wasender (messages.received → messages.js):
+ *
+ * 1) Webhook: se resuelve teléfono → customers + crm_chats (resolveCustomerId + upsertChat).
+ * 2) Se guarda el mensaje entrante; el texto puede enriquecer customers.full_name (nombre+apellido vía resolveCustomer).
+ * 3) trySendCrmWaWelcome (una vez por chat, salvo fallo de envío):
+ *    - Si customers.full_name ya es nombre+apellido válido → saludo con {{nombre}} (dos primeras palabras).
+ *    - Si no (placeholder o solo una palabra) → plantilla que pide nombre y apellido; marca wa_welcome_pending_name.
+ * 4) Mensajes siguientes: si había pedido pendiente y ahora hay nombre válido en customers → trySendCrmWaWelcomeAfterName
+ *    envía el saludo con nombre (y limpia pending).
+ *
+ * Requiere migración: npm run db:crm-wa-welcome (wa_welcome_sent_at + wa_welcome_pending_name).
+ */
+
 const pino = require("pino");
 const { pool, insertMlWhatsappWasenderLog } = require("../../db");
 const { sendWasenderTextMessage } = require("../../wasender-client");
@@ -39,6 +53,40 @@ function greetingNombreApellido(fullName) {
 function hasRealNameForGreeting(fullName) {
   if (isPlaceholderCustomerName(fullName)) return false;
   return Boolean(sanitizeWaPersonName(String(fullName)));
+}
+
+/** Reserva el slot de bienvenida; pendingAsk=true si solo pedimos nombre (luego trySendCrmWaWelcomeAfterName). */
+async function claimWelcomeFirstMessage(chatId, pendingAsk) {
+  try {
+    const r = await pool.query(
+      `UPDATE crm_chats SET wa_welcome_sent_at = NOW(), wa_welcome_pending_name = $2
+       WHERE id = $1 AND wa_welcome_sent_at IS NULL RETURNING id`,
+      [chatId, pendingAsk]
+    );
+    return r.rows.length > 0;
+  } catch (e) {
+    if (e && e.code === "42703") {
+      const r = await pool.query(
+        `UPDATE crm_chats SET wa_welcome_sent_at = NOW() WHERE id = $1 AND wa_welcome_sent_at IS NULL RETURNING id`,
+        [chatId]
+      );
+      return r.rows.length > 0;
+    }
+    throw e;
+  }
+}
+
+async function resetWelcomeClaim(chatId) {
+  try {
+    await pool.query(
+      `UPDATE crm_chats SET wa_welcome_sent_at = NULL, wa_welcome_pending_name = FALSE WHERE id = $1`,
+      [chatId]
+    );
+  } catch (e) {
+    if (e && e.code === "42703") {
+      await pool.query(`UPDATE crm_chats SET wa_welcome_sent_at = NULL WHERE id = $1`, [chatId]);
+    } else throw e;
+  }
 }
 
 /**
@@ -119,21 +167,9 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
   }
 
   /** Reserva atómica: evita doble envío (webhooks duplicados o carreras). */
-  let claim;
-  try {
-    claim = await pool.query(
-      `UPDATE crm_chats SET wa_welcome_sent_at = NOW() WHERE id = $1 AND wa_welcome_sent_at IS NULL RETURNING id`,
-      [cid]
-    );
-  } catch (e) {
-    if (e && e.code === "42703") {
-      log.warn("crm_welcome: columna wa_welcome_sent_at ausente — ejecutar npm run db:crm-wa-welcome");
-      return { ok: false, outcome: "schema" };
-    }
-    throw e;
-  }
-
-  if (!claim.rows.length) {
+  const pendingAsk = !hasRealNameForGreeting(fullName);
+  const claimed = await claimWelcomeFirstMessage(cid, pendingAsk);
+  if (!claimed) {
     return { ok: false, outcome: "already_sent" };
   }
 
@@ -156,7 +192,7 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
 
   if (!res.ok) {
     try {
-      await pool.query(`UPDATE crm_chats SET wa_welcome_sent_at = NULL WHERE id = $1`, [cid]);
+      await resetWelcomeClaim(cid);
     } catch (_e) {
       /* ignore */
     }
@@ -210,8 +246,163 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
   return { ok: true, outcome: "sent" };
 }
 
+/**
+ * Tras pedir nombre: cuando ya hay nombre+apellido en customers (mensaje siguiente o mismo ciclo),
+ * envía el saludo con {{nombre}} una vez y limpia wa_welcome_pending_name.
+ */
+async function trySendCrmWaWelcomeAfterName({ chatId, customerId, phoneRaw }) {
+  if (!isCrmWelcomeFeatureEnabled()) {
+    return { ok: false, outcome: "disabled" };
+  }
+  const cid = Number(chatId);
+  const custId = Number(customerId);
+  if (!Number.isFinite(cid) || cid <= 0 || !Number.isFinite(custId) || custId <= 0) {
+    return { ok: false, outcome: "bad_args" };
+  }
+
+  const cfg = await resolveWasenderRuntimeConfig();
+  if (!cfg.enabled) {
+    return { ok: false, outcome: "wasender_off" };
+  }
+
+  let row;
+  try {
+    const r = await pool.query(
+      `SELECT c.wa_welcome_pending_name, c.customer_id, cu.full_name, cu.primary_ml_buyer_id
+       FROM crm_chats c
+       LEFT JOIN customers cu ON cu.id = c.customer_id
+       WHERE c.id = $1`,
+      [cid]
+    );
+    row = r.rows[0];
+  } catch (e) {
+    if (e && e.code === "42703") {
+      return { ok: false, outcome: "schema" };
+    }
+    throw e;
+  }
+
+  if (!row) {
+    return { ok: false, outcome: "no_chat_row" };
+  }
+  if (Number(row.customer_id) !== custId) {
+    return { ok: false, outcome: "bad_chat" };
+  }
+
+  if (row.wa_welcome_pending_name !== true) {
+    return { ok: false, outcome: "not_pending" };
+  }
+
+  const fullName = row.full_name != null ? String(row.full_name) : "";
+  if (!hasRealNameForGreeting(fullName)) {
+    return { ok: false, outcome: "still_no_name" };
+  }
+
+  const nombre = greetingNombreApellido(fullName);
+  if (!nombre) {
+    return { ok: false, outcome: "no_greeting_name" };
+  }
+
+  const greetTemplate =
+    process.env.CRM_WA_WELCOME_GREETING || "Hola {{nombre}}, ¿en qué podemos ayudarte?";
+  const text = String(greetTemplate).replace(/\{\{nombre\}\}/g, nombre);
+
+  const to = normalizePhoneToE164(phoneRaw, cfg.defaultCountryCode);
+  if (!to) {
+    log.warn({ phoneRaw }, "crm_welcome_followup: teléfono no normalizable a E.164");
+    return { ok: false, outcome: "bad_phone" };
+  }
+
+  let claimedFollowup;
+  try {
+    const r = await pool.query(
+      `UPDATE crm_chats SET wa_welcome_pending_name = FALSE WHERE id = $1 AND wa_welcome_pending_name = TRUE RETURNING id`,
+      [cid]
+    );
+    claimedFollowup = r.rows.length > 0;
+  } catch (e) {
+    if (e && e.code === "42703") {
+      return { ok: false, outcome: "schema" };
+    }
+    throw e;
+  }
+
+  if (!claimedFollowup) {
+    return { ok: false, outcome: "not_pending" };
+  }
+
+  const buyerId =
+    row.primary_ml_buyer_id != null && Number.isFinite(Number(row.primary_ml_buyer_id))
+      ? Number(row.primary_ml_buyer_id)
+      : null;
+
+  const res = await sendWasenderTextMessage({
+    apiBaseUrl: cfg.apiBaseUrl,
+    apiKey: cfg.apiKey,
+    to,
+    text,
+  });
+
+  const msgId =
+    res.json && res.json.data && res.json.data.msgId != null ? Number(res.json.data.msgId) : null;
+  const preview = text.slice(0, 200);
+
+  if (!res.ok) {
+    try {
+      await pool.query(`UPDATE crm_chats SET wa_welcome_pending_name = TRUE WHERE id = $1`, [cid]);
+    } catch (_e) {
+      /* ignore */
+    }
+    try {
+      await insertMlWhatsappWasenderLog({
+        message_kind: "F",
+        ml_user_id: null,
+        buyer_id: buyerId,
+        order_id: null,
+        ml_question_id: null,
+        phone_e164: to,
+        phone_source: null,
+        outcome: "api_error",
+        http_status: res.status,
+        response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
+        error_message: `HTTP ${res.status}`,
+        text_preview: preview,
+        tipo_e_activation_source: "crm_wa_welcome_followup",
+      });
+    } catch (_e) {
+      /* ignore */
+    }
+    log.warn({ status: res.status, to }, "crm_welcome_followup: Wasender no OK");
+    return { ok: false, outcome: "send_failed", httpStatus: res.status };
+  }
+
+  try {
+    await insertMlWhatsappWasenderLog({
+      message_kind: "F",
+      ml_user_id: null,
+      buyer_id: buyerId,
+      order_id: null,
+      ml_question_id: null,
+      phone_e164: to,
+      phone_source: null,
+      outcome: "success",
+      http_status: res.status,
+      wasender_msg_id: Number.isFinite(msgId) ? msgId : null,
+      response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
+      text_preview: preview,
+      tipo_e_activation_source: "crm_wa_welcome_followup",
+    });
+  } catch (_e) {
+    /* ignore */
+  }
+
+  log.info({ chatId: cid, customerId: custId }, "crm_welcome_followup: enviado");
+  return { ok: true, outcome: "sent" };
+}
+
 module.exports = {
   trySendCrmWaWelcome,
+  trySendCrmWaWelcomeAfterName,
   isPlaceholderCustomerName,
   greetingNombreApellido,
   hasRealNameForGreeting,

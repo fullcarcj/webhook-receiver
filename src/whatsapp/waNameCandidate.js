@@ -97,6 +97,46 @@ function sanitizeContactDisplayName(raw) {
   return out;
 }
 
+/**
+ * pushName/notify del webhook Wasender (Baileys) a veces traen el nombre comercial del negocio
+ * en lugar del cliente. No usar esos valores como full_name en customers.
+ * Override: CRM_WA_CONTACT_NAME_DENYLIST=foo,bar (coma, sin espacios obligatorios).
+ */
+function normalizeWaContactKey(s) {
+  return String(s || "")
+    .normalize("NFC")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+const DEFAULT_CONTACT_NAME_DENYLIST = new Set([
+  "solomotor",
+  "solomotor3k",
+  "solomotor 3k",
+]);
+
+function getContactNameDenylistSet() {
+  const set = new Set(DEFAULT_CONTACT_NAME_DENYLIST);
+  const env = String(process.env.CRM_WA_CONTACT_NAME_DENYLIST || "").trim();
+  for (const part of env.split(",")) {
+    const p = normalizeWaContactKey(part);
+    if (p) set.add(p);
+  }
+  return set;
+}
+
+function isWaContactNameBlockedForFullName(raw) {
+  const key = normalizeWaContactKey(raw);
+  if (!key) return false;
+  const deny = getContactNameDenylistSet();
+  if (deny.has(key)) return true;
+  for (const w of key.split(/\s+/)) {
+    if (deny.has(w)) return true;
+  }
+  return false;
+}
+
 function isValidFullName(text) {
   if (isLikelyChatNotName(text)) return false;
   const sanitized = sanitizeWaPersonName(text);
@@ -140,4 +180,5 @@ module.exports = {
   sanitizeWaPersonName,
   isLikelyChatNotName,
   sanitizeContactDisplayName,
+  isWaContactNameBlockedForFullName,
 };

@@ -50,6 +50,7 @@
     "db:sales-global": "node scripts/run-sales-global-migration.js",
     "db:sales-completed": "node scripts/run-sales-completed-migration.js",
     "db:customers-phone2": "node scripts/run-customers-phone2-migration.js",
+    "db:customers-name-suggested": "node scripts/run-customers-name-suggested-migration.js",
     "db:phone-normalization": "node scripts/run-phone-normalization-migration.js",
     "dedupe-customers": "node scripts/deduplicateCustomers.js",
     "db:sales-all": "node scripts/run-sales-all-migrations.js",

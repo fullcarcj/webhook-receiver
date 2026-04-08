@@ -167,6 +167,7 @@ function normalizeBaileysEnvelope(body) {
           ? Math.floor(Number(data.timestamp) / 1000)
           : Number(data.timestamp)
         : Math.floor(Date.now() / 1000);
+  /** Nombre visible en WA (remitente). Wasender/Baileys: pushName o notify; a veces coincide con la marca del negocio. */
   n.contactName = data.pushName || data.notify || null;
 
   if (ev.startsWith("contacts.")) {

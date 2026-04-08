@@ -101,6 +101,14 @@ async function main() {
        WHERE table_schema = 'public' AND table_name = 'crm_chats' AND column_name = 'wa_welcome_sent_at'`
     );
     console.log("Columna crm_chats.wa_welcome_sent_at:", col.length ? "SÍ" : "NO — ejecutar: npm run db:crm-wa-welcome");
+    const { rows: colPend } = await pool.query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'crm_chats' AND column_name = 'wa_welcome_pending_name'`
+    );
+    console.log(
+      "Columna crm_chats.wa_welcome_pending_name (saludo tras pedir nombre):",
+      colPend.length ? "SÍ" : "NO — ejecutar: npm run db:crm-wa-welcome (misma migración)"
+    );
 
     section("4) Últimos envíos registrados (ml_whatsapp_wasender_log, tipo_e_activation_source = crm_wa_welcome)");
     const { rows: logRows } = await pool.query(

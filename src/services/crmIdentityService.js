@@ -2,6 +2,7 @@
 
 const { pool } = require("../../db");
 const { normalizePhoneToE164 } = require("../../ml-whatsapp-phone");
+const { findCustomerIdByPhoneAndPersonName } = require("./customerDedupPhoneName");
 
 function isSchemaMissing(err) {
   const c = err && err.code;
@@ -406,6 +407,21 @@ async function findOrCreateCustomer({
   }
 
   const name = fullName != null ? String(fullName).trim() : "";
+
+  if (normalized && name) {
+    const dupId = await findCustomerIdByPhoneAndPersonName(pool, normalized, name);
+    if (dupId) {
+      await IdentityModel.link({
+        customerId: dupId,
+        source: "whatsapp",
+        externalId: normalized,
+        isPrimary: true,
+        metadata: { linked_via: "phone_name_dedup" },
+      });
+      return logPayload(dupId, "phone_name_dedup", false);
+    }
+  }
+
   const candidates = name ? await CustomerModel.findByNameFuzzy(name, fuzzyThreshold) : [];
 
   for (const cand of candidates) {

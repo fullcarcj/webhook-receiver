@@ -10,6 +10,7 @@ function sanitizeWaPersonName(raw) {
   if (raw == null) return null;
   let s = String(raw).normalize("NFC").trim();
   if (!s) return null;
+  if (isLikelyChatNotName(s)) return null;
   if (/https?:\/\/|www\./i.test(s)) return null;
   // Solo dígitos, puntos, comas y espacios (p. ej. "123 456 7890")
   if (/^[\d\s.,;:+-]+$/.test(s)) return null;
@@ -45,16 +46,26 @@ function isLikelyChatNotName(text) {
   const words = s.split(/\s+/).filter(Boolean);
   if (words.length > 6) return true;
   const lower = s.toLowerCase();
-  return /\b(tienen|hay|precio|disponible|cuánto|cuanto|necesito|busco|venden|filtro|repuestos?|stock|envío|envio|delivery|comprar|pedido|orden)\b/i.test(
-    lower
-  );
+  if (
+    /\b(tienen|hay|precio|disponible|cuánto|cuanto|necesito|busco|venden|filtro|repuestos?|stock|envío|envio|delivery|comprar|pedido|orden)\b/i.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+  // UI / chat (“Listo copiado gracias”, “muchas gracias”, etc.) — no es nombre de persona
+  if (/\bcopiado\b/i.test(lower)) return true;
+  const chatMarkers =
+    lower.match(
+      /\b(listo|lista|listas|gracias|perfecto|saludos|vale|muchas|confirmado|recibido|ok|buenísimo)\b/gi
+    ) || [];
+  if (chatMarkers.length >= 2) return true;
+  if (/\b(muchas\s+gracias|de\s+nada|buen[oa]s?\s+(d[ií]as|tardes|noches)|gracias\s+(mil|todo))\b/i.test(lower)) {
+    return true;
+  }
+  return false;
 }
 
-/**
- * Nombre “completo” plausible para CRM / match ML.
- * @param {string} text
- * @returns {boolean}
- */
 /**
  * Nombre legible desde el perfil de WhatsApp cuando no hay nombre/apellido válido en el mensaje.
  * Permite una sola palabra (p. ej. "Carlos"); rechaza teléfonos, URLs y texto tipo consulta.
@@ -87,6 +98,7 @@ function sanitizeContactDisplayName(raw) {
 }
 
 function isValidFullName(text) {
+  if (isLikelyChatNotName(text)) return false;
   const sanitized = sanitizeWaPersonName(text);
   if (!sanitized) return false;
   const clean = sanitized;

@@ -19,6 +19,7 @@
  * FRONTEND_RATE_LIMIT_WINDOW_MS: ventana en ms (default 60000). GET /api/v1/health no cuenta para el límite del catálogo.
  * Wasender webhooks: WASENDER_WEBHOOK_SECRET o WASENDER_X_WEBHOOK_SIGNATURE (= cabecera X-Webhook-Signature); ver wasender-webhook-signature.js.
  * WA_CRM_HUB_FROM_WASENDER: si 0, no se reenvía el payload al hub CRM (crm_chats / crm_messages) tras guardar wasender_webhook_events; default distinto de 0 = sí reenviar.
+ * CRM_WA_WELCOME_ENABLED=1: tras el primer mensaje inbound guardado, Wasender envía saludo con nombre/apellido si el cliente ya tiene nombre válido en CRM; si no, pide nombre y apellido (columna crm_chats.wa_welcome_sent_at; migración npm run db:crm-wa-welcome). Plantillas opcionales: CRM_WA_WELCOME_GREETING ({{nombre}}), CRM_WA_WELCOME_ASK_NAME.
  * Postgres remoto suele exigir TLS: la app activa ssl en el cliente salvo localhost o PGSSLMODE=disable.
  * Banesco: estado de cuenta vía CSV desde el portal; BANESCO_STATEMENT_CSV_DIR carpeta para esos archivos. Ver src/config/banesco.js y GET /api/bank/banesco/status (X-Admin-Secret).
  * Monitor automático: BANESCO_MONITOR_ENABLED, BANESCO_MONITOR_INTERVAL_SEC (segundos entre descargas, default 60, mín. 15). Ventana horaria portal: BANESCO_MONITOR_WINDOW_ENABLED=1, BANESCO_MONITOR_WINDOW_START/END (ej. 05:00 y 23:00), BANESCO_MONITOR_WINDOW_TZ (default America/Caracas) — fuera de ventana no se hace login/descarga; a las 5:00 el siguiente ciclo vuelve a operar.

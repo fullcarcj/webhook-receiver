@@ -5,6 +5,7 @@ const { pool } = require("../../../db");
 const { resolveCustomerId, upsertChat } = require("./_shared");
 const { pickWaFullNameCandidate } = require("../waNameCandidate");
 const { runWaMlBuyerMatchTipoE } = require("../../services/waMlBuyerMatchTipoE");
+const { trySendCrmWaWelcome } = require("../../services/crmWaWelcome");
 
 const msgLog = pino({ level: process.env.LOG_LEVEL || "info", name: "whatsapp_messages" });
 
@@ -57,6 +58,8 @@ async function handle(normalized) {
     });
     const chatId = chatRow.id;
 
+    let insertedInbound = false;
+
     if (eventType === "messages.update" && normalized.messageId) {
       await client.query(
         `UPDATE crm_messages
@@ -83,6 +86,7 @@ async function handle(normalized) {
       );
 
       if (ins.rows.length) {
+        insertedInbound = true;
         await client.query(
           `UPDATE crm_chats SET unread_count = unread_count + 1, updated_at = NOW() WHERE id = $1`,
           [chatId]
@@ -91,6 +95,22 @@ async function handle(normalized) {
     }
 
     await client.query("COMMIT");
+
+    if (
+      insertedInbound &&
+      eventType === "messages.received" &&
+      (normalized.type || "text") !== "reaction"
+    ) {
+      setImmediate(() => {
+        trySendCrmWaWelcome({
+          chatId,
+          customerId,
+          phoneRaw: normalized.fromPhone,
+        }).catch((err) => {
+          msgLog.error({ err }, "trySendCrmWaWelcome");
+        });
+      });
+    }
 
     if (waMlBuyerTipoECheck) {
       setImmediate(() => {

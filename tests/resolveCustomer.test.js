@@ -26,10 +26,14 @@ function testSanitizeWaPersonName() {
   assert.strictEqual(isLikelyChatNotName("Carlos Pérez"), false);
   assert.strictEqual(isLikelyChatNotName("Tienen filtro para Aveo"), true);
   assert.strictEqual(isLikelyChatNotName("¿Cuánto cuesta?"), true);
+  assert.strictEqual(isLikelyChatNotName("Listo copiado gracias"), true);
+  assert.strictEqual(isLikelyChatNotName("muchas gracias"), true);
+  assert.strictEqual(isLikelyChatNotName("Carlos Pérez"), false);
   assert.strictEqual(sanitizeContactDisplayName("Carlos"), "Carlos");
   assert.strictEqual(sanitizeContactDisplayName("Fullcar CJ"), "Fullcar CJ");
   assert.strictEqual(sanitizeContactDisplayName("584247110371"), null);
   assert.strictEqual(sanitizeContactDisplayName("WA-584247110371"), null);
+  assert.strictEqual(sanitizeContactDisplayName("Listo copiado gracias"), null);
   assert.strictEqual(/^WA-\d+$/i.test(" WA-584242701513".trim()), true, "trim evita guardar WA- por espacio inicial");
   console.log("sanitizeWaPersonName: OK");
 }

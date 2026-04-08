@@ -56,6 +56,7 @@
     "db:orders-lifecycle": "node scripts/run-orders-lifecycle-migration.js",
     "check-pending-ratings": "node src/jobs/checkPendingRatings.js",
     "db:whatsapp-hub": "node scripts/run-whatsapp-hub-migration.js",
+    "db:crm-wa-welcome": "node scripts/run-crm-wa-welcome-migration.js",
     "import-ml-sales": "node scripts/importMlOrdersToSales.js",
     "import-ml-sales:all": "node scripts/importMlOrdersToSales.js --all-accounts",
     "import-ml-sales-http": "node scripts/import-ml-sales-http.js",

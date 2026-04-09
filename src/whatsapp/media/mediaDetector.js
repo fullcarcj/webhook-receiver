@@ -84,7 +84,11 @@ function extractRawMessage(normalized) {
   if (Array.isArray(dataTop.messages) && dataTop.messages[0]) {
     return dataTop.messages[0].message || null;
   }
-  // objeto: data.message
+  // objeto directo: data.messages.message (Wasender envía messages como objeto, no array)
+  if (dataTop.messages && typeof dataTop.messages === "object" && !Array.isArray(dataTop.messages) && dataTop.messages.message) {
+    return dataTop.messages.message;
+  }
+  // fallback: data.message
   if (dataTop.message && typeof dataTop.message === "object") {
     return dataTop.message;
   }

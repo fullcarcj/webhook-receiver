@@ -640,7 +640,10 @@ function extractWasenderEvent(body) {
  */
 function extractWasenderMediaMeta(body) {
   const dataTop = body && typeof body === "object" && body.data != null ? body.data : body;
-  const msgEntry = Array.isArray(dataTop && dataTop.messages) ? dataTop.messages[0] : null;
+  // data.messages puede ser array ([msg, ...]) u objeto directo ({key, message, ...})
+  const msgEntry = Array.isArray(dataTop && dataTop.messages)
+    ? dataTop.messages[0]
+    : (dataTop && dataTop.messages && typeof dataTop.messages === "object" ? dataTop.messages : null);
   const msgObj = (msgEntry && msgEntry.message) || (dataTop && dataTop.message) || {};
   const key = (msgEntry && msgEntry.key) || (dataTop && dataTop.key) || {};
   const inboundMessageId = key && key.id != null ? String(key.id).slice(0, 200) : null;

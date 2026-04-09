@@ -180,6 +180,7 @@ const { handleCrmApiPreflight } = require("./src/middleware/crmApiCors");
 const { handleVehicleApiRequest } = require("./src/handlers/vehicleApiHandler");
 const { handlePurchaseApiRequest } = require("./src/handlers/purchaseApiHandler");
 const { handleSalesApiRequest } = require("./src/handlers/salesApiHandler");
+const { handleMediaApiRequest } = require("./src/handlers/mediaApiHandler");
 const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory");
 const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./src/handlers/customerLoyalty");
 const { handleCustomersApiRequest } = require("./src/routes/customers");
@@ -1750,6 +1751,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleSalesApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleMediaApiRequest(req, res, url)) {
     return;
   }
 

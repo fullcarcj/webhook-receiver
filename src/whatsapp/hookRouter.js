@@ -21,6 +21,9 @@ const processors = {
   "messages.sent": require("./processors/sent"),
 };
 
+const MEDIA_TYPES = new Set(["image", "audio", "video", "document", "sticker"]);
+const mediaProcessor = require("./processors/media");
+
 async function runProcessor(eventType, normalized) {
   const mod = processors[eventType];
   if (!mod || typeof mod.handle !== "function") {
@@ -53,6 +56,14 @@ async function routeWebhook(body) {
 
     try {
       await runProcessor(eventType, normalized);
+      // Media entrante: procesar en paralelo al flujo de texto (no bloquear)
+      if (eventType === "messages.received" && MEDIA_TYPES.has(normalized.type)) {
+        setImmediate(() => {
+          mediaProcessor.handle(normalized).catch((err) => {
+            logger.error({ err, eventType }, "media_processor_error");
+          });
+        });
+      }
     } catch (err) {
       logger.error({ err, eventType }, "whatsapp_hub_processor_error");
       try {

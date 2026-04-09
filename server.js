@@ -2242,10 +2242,9 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(row.event)}</td>
   <td>${row.signature_ok === null ? "—" : row.signature_ok ? "sí" : "no"}</td>
   <td>${row.has_media ? "sí" : "no"}</td>
-  <td>${escapeHtml(row.media_type || "—")}</td>
-  <td>${escapeHtml(row.media_pipeline_status || "—")}</td>
-  <td>${escapeHtml(row.media_pipeline_detail || "—")}</td>
-  <td>${row.media_firebase_url ? `<a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>` : "—"}</td>
+   <td>${escapeHtml(row.media_type || "—")}</td>
+   <td>${row.media_firebase_url ? `<a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>` : "—"}</td>
+   <td>${escapeHtml(row.media_pipeline_status || "—")}</td>
   <td><pre class="payload">${escapeHtml(preview)}${preview.length >= 320 ? "…" : ""}</pre></td>
 </tr>`;
       })
@@ -2284,7 +2283,7 @@ const server = http.createServer(async (req, res) => {
     <li><strong>Uso práctico</strong> — confirmar entrega de tipo E/F, automatizar respuestas a texto entrante, métricas, evitar doble envío cuando el usuario ya respondió por WhatsApp.</li>
   </ul>
   <table>
-    <thead><tr><th>id</th><th>Recibido</th><th>event</th><th>firma OK</th><th>has_media</th><th>media_type</th><th>pipeline_status</th><th>pipeline_detail</th><th>firebase_url</th><th>payload (vista)</th></tr></thead>
+    <thead><tr><th>id</th><th>Recibido</th><th>event</th><th>firma OK</th><th>has_media</th><th>media_type</th><th>Firebase URL</th><th>pipeline_status</th><th>pipeline_detail</th><th>payload (vista)</th></tr></thead>
     <tbody>${hookRows || '<tr><td colspan="10">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>

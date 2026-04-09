@@ -4,6 +4,41 @@
 // si otro módulo ya lo inicializó (p. ej. firebase-key.json en server.js).
 let _bucket = null;
 
+function resolveFirebaseCredential() {
+  const projectId   = process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey  = process.env.FIREBASE_PRIVATE_KEY;
+
+  // Si las tres variables están definidas, usarlas directamente
+  if (projectId && clientEmail && privateKey) {
+    return {
+      projectId,
+      clientEmail,
+      privateKey: privateKey.replace(/\\n/g, "\n"),
+    };
+  }
+
+  // Fallback: leer firebase-key.json del raíz del proyecto
+  try {
+    const path = require("path");
+    const keyPath = path.join(__dirname, "../../../firebase-key.json");
+    const key = require(keyPath);
+    if (key && key.project_id) {
+      return {
+        projectId:   key.project_id,
+        clientEmail: key.client_email,
+        privateKey:  key.private_key,
+      };
+    }
+  } catch (_e) {
+    // archivo no disponible (producción sin firebase-key.json)
+  }
+
+  throw new Error(
+    "Firebase no configurado: define FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL y FIREBASE_PRIVATE_KEY en las variables de entorno."
+  );
+}
+
 function getBucket() {
   if (_bucket) return _bucket;
   const { getApps, initializeApp, cert } = require("firebase-admin/app");
@@ -13,11 +48,7 @@ function getBucket() {
 
   if (getApps().length === 0) {
     initializeApp({
-      credential: cert({
-        projectId:   process.env.FIREBASE_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey:  (process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
-      }),
+      credential: cert(resolveFirebaseCredential()),
       storageBucket: BUCKET,
     });
   }

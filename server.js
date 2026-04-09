@@ -2238,6 +2238,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const lim = url.searchParams.get("limit");
+    const payloadPreviewRaw = Number(url.searchParams.get("payload_chars"));
+    const payloadPreviewLimit = Number.isFinite(payloadPreviewRaw)
+      ? Math.min(Math.max(payloadPreviewRaw, 120), 30000)
+      : 3000;
     let items;
     try {
       items = await listWasenderWebhookEvents(lim, 2000);

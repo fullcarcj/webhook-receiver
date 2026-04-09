@@ -49,22 +49,13 @@ async function handle(normalized) {
 
   try {
     await mark("processing", "media_processor_started");
-    // 1. Buscar chat + customer: solo procesar si ya están registrados
-    const { rows } = await pool.query(
-      `SELECT c.id AS chat_id, c.customer_id
-       FROM crm_chats c
-       WHERE REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
-       LIMIT 1`,
-      [String(normalized.fromPhone).replace(/\D/g, "")]
-    );
 
-    if (!rows.length) {
-      log.info({ fromPhone: normalized.fromPhone }, "media: chat no existe, skip (onboarding pendiente)");
-      await mark("skipped_no_chat", "chat_not_found_or_onboarding_pending");
+    // 1. Validar tamaño antes de descargar
+    if (meta.fileLength > 0 && meta.fileLength > config.sizeLimit) {
+      log.warn({ fileLength: meta.fileLength, limit: config.sizeLimit, type: config.type, messageId: normalized.messageId }, "media: archivo supera el límite — ignorado");
+      await mark("skipped_size_limit", `size=${meta.fileLength},limit=${config.sizeLimit}`);
       return;
     }
-
-    const { chat_id: chatId, customer_id: customerId } = rows[0];
 
     // 2. Deduplicación: si ya existe en crm_messages, marcar completed y salir
     const { rows: existing } = await pool.query(
@@ -77,25 +68,13 @@ async function handle(normalized) {
       return;
     }
 
-    // 3. Validar tamaño antes de descargar
-    if (meta.fileLength > 0 && meta.fileLength > config.sizeLimit) {
-      log.warn({
-        fileLength: meta.fileLength,
-        limit:      config.sizeLimit,
-        type:       config.type,
-        messageId:  normalized.messageId,
-      }, "media: archivo supera el límite — ignorado");
-      await mark("skipped_size_limit", `size=${meta.fileLength},limit=${config.sizeLimit}`);
-      return;
-    }
-
     log.info({ fromPhone: normalized.fromPhone, type: config.type, messageId: normalized.messageId }, "media: procesando");
 
-    // 4. Descifrar + descargar
+    // 3. Descifrar + descargar
     const publicUrl  = await decryptMediaWithWasender(normalized.messageId, messageKey, meta);
     const fileBuffer = await downloadDecryptedFile(publicUrl);
 
-    // 5. Subir a Firebase Storage (URL permanente)
+    // 4. Subir a Firebase Storage siempre (aunque el cliente no esté registrado aún)
     const fileName    = buildFileName(normalized.fromPhone, normalized.messageId, config.ext, meta.fileName);
     const firebaseUrl = await uploadToFirebase({
       buffer:   fileBuffer,
@@ -104,7 +83,7 @@ async function handle(normalized) {
       mimeType: meta.mimetype,
     });
 
-    // 6. Transcribir si aplica (audio/video)
+    // 5. Transcribir si aplica (audio/video)
     const transcription = config.transcribable
       ? await transcribeWithOpenAI({
           buffer:    fileBuffer,
@@ -113,18 +92,34 @@ async function handle(normalized) {
         })
       : null;
 
-    // 7. Guardar en DB
-    await saveInboundMedia({
-      chatId,
-      customerId,
-      messageId:  normalized.messageId,
-      mediaType:  config.type,
-      firebaseUrl,
-      mimetype:   meta.mimetype,
-      meta,
-      transcription,
-    });
-    await mark("completed", "saved_in_crm_messages", firebaseUrl);
+    // 6. Buscar chat existente (opcional — no bloquea el flujo)
+    const { rows: chatRows } = await pool.query(
+      `SELECT c.id AS chat_id, c.customer_id
+       FROM crm_chats c
+       WHERE REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
+       LIMIT 1`,
+      [String(normalized.fromPhone).replace(/\D/g, "")]
+    );
+
+    if (chatRows.length) {
+      // 7. Guardar en crm_messages solo si el chat ya existe
+      const { chat_id: chatId, customer_id: customerId } = chatRows[0];
+      await saveInboundMedia({
+        chatId,
+        customerId,
+        messageId:  normalized.messageId,
+        mediaType:  config.type,
+        firebaseUrl,
+        mimetype:   meta.mimetype,
+        meta,
+        transcription,
+      });
+      await mark("completed", "saved_in_crm_messages", firebaseUrl);
+    } else {
+      // Chat aún no existe (onboarding pendiente): media subida a Firebase, sin guardar en crm_messages
+      log.info({ fromPhone: normalized.fromPhone, firebaseUrl }, "media: subido a Firebase, chat pendiente de onboarding");
+      await mark("completed", "firebase_only_no_chat", firebaseUrl);
+    }
 
   } catch (err) {
     await mark("failed", String(err && err.message ? err.message : err).slice(0, 1800));

@@ -64,11 +64,13 @@ function getBucket() {
  * @param {string|null} originalName — nombre original del archivo (si existe)
  */
 function buildFileName(phone, messageId, ext, originalName) {
-  const ts     = Date.now();
+  // Nombre determinístico por messageId: misma ruta en Firebase → sobreescribe en lugar de duplicar
   const safeExt = originalName
     ? (originalName.split(".").pop() || ext)
     : ext;
-  return `${phone}/${ts}_${messageId}.${safeExt}`;
+  const safePhone = String(phone || "unknown").replace(/\D/g, "");
+  const safeMsgId = String(messageId || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+  return `${safePhone}/${safeMsgId}.${safeExt}`;
 }
 
 /**

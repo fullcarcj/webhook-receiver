@@ -2265,7 +2265,14 @@ const server = http.createServer(async (req, res) => {
   <td>${row.signature_ok === null ? "—" : row.signature_ok ? "sí" : "no"}</td>
   <td>${row.has_media ? "sí" : "no"}</td>
    <td>${escapeHtml(row.media_type || "—")}</td>
-   <td>${row.media_type === "audio" && row.media_firebase_url ? `<audio controls src="${escapeHtml(row.media_firebase_url)}"></audio> <a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>` : row.media_type === "video" && row.media_firebase_url ? `<video controls src="${escapeHtml(row.media_firebase_url)}" style="max-width:200px; max-height:150px;"></video> <a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>` : row.media_firebase_url ? `<a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>` : "—"}</td>
+   <td>${
+     !row.media_firebase_url ? "—"
+     : row.media_type === "audio"    ? `<audio controls src="${escapeHtml(row.media_firebase_url)}" style="max-width:200px;"></audio><br><a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>`
+     : row.media_type === "video"    ? `<video controls src="${escapeHtml(row.media_firebase_url)}" style="max-width:200px;max-height:150px;"></video><br><a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>`
+     : row.media_type === "sticker"  ? `<img src="${escapeHtml(row.media_firebase_url)}" style="max-width:80px;max-height:80px;" loading="lazy"><br><a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>`
+     : row.media_type === "document" ? `<a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">📄 descargar</a>`
+     :                                 `<a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>`
+   }</td>
    <td>${escapeHtml(row.media_pipeline_status || "—")}</td>
    <td>${escapeHtml(row.media_pipeline_detail || "—")}</td>
   <td><pre class="payload">${escapeHtml(preview)}${preview.length >= payloadPreviewLimit ? "…" : ""}</pre></td>

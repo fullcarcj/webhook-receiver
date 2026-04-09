@@ -66,7 +66,18 @@ async function handle(normalized) {
 
     const { chat_id: chatId, customer_id: customerId } = rows[0];
 
-    // 2. Validar tamaño antes de descargar
+    // 2. Deduplicación: si ya existe en crm_messages, marcar completed y salir
+    const { rows: existing } = await pool.query(
+      `SELECT id FROM crm_messages WHERE external_message_id = $1 LIMIT 1`,
+      [normalized.messageId]
+    );
+    if (existing.length) {
+      log.info({ messageId: normalized.messageId }, "media: ya procesado, skip duplicado");
+      await mark("completed", "already_saved_dedup");
+      return;
+    }
+
+    // 3. Validar tamaño antes de descargar
     if (meta.fileLength > 0 && meta.fileLength > config.sizeLimit) {
       log.warn({
         fileLength: meta.fileLength,
@@ -80,11 +91,11 @@ async function handle(normalized) {
 
     log.info({ fromPhone: normalized.fromPhone, type: config.type, messageId: normalized.messageId }, "media: procesando");
 
-    // 3. Descifrar + descargar
+    // 4. Descifrar + descargar
     const publicUrl  = await decryptMediaWithWasender(normalized.messageId, messageKey, meta);
     const fileBuffer = await downloadDecryptedFile(publicUrl);
 
-    // 4. Subir a Firebase Storage (URL permanente)
+    // 5. Subir a Firebase Storage (URL permanente)
     const fileName    = buildFileName(normalized.fromPhone, normalized.messageId, config.ext, meta.fileName);
     const firebaseUrl = await uploadToFirebase({
       buffer:   fileBuffer,
@@ -93,7 +104,7 @@ async function handle(normalized) {
       mimeType: meta.mimetype,
     });
 
-    // 5. Transcribir si aplica (audio/video)
+    // 6. Transcribir si aplica (audio/video)
     const transcription = config.transcribable
       ? await transcribeWithOpenAI({
           buffer:    fileBuffer,
@@ -102,7 +113,7 @@ async function handle(normalized) {
         })
       : null;
 
-    // 6. Guardar en DB
+    // 7. Guardar en DB
     await saveInboundMedia({
       chatId,
       customerId,

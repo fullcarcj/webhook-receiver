@@ -186,6 +186,8 @@ const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory
 const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./src/handlers/customerLoyalty");
 const { handleCustomersApiRequest } = require("./src/routes/customers");
 const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
+const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
+const { startWorker: startReconciliationWorker, stopWorker: stopReconciliationWorker } = require("./src/workers/reconciliationWorker");
 const { routeWebhook: routeWhatsappHubFromBody } = require("./src/whatsapp/hookRouter");
 const { handleCrmApiRequest } = require("./src/routes/crm");
 const { handleBankBanescoRequest } = require("./src/routes/bankBanesco");
@@ -1933,6 +1935,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleChatApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleStatsApiRequest(req, res)) {
     return;
   }
 
@@ -6070,6 +6076,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
+  startReconciliationWorker();
   console.log(`[db] PostgreSQL: ${dbPath}`);
   const forwards = getForwardPostUrls();
   console.log(`Escuchando en http://localhost:${PORT} (0.0.0.0 — todas las interfaces)`);
@@ -6207,3 +6214,8 @@ server.listen(PORT, "0.0.0.0", () => {
 });
 
 startBanescoMonitor();
+
+process.on("SIGTERM", () => {
+  stopReconciliationWorker();
+  server.close(() => process.exit(0));
+});

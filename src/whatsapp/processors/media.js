@@ -101,9 +101,12 @@ async function handle(normalized) {
       [String(normalized.fromPhone).replace(/\D/g, "")]
     );
 
+    let chatId     = null;
+    let customerId = null;
+
     if (chatRows.length) {
       // 7. Guardar en crm_messages solo si el chat ya existe
-      const { chat_id: chatId, customer_id: customerId } = chatRows[0];
+      ({ chat_id: chatId, customer_id: customerId } = chatRows[0]);
       await saveInboundMedia({
         chatId,
         customerId,
@@ -119,6 +122,58 @@ async function handle(normalized) {
       // Chat aún no existe (onboarding pendiente): media subida a Firebase, sin guardar en crm_messages
       log.info({ fromPhone: normalized.fromPhone, firebaseUrl }, "media: subido a Firebase, chat pendiente de onboarding");
       await mark("completed", "firebase_only_no_chat", firebaseUrl);
+    }
+
+    // 8. Pipeline de comprobantes — solo para imágenes, siempre en setImmediate (no bloquear webhook)
+    if (config.type === "image" && fileBuffer) {
+      setImmediate(async () => {
+        try {
+          const { isPaymentReceipt }   = require("../media/receiptDetector");
+          const { extractReceiptData } = require("../media/receiptExtractor");
+
+          const prefilter = await isPaymentReceipt(fileBuffer);
+          log.info({
+            score:     prefilter.score,
+            isReceipt: prefilter.isReceipt,
+            reason:    prefilter.reason,
+            messageId: normalized.messageId,
+          }, "media: prefiltro comprobante");
+
+          if (!prefilter.isReceipt) return;
+
+          const extracted = await extractReceiptData(firebaseUrl);
+
+          await pool.query(
+            `INSERT INTO payment_attempts
+               (customer_id, chat_id, firebase_url,
+                extracted_reference, extracted_amount_bs, extracted_date,
+                extracted_bank, extracted_payment_type, extraction_confidence,
+                is_receipt, prefiler_score)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10)`,
+            [
+              customerId  ?? null,
+              chatId      ?? null,
+              firebaseUrl,
+              extracted?.reference_number ?? null,
+              extracted?.amount_bs        ?? null,
+              extracted?.tx_date          ?? null,
+              extracted?.bank_name        ?? null,
+              extracted?.payment_type     ?? null,
+              extracted?.confidence       ?? null,
+              prefilter.score,
+            ]
+          );
+
+          log.info({
+            customerId,
+            ref:    extracted?.reference_number,
+            amount: extracted?.amount_bs,
+          }, "media: payment_attempt guardado");
+        } catch (receiptErr) {
+          log.error({ err: receiptErr.message, messageId: normalized.messageId },
+            "media: error procesando comprobante");
+        }
+      });
     }
 
   } catch (err) {

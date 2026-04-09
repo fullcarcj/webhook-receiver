@@ -43,32 +43,46 @@ const MEDIA_CONFIG = {
  * @param {object|null} messageObj — el campo `message` del payload crudo
  * @returns {{ messageKey: string, config: object, meta: object }|null}
  */
-function detectMedia(messageObj) {
-  if (!messageObj || typeof messageObj !== "object") return null;
-  for (const [key, config] of Object.entries(MEDIA_CONFIG)) {
-    if (messageObj[key]) {
-      const media = messageObj[key];
-      return {
-        messageKey: key,
-        config,
-        meta: {
-          url:        media.url        ?? null,
-          mediaKey:   media.mediaKey   ?? null,
-          mimetype:   media.mimetype   ?? "application/octet-stream",
-          fileLength: parseInt(media.fileLength ?? 0, 10) || 0,
-          caption:    media.caption    ?? null,
-          fileName:   media.fileName   ?? null,
-          fileSha256: media.fileSha256 ?? null,
-          ptt:        media.ptt        ?? false,
-          seconds:    media.seconds    ?? 0,
-          duration:   media.duration   ?? 0,
-          pageCount:  media.pageCount  ?? null,
-          title:      media.title      ?? null,
-        },
-      };
+function findMediaNode(node, depth = 0) {
+  if (!node || typeof node !== "object" || depth > 6) return null;
+  for (const key of Object.keys(MEDIA_CONFIG)) {
+    if (node[key] && typeof node[key] === "object") {
+      return { key, media: node[key] };
+    }
+  }
+  for (const value of Object.values(node)) {
+    if (value && typeof value === "object") {
+      const hit = findMediaNode(value, depth + 1);
+      if (hit) return hit;
     }
   }
   return null;
+}
+
+function detectMedia(messageObj) {
+  if (!messageObj || typeof messageObj !== "object") return null;
+  const hit = findMediaNode(messageObj, 0);
+  if (!hit) return null;
+  const { key, media } = hit;
+  const config = MEDIA_CONFIG[key];
+  return {
+    messageKey: key,
+    config,
+    meta: {
+      url:        media.url        ?? null,
+      mediaKey:   media.mediaKey   ?? null,
+      mimetype:   media.mimetype   ?? "application/octet-stream",
+      fileLength: parseInt(media.fileLength ?? 0, 10) || 0,
+      caption:    media.caption    ?? null,
+      fileName:   media.fileName   ?? null,
+      fileSha256: media.fileSha256 ?? null,
+      ptt:        media.ptt        ?? false,
+      seconds:    media.seconds    ?? 0,
+      duration:   media.duration   ?? 0,
+      pageCount:  media.pageCount  ?? null,
+      title:      media.title      ?? null,
+    },
+  };
 }
 
 /**

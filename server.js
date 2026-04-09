@@ -638,6 +638,27 @@ function extractWasenderEvent(body) {
  * @param {object} body
  * @returns {{ hasMedia: boolean, mediaType: string|null, inboundMessageId: string|null }}
  */
+function detectMediaTypeDeep(node, depth = 0) {
+  if (!node || typeof node !== "object" || depth > 6) return null;
+  const map = [
+    ["imageMessage", "image"],
+    ["audioMessage", "audio"],
+    ["videoMessage", "video"],
+    ["documentMessage", "document"],
+    ["stickerMessage", "sticker"],
+  ];
+  for (const [k, t] of map) {
+    if (node[k] && typeof node[k] === "object") return t;
+  }
+  for (const value of Object.values(node)) {
+    if (value && typeof value === "object") {
+      const found = detectMediaTypeDeep(value, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function extractWasenderMediaMeta(body) {
   const dataTop = body && typeof body === "object" && body.data != null ? body.data : body;
   // data.messages puede ser array ([msg, ...]) u objeto directo ({key, message, ...})
@@ -647,20 +668,8 @@ function extractWasenderMediaMeta(body) {
   const msgObj = (msgEntry && msgEntry.message) || (dataTop && dataTop.message) || {};
   const key = (msgEntry && msgEntry.key) || (dataTop && dataTop.key) || {};
   const inboundMessageId = key && key.id != null ? String(key.id).slice(0, 200) : null;
-
-  const map = [
-    ["imageMessage", "image"],
-    ["audioMessage", "audio"],
-    ["videoMessage", "video"],
-    ["documentMessage", "document"],
-    ["stickerMessage", "sticker"],
-  ];
-  for (const [k, t] of map) {
-    if (msgObj && typeof msgObj === "object" && msgObj[k]) {
-      return { hasMedia: true, mediaType: t, inboundMessageId };
-    }
-  }
-  return { hasMedia: false, mediaType: null, inboundMessageId };
+  const mediaType = detectMediaTypeDeep(msgObj);
+  return { hasMedia: !!mediaType, mediaType: mediaType || null, inboundMessageId };
 }
 
 /**
@@ -703,7 +712,9 @@ async function handleWasenderWebhookPost(req, res, body, sourceLabel) {
 
   // Log de trazabilidad: muestra el evento crudo y datos clave del payload entrante.
   const _dataTop = body && body.data != null ? body.data : body;
-  const _msgs = Array.isArray(_dataTop && _dataTop.messages) ? _dataTop.messages : [];
+  const _msgs = Array.isArray(_dataTop && _dataTop.messages)
+    ? _dataTop.messages
+    : (_dataTop && _dataTop.messages && typeof _dataTop.messages === "object" ? [_dataTop.messages] : []);
   const _key0 = (_msgs[0] && _msgs[0].key) || (_dataTop && _dataTop.key) || {};
   console.log(
     "[wasender-recv] src=%s event=%s remoteJid=%s fromMe=%s msgId=%s pushName=%s",
@@ -2150,6 +2161,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const lim = url.searchParams.get("limit");
+    const payloadPreviewRaw = Number(url.searchParams.get("payload_chars"));
+    const payloadPreviewLimit = Number.isFinite(payloadPreviewRaw)
+      ? Math.min(Math.max(payloadPreviewRaw, 120), 30000)
+      : 3000;
     let items;
     try {
       items = await listWebhooks(lim, 2000);
@@ -2238,7 +2253,7 @@ const server = http.createServer(async (req, res) => {
     }
     const hookRows = items
       .map((row) => {
-        const preview = JSON.stringify(row.data).slice(0, 320);
+        const preview = JSON.stringify(row.data).slice(0, payloadPreviewLimit);
         return `<tr>
   <td>${escapeHtml(row.id)}</td>
   <td class="muted">${escapeHtml(row.received_at)}</td>
@@ -2249,7 +2264,7 @@ const server = http.createServer(async (req, res) => {
    <td>${row.media_firebase_url ? `<a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>` : "—"}</td>
    <td>${escapeHtml(row.media_pipeline_status || "—")}</td>
    <td>${escapeHtml(row.media_pipeline_detail || "—")}</td>
-  <td><pre class="payload">${escapeHtml(preview)}${preview.length >= 320 ? "…" : ""}</pre></td>
+  <td><pre class="payload">${escapeHtml(preview)}${preview.length >= payloadPreviewLimit ? "…" : ""}</pre></td>
 </tr>`;
       })
       .join("");
@@ -2278,7 +2293,7 @@ const server = http.createServer(async (req, res) => {
       WEBHOOK_PATH
     )}</code> que Mercado Libre (JSON con <code>event</code>, sin <code>topic</code>/<code>resource</code> ML) o por rutas dedicadas: <code>${escapeHtml(
       Array.from(getWasenderWebhookPostPaths()).join(", ")
-    )}</code>. Tabla <code>wasender_webhook_events</code>. NDJSON: <code>wasender-webhook.log</code>. Firma: env <code>WASENDER_WEBHOOK_SECRET</code> o <code>WASENDER_X_WEBHOOK_SIGNATURE</code> (mismo valor que el Webhook Secret del panel) → cabecera <code>X-Webhook-Signature</code>.</p>
+    )}</code>. Tabla <code>wasender_webhook_events</code>. NDJSON: <code>wasender-webhook.log</code>. Firma: env <code>WASENDER_WEBHOOK_SECRET</code> o <code>WASENDER_X_WEBHOOK_SIGNATURE</code> (mismo valor que el Webhook Secret del panel) → cabecera <code>X-Webhook-Signature</code>. Vista payload: <code>${payloadPreviewLimit}</code> chars (ajustable con <code>?payload_chars=5000</code>).</p>
   <p class="lead"><strong>Qué permite tener los hooks (según documentación Wasender):</strong></p>
   <ul class="potential">
     <li><strong>Mensajes</strong> — entrantes/salientes (<code>messages.received</code>, <code>messages.upsert</code>), <strong>estados</strong> entregado/leído (<code>messages.update</code>), borrados, reacciones; enlazar con <code>msgId</code> de envíos API.</li>

@@ -23,6 +23,7 @@ const processors = {
 
 const MEDIA_TYPES = new Set(["image", "audio", "video", "document", "sticker"]);
 const mediaProcessor = require("./processors/media");
+const { detectMedia, extractRawMessage } = require("./media/mediaDetector");
 
 async function runProcessor(eventType, normalized) {
   const mod = processors[eventType];
@@ -57,7 +58,9 @@ async function routeWebhook(body) {
     try {
       await runProcessor(eventType, normalized);
       // Media entrante: procesar en paralelo al flujo de texto (no bloquear)
-      if (eventType === "messages.received" && MEDIA_TYPES.has(normalized.type)) {
+      const hasMediaByType = MEDIA_TYPES.has(normalized.type);
+      const hasMediaInRawPayload = !!detectMedia(extractRawMessage(normalized));
+      if (eventType === "messages.received" && (hasMediaByType || hasMediaInRawPayload)) {
         setImmediate(() => {
           mediaProcessor.handle(normalized).catch((err) => {
             logger.error({ err, eventType }, "media_processor_error");

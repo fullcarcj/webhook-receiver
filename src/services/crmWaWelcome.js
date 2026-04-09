@@ -56,9 +56,20 @@ function resolveWasenderRuntimeConfigForTipoH() {
       String(process.env.WASENDER_DEFAULT_PHONE_COUNTRY).replace(/\D/g, "")) ||
     "58";
 
-  const hEnabledEnv = String(process.env.CRM_WA_WELCOME_WASENDER_ENABLED ?? "").trim();
-  const globalEnabledEnv = String(process.env.WASENDER_ENABLED ?? "").trim();
-  const enabledFlag = hEnabledEnv !== "" ? hEnabledEnv === "1" : globalEnabledEnv === "1";
+  const hEnabledEnv = String(process.env.CRM_WA_WELCOME_WASENDER_ENABLED ?? "").trim().toLowerCase();
+  const globalEnabledEnv = String(process.env.WASENDER_ENABLED ?? "").trim().toLowerCase();
+  const parseToggle = (v) => {
+    if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+    if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+    return null;
+  };
+  const hToggle = parseToggle(hEnabledEnv);
+  const gToggle = parseToggle(globalEnabledEnv);
+  // Prioridad:
+  // 1) Toggle explícito de Tipo H
+  // 2) Toggle global Wasender si está explícito
+  // 3) Por defecto, habilitado si existe API key
+  const enabledFlag = hToggle != null ? hToggle : gToggle != null ? gToggle : true;
   const enabled = enabledFlag && !!apiKey;
 
   return {

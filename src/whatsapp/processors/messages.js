@@ -95,10 +95,22 @@ function normalizeOnboardingNameUpper(rawText) {
   const sanitized = sanitizeWaPersonName(raw);
   if (!sanitized) return null;
   const lower = sanitized.toLowerCase();
-  // Bloquea textos de prueba muy comunes que suelen contaminar customers.
-  if (/\b(prueba|test|testing|nombre|apellido|nuevo|nueva|cliente)\b/i.test(lower)) return null;
+  // Bloquea textos de prueba y frases conversacionales comunes que contaminan customers.
+  if (
+    /\b(prueba|test|testing|nombre|apellido|nuevo|nueva|cliente|hola|buenas|gracias|ok|dale|mano|confirm(e|o|as|ar)|cuando|pregunt(o|a|ar|ame)|av[ií]same|ayuda|precio|disponible)\b/i.test(
+      lower
+    )
+  ) {
+    return null;
+  }
   const words = sanitized.split(/\s+/).filter(Boolean);
   if (words.length < 2 || words.length > 4) return null;
+  // Cada palabra de nombre/apellido debe tener al menos 2 letras.
+  if (words.some((w) => w.length < 2)) return null;
+  // Evita entradas con demasiadas palabras funcionales (texto libre).
+  const stopWords = new Set(["de", "del", "la", "las", "los", "el", "y", "e", "o", "u"]);
+  const lexicalWords = words.filter((w) => !stopWords.has(w.toLowerCase()));
+  if (lexicalWords.length < 2) return null;
   return sanitized.toUpperCase();
 }
 

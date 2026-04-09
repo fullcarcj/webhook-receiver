@@ -18,10 +18,11 @@ const pino = require("pino");
 const { pool, insertMlWhatsappWasenderLog } = require("../../db");
 const { sendWasenderTextMessage } = require("../../wasender-client");
 const { normalizePhoneToE164 } = require("../../ml-whatsapp-phone");
-const { resolveWasenderRuntimeConfig } = require("../../ml-whatsapp-tipo-ef");
+const { MESSAGE_TYPE_H } = require("../../ml-message-types");
 const { sanitizeWaPersonName, isLikelyChatNotName } = require("../whatsapp/waNameCandidate");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "crmWaWelcome" });
+const CRM_WELCOME_SOURCE_TAG = "tipo_h_crm_wa_welcome";
 
 let _hintLoggedWasenderOff = false;
 
@@ -30,6 +31,42 @@ function isCrmWelcomeFeatureEnabled() {
   const v = String(process.env.CRM_WA_WELCOME_ENABLED ?? "").trim().toLowerCase();
   if (v === "0" || v === "false" || v === "no" || v === "off") return false;
   return true;
+}
+
+/**
+ * Runtime config exclusivo para Tipo H (CRM bienvenida).
+ * No depende de la lógica de Tipo E/F ni de lecturas de BD.
+ * Solo usa variables de entorno (con overrides específicos de H).
+ */
+function resolveWasenderRuntimeConfigForTipoH() {
+  const apiKey =
+    (process.env.CRM_WA_WELCOME_WASENDER_API_KEY &&
+      String(process.env.CRM_WA_WELCOME_WASENDER_API_KEY).trim()) ||
+    (process.env.WASENDER_API_KEY && String(process.env.WASENDER_API_KEY).trim()) ||
+    "";
+  const apiBaseUrl =
+    (process.env.CRM_WA_WELCOME_WASENDER_API_BASE_URL &&
+      String(process.env.CRM_WA_WELCOME_WASENDER_API_BASE_URL).trim()) ||
+    (process.env.WASENDER_API_BASE_URL && String(process.env.WASENDER_API_BASE_URL).trim()) ||
+    "https://www.wasenderapi.com";
+  const defaultCountryCode =
+    (process.env.CRM_WA_WELCOME_DEFAULT_PHONE_COUNTRY &&
+      String(process.env.CRM_WA_WELCOME_DEFAULT_PHONE_COUNTRY).replace(/\D/g, "")) ||
+    (process.env.WASENDER_DEFAULT_PHONE_COUNTRY &&
+      String(process.env.WASENDER_DEFAULT_PHONE_COUNTRY).replace(/\D/g, "")) ||
+    "58";
+
+  const hEnabledEnv = String(process.env.CRM_WA_WELCOME_WASENDER_ENABLED ?? "").trim();
+  const globalEnabledEnv = String(process.env.WASENDER_ENABLED ?? "").trim();
+  const enabledFlag = hEnabledEnv !== "" ? hEnabledEnv === "1" : globalEnabledEnv === "1";
+  const enabled = enabledFlag && !!apiKey;
+
+  return {
+    enabled,
+    apiKey,
+    apiBaseUrl: String(apiBaseUrl).replace(/\/$/, ""),
+    defaultCountryCode: defaultCountryCode || "58",
+  };
 }
 
 function isPlaceholderCustomerName(fullName) {
@@ -104,7 +141,7 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
     return { ok: false, outcome: "bad_args" };
   }
 
-  const cfg = await resolveWasenderRuntimeConfig();
+  const cfg = resolveWasenderRuntimeConfigForTipoH();
   if (!cfg.enabled) {
     if (!_hintLoggedWasenderOff) {
       _hintLoggedWasenderOff = true;
@@ -214,7 +251,7 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
         response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
         error_message: `HTTP ${res.status}`,
         text_preview: preview,
-        tipo_e_activation_source: "crm_wa_welcome",
+        tipo_e_activation_source: CRM_WELCOME_SOURCE_TAG,
       });
     } catch (_e) {
       /* ignore */
@@ -237,14 +274,14 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
       wasender_msg_id: Number.isFinite(msgId) ? msgId : null,
       response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
       text_preview: preview,
-      tipo_e_activation_source: "crm_wa_welcome",
+      tipo_e_activation_source: CRM_WELCOME_SOURCE_TAG,
     });
   } catch (_e) {
     /* ignore */
   }
 
   log.info(
-    { chatId: cid, customerId: custId, kind: hasRealNameForGreeting(fullName) ? "greet" : "ask" },
+    { chatId: cid, customerId: custId, messageType: MESSAGE_TYPE_H, kind: hasRealNameForGreeting(fullName) ? "greet" : "ask" },
     "crm_welcome: enviado"
   );
   return { ok: true, outcome: "sent" };
@@ -264,7 +301,7 @@ async function trySendCrmWaWelcomeAfterName({ chatId, customerId, phoneRaw }) {
     return { ok: false, outcome: "bad_args" };
   }
 
-  const cfg = await resolveWasenderRuntimeConfig();
+  const cfg = resolveWasenderRuntimeConfigForTipoH();
   if (!cfg.enabled) {
     return { ok: false, outcome: "wasender_off" };
   }
@@ -371,7 +408,7 @@ async function trySendCrmWaWelcomeAfterName({ chatId, customerId, phoneRaw }) {
         response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
         error_message: `HTTP ${res.status}`,
         text_preview: preview,
-        tipo_e_activation_source: "crm_wa_welcome_followup",
+        tipo_e_activation_source: `${CRM_WELCOME_SOURCE_TAG}_followup`,
       });
     } catch (_e) {
       /* ignore */
@@ -394,13 +431,13 @@ async function trySendCrmWaWelcomeAfterName({ chatId, customerId, phoneRaw }) {
       wasender_msg_id: Number.isFinite(msgId) ? msgId : null,
       response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
       text_preview: preview,
-      tipo_e_activation_source: "crm_wa_welcome_followup",
+      tipo_e_activation_source: `${CRM_WELCOME_SOURCE_TAG}_followup`,
     });
   } catch (_e) {
     /* ignore */
   }
 
-  log.info({ chatId: cid, customerId: custId }, "crm_welcome_followup: enviado");
+  log.info({ chatId: cid, customerId: custId, messageType: MESSAGE_TYPE_H }, "crm_welcome_followup: enviado");
   return { ok: true, outcome: "sent" };
 }
 
@@ -415,7 +452,7 @@ async function trySendCrmWaAskName({ phoneRaw }) {
     return { ok: false, outcome: "disabled" };
   }
 
-  const cfg = await resolveWasenderRuntimeConfig();
+  const cfg = resolveWasenderRuntimeConfigForTipoH();
   if (!cfg.enabled) {
     if (!_hintLoggedWasenderOff) {
       _hintLoggedWasenderOff = true;
@@ -460,12 +497,12 @@ async function trySendCrmWaAskName({ phoneRaw }) {
       response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
       error_message: res.ok ? null : `HTTP ${res.status}`,
       text_preview: preview,
-      tipo_e_activation_source: "crm_wa_ask_name",
+      tipo_e_activation_source: `${CRM_WELCOME_SOURCE_TAG}_ask_name`,
     });
   } catch (_e) { /* ignore */ }
 
   if (res.ok) {
-    log.info({ to }, "crm_wa_ask_name: enviado");
+    log.info({ to, messageType: MESSAGE_TYPE_H }, "crm_wa_ask_name: enviado");
     return { ok: true, outcome: "sent" };
   }
   log.warn({ status: res.status, to }, "crm_wa_ask_name: Wasender no OK");
@@ -489,7 +526,7 @@ async function trySendCrmWaWelcomeNameConfirmation({ chatId, customerId, phoneRa
     return { ok: false, outcome: "no_name" };
   }
 
-  const cfg = await resolveWasenderRuntimeConfig();
+  const cfg = resolveWasenderRuntimeConfigForTipoH();
   if (!cfg.enabled) {
     return { ok: false, outcome: "wasender_off" };
   }
@@ -540,7 +577,7 @@ async function trySendCrmWaWelcomeNameConfirmation({ chatId, customerId, phoneRa
         response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
         error_message: `HTTP ${res.status}`,
         text_preview: preview,
-        tipo_e_activation_source: "crm_wa_welcome_confirm",
+        tipo_e_activation_source: `${CRM_WELCOME_SOURCE_TAG}_confirm`,
       });
     } catch (_e) { /* ignore */ }
     log.warn({ status: res.status, to }, "crm_welcome_confirm: Wasender no OK");
@@ -561,15 +598,17 @@ async function trySendCrmWaWelcomeNameConfirmation({ chatId, customerId, phoneRa
       wasender_msg_id: Number.isFinite(msgId) ? msgId : null,
       response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
       text_preview: preview,
-      tipo_e_activation_source: "crm_wa_welcome_confirm",
+      tipo_e_activation_source: `${CRM_WELCOME_SOURCE_TAG}_confirm`,
     });
   } catch (_e) { /* ignore */ }
 
-  log.info({ chatId: cid, customerId: custId, confirmedName }, "crm_welcome_confirm: enviado");
+  log.info({ chatId: cid, customerId: custId, confirmedName, messageType: MESSAGE_TYPE_H }, "crm_welcome_confirm: enviado");
   return { ok: true, outcome: "sent" };
 }
 
 module.exports = {
+  MESSAGE_TYPE_H,
+  resolveWasenderRuntimeConfigForTipoH,
   trySendCrmWaWelcome,
   trySendCrmWaWelcomeAfterName,
   trySendCrmWaWelcomeNameConfirmation,

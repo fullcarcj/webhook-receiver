@@ -206,7 +206,25 @@ function applyPlaceholders(template, vars) {
  * @returns {Promise<{ enabled: boolean, apiKey: string, apiBaseUrl: string, defaultCountryCode: string }>}
  */
 async function resolveWasenderRuntimeConfig() {
-  const settings = await db.getMlWasenderSettings();
+  const timeoutMsRaw = Number(process.env.WASENDER_SETTINGS_DB_TIMEOUT_MS ?? 1500);
+  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 1500;
+  const withTimeout = (promise, ms) =>
+    Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`wasender_settings_timeout_${ms}ms`)), ms)),
+    ]);
+
+  let settings = null;
+  try {
+    settings = await withTimeout(db.getMlWasenderSettings(), timeoutMs);
+  } catch (e) {
+    // Fallback silencioso a ENV para que la mensajería no se bloquee cuando la BD está lenta/inaccesible.
+    console.warn(
+      "[wasender] getMlWasenderSettings fallback a ENV (%s)",
+      e && e.message ? e.message : "error"
+    );
+    settings = null;
+  }
   const apiKey = process.env.WASENDER_API_KEY && String(process.env.WASENDER_API_KEY).trim();
   const envOn = process.env.WASENDER_ENABLED === "1";
   const dbOn =

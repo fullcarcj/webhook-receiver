@@ -27,6 +27,18 @@ const MESSAGE_TYPE_F = "tipo_f_whatsapp_pregunta";
  */
 const MESSAGE_TYPE_G = "tipo_g_filemaker_retiro";
 
+/**
+ * WhatsApp (Wasender API): saludo CRM de onboarding/recepción de chat.
+ * Incluye:
+ * - saludo con nombre si el cliente existe en `customers`
+ * - saludo genérico solicitando nombre+apellido si no existe
+ * - confirmación tras registrar nombre en flujo progresivo
+ *
+ * Nota: en `ml_whatsapp_wasender_log.message_kind` se mantiene compatibilidad técnica
+ * con valor `F` hasta ampliar el CHECK de BD para aceptar `H`.
+ */
+const MESSAGE_TYPE_H = "tipo_h_whatsapp_bienvenida_crm";
+
 module.exports = {
   MESSAGE_TYPE_A,
   MESSAGE_TYPE_B,
@@ -35,4 +47,5 @@ module.exports = {
   MESSAGE_TYPE_E,
   MESSAGE_TYPE_F,
   MESSAGE_TYPE_G,
+  MESSAGE_TYPE_H,
 };

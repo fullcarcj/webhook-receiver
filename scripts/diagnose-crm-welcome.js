@@ -55,40 +55,24 @@ async function main() {
     process.exit(0);
   }
 
-  const { resolveWasenderRuntimeConfig } = require("../ml-whatsapp-tipo-ef");
+  const { resolveWasenderRuntimeConfigForTipoH } = require("../src/services/crmWaWelcome");
   const { pool } = require("../db");
 
-  section("2) Wasender (runtime, con BD — igual que tipo E/F)");
-  console.log(
-    "Consultando la BD (ml_wasender_settings)… Si se queda aquí: red/firewall, SSL o DATABASE_URL incorrecta hacia el Postgres remoto."
-  );
-
-  const withTimeout = (promise, ms) =>
-    Promise.race([
-      promise,
-      new Promise((_, reject) =>
-        setTimeout(
-          () =>
-            reject(
-              new Error(
-                `Timeout ${ms / 1000}s — la consulta a la BD no respondió (¿Postgres accesible desde esta PC?)`
-              )
-            ),
-          ms
-        )
-      ),
-    ]);
+  section("2) Wasender (runtime Tipo H, solo ENV)");
+  console.log("Tipo H no depende de ml_wasender_settings ni de lógica E/F.");
 
   let cfg;
   try {
-    cfg = await withTimeout(resolveWasenderRuntimeConfig(), 30000);
+    cfg = resolveWasenderRuntimeConfigForTipoH();
   } catch (e) {
     console.log("ERROR:", e.message);
     process.exit(1);
   }
   console.log("Puede enviar (cfg.enabled):", cfg.enabled ? "SÍ" : "NO");
   if (!cfg.enabled) {
-    console.log("  Revisar: WASENDER_API_KEY + (WASENDER_ENABLED=1 O ml_wasender_settings.is_enabled en BD).");
+    console.log(
+      "  Revisar: CRM_WA_WELCOME_WASENDER_ENABLED=1 (o WASENDER_ENABLED=1) + API key en CRM_WA_WELCOME_WASENDER_API_KEY o WASENDER_API_KEY."
+    );
   }
   console.log("api_base_url:", cfg.apiBaseUrl);
   console.log("api_key length:", cfg.apiKey ? cfg.apiKey.length : 0);
@@ -110,11 +94,11 @@ async function main() {
       colPend.length ? "SÍ" : "NO — ejecutar: npm run db:crm-wa-welcome (misma migración)"
     );
 
-    section("4) Últimos envíos registrados (ml_whatsapp_wasender_log, tipo_e_activation_source = crm_wa_welcome)");
+    section("4) Últimos envíos registrados (ml_whatsapp_wasender_log, tipo H)");
     const { rows: logRows } = await pool.query(
       `SELECT id, created_at, outcome, phone_e164, text_preview, http_status, error_message
        FROM ml_whatsapp_wasender_log
-       WHERE tipo_e_activation_source = 'crm_wa_welcome'
+       WHERE tipo_e_activation_source LIKE 'tipo_h_crm_wa_welcome%'
        ORDER BY id DESC
        LIMIT 5`
     );

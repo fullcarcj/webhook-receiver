@@ -25,7 +25,7 @@ const pino = require("pino");
 const { pool } = require("../../../db");
 const { normalizePhone } = require("../../utils/phoneNormalizer");
 const { resolveCustomerId, upsertChat } = require("./_shared");
-const { pickWaFullNameCandidate } = require("../waNameCandidate");
+const { pickWaFullNameCandidate, sanitizeWaPersonName, isLikelyChatNotName } = require("../waNameCandidate");
 const { runWaMlBuyerMatchTipoE } = require("../../services/waMlBuyerMatchTipoE");
 const {
   trySendCrmWaWelcome,
@@ -65,11 +65,12 @@ function isPriority(normalized) {
 }
 
 /**
- * Busca un cliente existente por teléfono WA: primero en crm_customer_identities (WhatsApp),
- * luego por dígitos del phone en customers.
- * Retorna { customerId } o null si no existe.
+ * Regla de negocio Tipo H:
+ * - Solo se considera "cliente existente" si senderPn (normalizado) coincide con customers.phone.
+ * - No usa crm_customer_identities ni customers.phone_2 para decidir este disparador.
  * @param {import("pg").PoolClient} db
  * @param {string} phoneRaw
+ * @returns {Promise<{customerId:number}|null>}
  */
 async function findExistingCustomerByPhone(db, phoneRaw) {
   const normalized = normalizePhone(phoneRaw);
@@ -77,19 +78,28 @@ async function findExistingCustomerByPhone(db, phoneRaw) {
   if (!digits) return null;
 
   const { rows } = await db.query(
-    `SELECT ci.customer_id
-     FROM crm_customer_identities ci
-     WHERE ci.source = 'whatsapp'::crm_identity_source
-       AND ci.external_id = $1
-     UNION
-     SELECT c.id AS customer_id
+    `SELECT c.id AS customer_id
      FROM customers c
      WHERE NULLIF(TRIM(c.phone), '') IS NOT NULL
-       AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $2
+       AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
      LIMIT 1`,
-    [normalized || digits, digits]
+    [digits]
   );
   return rows[0] ? { customerId: Number(rows[0].customer_id) } : null;
+}
+
+function normalizeOnboardingNameUpper(rawText) {
+  const raw = String(rawText || "").trim();
+  if (!raw) return null;
+  if (isLikelyChatNotName(raw)) return null;
+  const sanitized = sanitizeWaPersonName(raw);
+  if (!sanitized) return null;
+  const lower = sanitized.toLowerCase();
+  // Bloquea textos de prueba muy comunes que suelen contaminar customers.
+  if (/\b(prueba|test|testing|nombre|apellido|nuevo|nueva|cliente)\b/i.test(lower)) return null;
+  const words = sanitized.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 4) return null;
+  return sanitized.toUpperCase();
 }
 
 /**
@@ -146,6 +156,13 @@ async function handle(normalized) {
 
   try {
     await client.query("BEGIN");
+    // Serializa el onboarding por teléfono para evitar duplicados por carreras concurrentes.
+    {
+      const phoneLockKey = normalizePhone(normalized.fromPhone) || String(normalized.fromPhone || "");
+      if (phoneLockKey) {
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [phoneLockKey]);
+      }
+    }
 
     const cn = normalized.contactName != null ? String(normalized.contactName).trim() : "";
 
@@ -211,10 +228,11 @@ async function handle(normalized) {
       const chatState = await getCrmChatState(client, normalized.fromPhone);
 
       const messageText = normalized.content?.text ? String(normalized.content.text).trim() : "";
+      const validatedOnboardingName = normalizeOnboardingNameUpper(messageText);
       const isInboundText =
         eventType === "messages.received" &&
         (normalized.type || "text") !== "reaction" &&
-        messageText.length >= 2;
+        Boolean(validatedOnboardingName);
 
       // Detecta si este messageId es el mismo que disparó la creación del estado
       // (webhook duplicado sobre el primer mensaje → no tratar como nombre).
@@ -227,7 +245,7 @@ async function handle(normalized) {
         // ══════════════════════════════════════════════════════════════
         // CASO 2: AWAITING_NAME + texto recibido → registrar cliente
         // ══════════════════════════════════════════════════════════════
-        const confirmedName = messageText.toUpperCase().slice(0, 200);
+        const confirmedName = String(validatedOnboardingName).slice(0, 200);
         postConfirmedName = confirmedName;
 
         // Crear cliente vía resolveCustomerId (maneja identities, ML buyer match, etc.)
@@ -307,6 +325,17 @@ async function handle(normalized) {
         });
 
         postAction = "confirm_name";
+      } else if (
+        chatState &&
+        chatState.status === "AWAITING_NAME" &&
+        !isTriggerReplay &&
+        eventType === "messages.received" &&
+        (normalized.type || "text") === "text" &&
+        messageText.length > 0 &&
+        !validatedOnboardingName
+      ) {
+        // Mantiene el estado pendiente y vuelve a pedir nombre/apellido válido.
+        postAction = "ask_name";
       } else if (!chatState || isTriggerReplay) {
         // ══════════════════════════════════════════════════════════════
         // CASO 3: Contacto completamente nuevo (o mismo trigger replay)

@@ -173,6 +173,15 @@ function normalizeBaileysEnvelope(body) {
     n.fromPhone = digits;
   }
 
+  // Algunos payloads Wasender traen fromMe=true pero incluyen pistas claras de remitente entrante.
+  // Conservamos toPhone, pero también poblamos fromPhone para que el router pueda clasificar mejor.
+  if (!n.fromPhone && dataTop && typeof dataTop === "object") {
+    const senderHint = dataTop.sender || dataTop.from || dataTop.senderPn || dataTop.cleanedSenderPn || null;
+    if (senderHint) {
+      n.fromPhone = normalizePhoneDigits(String(senderHint).split("@")[0]) || n.fromPhone;
+    }
+  }
+
   /** Entrante 1:1: si el webhook vino sin key útil pero hay jid en el sobre (Wasender). */
   if (!n.fromPhone && !n.toPhone && dataTop && typeof dataTop === "object") {
     const altJid =
@@ -292,13 +301,25 @@ function parseWebhookJobs(body) {
   }
 
   const ev = String(body.event || "messages.received");
+  const dataTop = body && body.data != null ? body.data : body;
   const norm = normalizeBaileysEnvelope(body);
   let evOut = ev;
 
   if (ev === "message.sent") {
     evOut = "messages.sent";
   } else if (ev === "messages.upsert") {
-    evOut = norm.toPhone ? "messages.sent" : "messages.received";
+    const explicitFromMe =
+      dataTop &&
+      typeof dataTop === "object" &&
+      dataTop.key &&
+      (dataTop.key.fromMe === true || dataTop.key.fromMe === "true");
+    const hasInboundHints =
+      !!(
+        (dataTop && typeof dataTop === "object" && (dataTop.sender || dataTop.from || dataTop.senderPn)) ||
+        (norm && norm.fromPhone && !norm.toPhone)
+      );
+    // Heurística defensiva: si hay pistas de inbound, priorizar messages.received.
+    evOut = hasInboundHints ? "messages.received" : explicitFromMe || norm.toPhone ? "messages.sent" : "messages.received";
   } else if (
     ev === "messages.received" ||
     ev === "message.received" ||

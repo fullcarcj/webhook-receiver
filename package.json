@@ -55,6 +55,7 @@
     "dedupe-customers": "node scripts/deduplicateCustomers.js",
     "db:sales-all": "node scripts/run-sales-all-migrations.js",
     "db:orders-lifecycle": "node scripts/run-orders-lifecycle-migration.js",
+    "db:sales-order-total-rename": "node scripts/run-sales-order-total-rename-migration.js",
     "check-pending-ratings": "node src/jobs/checkPendingRatings.js",
     "db:whatsapp-hub": "node scripts/run-whatsapp-hub-migration.js",
     "db:crm-wa-welcome": "node scripts/run-crm-wa-welcome-migration.js",

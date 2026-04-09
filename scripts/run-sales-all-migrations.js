@@ -15,6 +15,7 @@ const steps = [
   "run-sales-completed-migration.js",
   "run-customers-phone2-migration.js",
   "run-orders-lifecycle-migration.js",
+  "run-sales-order-total-rename-migration.js",
 ];
 
 for (const name of steps) {

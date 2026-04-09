@@ -1868,7 +1868,7 @@ const server = http.createServer(async (req, res) => {
   <td><code>${escapeHtml(String(r.external_order_id || "—"))}</code></td>
   <td>${escapeHtml(String(r.customer_id ?? "—"))}</td>
   <td>${escapeHtml(String(r.status || "—"))}</td>
-  <td>${escapeHtml(String(r.total_amount_usd != null ? r.total_amount_usd : "—"))}</td>
+  <td>${escapeHtml(String(r.order_total_amount != null ? r.order_total_amount : r.total_amount_usd != null ? r.total_amount_usd : "—"))}</td>
   <td>${escapeHtml(String(r.loyalty_points_earned ?? "—"))}</td>
   <td>${escapeHtml(String(r.sold_by ?? "—"))}</td>
   <td><pre class="notes">${escapeHtml(String(r.notes || "").slice(0, 400))}${String(r.notes || "").length > 400 ? "…" : ""}</pre></td>
@@ -1898,7 +1898,7 @@ const server = http.createServer(async (req, res) => {
   <h1>Ventas globales (sales_orders)</h1>
   <p class="lead">${out.total} orden(es) en total · mostrando ${out.rows.length} (limit ${out.limit}, offset ${out.offset}). Por defecto se excluyen <code>completed</code> salvo <code>?include_completed=1</code>. JSON: <code>?format=json</code>. API JSON: <code>/api/sales?${baseQs.replace(/^&/, "")}</code></p>
   <table>
-    <thead><tr><th>id</th><th>creado</th><th>source</th><th>external_order_id</th><th>customer_id</th><th>status</th><th>total USD</th><th>puntos</th><th>sold_by</th><th>notes</th></tr></thead>
+    <thead><tr><th>id</th><th>creado</th><th>source</th><th>external_order_id</th><th>customer_id</th><th>status</th><th>total orden</th><th>puntos</th><th>sold_by</th><th>notes</th></tr></thead>
     <tbody>${rowsHtml || '<tr><td colspan="10">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>

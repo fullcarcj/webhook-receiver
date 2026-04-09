@@ -78,7 +78,7 @@ async function updateOrderStatus(orderId, transitionData) {
     await client.query("BEGIN");
 
     const { rows } = await client.query(
-      `SELECT id, status, lifecycle_status, source, customer_id, total_amount_usd,
+      `SELECT id, status, lifecycle_status, source, customer_id, order_total_amount,
               loyalty_points_earned,
               COALESCE(applies_stock, TRUE) AS applies_stock,
               COALESCE(records_cash, TRUE) AS records_cash
@@ -112,7 +112,7 @@ async function updateOrderStatus(orderId, transitionData) {
     }
 
     const items = await fetchOrderItems(client, oid);
-    const totalAmt = Number(order.total_amount_usd);
+    const totalAmt = Number(order.order_total_amount);
     const legacy = lifecycleToLegacy(data.status);
 
     await client.query(

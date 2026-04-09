@@ -310,7 +310,7 @@ async function createOrder({
     const ins = await client.query(
       `INSERT INTO sales_orders (
          source, external_order_id, customer_id, status,
-         total_amount_usd, total_amount_bs, exchange_rate_bs_per_usd, payment_method,
+         order_total_amount, total_amount_bs, exchange_rate_bs_per_usd, payment_method,
          notes, sold_by, applies_stock, records_cash
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, TRUE)
@@ -406,7 +406,7 @@ async function getSalesOrderById(id) {
       : "";
     const { rows: orows } = await pool.query(
       `SELECT id, source, external_order_id, customer_id, status,
-              total_amount_usd,
+              order_total_amount,
               total_amount_bs, exchange_rate_bs_per_usd, payment_method,
               loyalty_points_earned,
               notes, sold_by, created_at, updated_at,
@@ -428,14 +428,16 @@ async function getSalesOrderById(id) {
        FROM sales_order_items WHERE sales_order_id = $1 ORDER BY id`,
       [oid]
     );
+    const tot = Number(o.order_total_amount);
     return {
       id: o.id,
       source: o.source,
       external_order_id: o.external_order_id,
       customer_id: o.customer_id,
       status: o.status,
-      total_amount_usd: Number(o.total_amount_usd),
-      total_usd: Number(o.total_amount_usd),
+      order_total_amount: tot,
+      total_amount_usd: tot,
+      total_usd: tot,
       total_amount_bs: o.total_amount_bs != null ? Number(o.total_amount_bs) : null,
       exchange_rate_bs_per_usd:
         o.exchange_rate_bs_per_usd != null ? Number(o.exchange_rate_bs_per_usd) : null,
@@ -516,7 +518,7 @@ async function listSalesOrders({
   params.push(lim, off);
   try {
     const { rows } = await pool.query(
-      `SELECT id, source, external_order_id, customer_id, status, total_amount_usd, loyalty_points_earned,
+      `SELECT id, source, external_order_id, customer_id, status, order_total_amount, loyalty_points_earned,
               notes, sold_by, created_at
        FROM sales_orders ${where}
        ORDER BY created_at DESC
@@ -525,19 +527,23 @@ async function listSalesOrders({
     );
     const { rows: countRows } = await pool.query(`SELECT COUNT(*)::bigint AS c FROM sales_orders ${where}`, params.slice(0, -2));
     return {
-      rows: rows.map((o) => ({
+      rows: rows.map((o) => {
+        const tot = Number(o.order_total_amount);
+        return {
         id: o.id,
         source: o.source,
         external_order_id: o.external_order_id,
         customer_id: o.customer_id,
         status: o.status,
-        total_amount_usd: Number(o.total_amount_usd),
-        total_usd: Number(o.total_amount_usd),
+        order_total_amount: tot,
+        total_amount_usd: tot,
+        total_usd: tot,
         loyalty_points_earned: o.loyalty_points_earned,
         notes: o.notes,
         sold_by: o.sold_by,
         created_at: o.created_at,
-      })),
+      };
+      }),
       total: Number(countRows[0].c),
       limit: lim,
       offset: off,
@@ -564,7 +570,7 @@ async function getSalesStats({ from, to }) {
     const { rows } = await pool.query(
       `SELECT source,
               COUNT(*)::bigint AS order_count,
-              COALESCE(SUM(total_amount_usd), 0)::numeric AS total_amount_usd,
+              COALESCE(SUM(order_total_amount), 0)::numeric AS order_total_sum,
               COALESCE(SUM(total_amount_bs), 0)::numeric AS total_amount_bs
        FROM sales_orders
        ${where}
@@ -573,23 +579,28 @@ async function getSalesStats({ from, to }) {
       params
     );
     const { rows: sumRows } = await pool.query(
-      `SELECT COALESCE(SUM(total_amount_usd), 0)::numeric AS total_amount_usd,
+      `SELECT COALESCE(SUM(order_total_amount), 0)::numeric AS order_total_sum,
               COALESCE(SUM(total_amount_bs), 0)::numeric AS total_amount_bs,
               COUNT(*)::bigint AS order_count
        FROM sales_orders ${where}`,
       params
     );
     return {
-      by_source: rows.map((r) => ({
+      by_source: rows.map((r) => {
+        const s = Number(r.order_total_sum);
+        return {
         source: r.source,
         order_count: Number(r.order_count),
-        total_amount_usd: Number(r.total_amount_usd),
-        total_usd: Number(r.total_amount_usd),
+        order_total_amount: s,
+        total_amount_usd: s,
+        total_usd: s,
         total_amount_bs: r.total_amount_bs != null ? Number(r.total_amount_bs) : null,
-      })),
+      };
+      }),
       total_orders: Number(sumRows[0].order_count),
-      total_amount_usd: Number(sumRows[0].total_amount_usd),
-      total_usd: Number(sumRows[0].total_amount_usd),
+      order_total_amount: Number(sumRows[0].order_total_sum),
+      total_amount_usd: Number(sumRows[0].order_total_sum),
+      total_usd: Number(sumRows[0].order_total_sum),
       total_amount_bs: sumRows[0].total_amount_bs != null ? Number(sumRows[0].total_amount_bs) : null,
     };
   } catch (e) {
@@ -614,7 +625,7 @@ async function patchSalesOrderStatus(orderId, newStatus) {
     await client.query("BEGIN");
 
     const { rows: orows } = await client.query(
-      `SELECT id, source, customer_id, status, total_amount_usd, loyalty_points_earned,
+      `SELECT id, source, customer_id, status, order_total_amount, loyalty_points_earned,
               COALESCE(applies_stock, TRUE) AS applies_stock,
               COALESCE(records_cash, TRUE) AS records_cash
        FROM sales_orders WHERE id = $1 FOR UPDATE`,
@@ -631,7 +642,7 @@ async function patchSalesOrderStatus(orderId, newStatus) {
     const appliesStock = order.applies_stock !== false;
     const recordsCash = order.records_cash !== false;
     const items = await fetchOrderItems(client, oid);
-    const totalAmt = Number(order.total_amount_usd);
+    const totalAmt = Number(order.order_total_amount);
 
     if (newStatus === "paid") {
       if (cur !== "pending") {
@@ -946,7 +957,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     let ins;
     if (hasLifecycle) {
       ins = await client.query(
-        `INSERT INTO sales_orders (source, external_order_id, customer_id, status, total_amount_usd, notes, sold_by,
+        `INSERT INTO sales_orders (source, external_order_id, customer_id, status, order_total_amount, notes, sold_by,
           applies_stock, records_cash, ml_user_id, loyalty_points_earned,
           lifecycle_status, ml_status, rating_deadline_at)
          VALUES ('mercadolibre', $1, $2, $3, $4, $5, NULL, FALSE, FALSE, $6, $7,
@@ -956,7 +967,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
       );
     } else {
       ins = await client.query(
-        `INSERT INTO sales_orders (source, external_order_id, customer_id, status, total_amount_usd, notes, sold_by,
+        `INSERT INTO sales_orders (source, external_order_id, customer_id, status, order_total_amount, notes, sold_by,
           applies_stock, records_cash, ml_user_id, loyalty_points_earned)
          VALUES ('mercadolibre', $1, $2, $3, $4, $5, NULL, FALSE, FALSE, $6, $7)
          RETURNING id`,
@@ -979,14 +990,16 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
       }
       if (!fr.length) throw mapErr(readErr);
       const o = fr[0];
+      const tot = Number(o.order_total_amount);
       return {
         id: o.id,
         source: o.source,
         external_order_id: o.external_order_id,
         customer_id: o.customer_id,
         status: o.status,
-        total_amount_usd: Number(o.total_amount_usd),
-        total_usd: Number(o.total_amount_usd),
+        order_total_amount: tot,
+        total_amount_usd: tot,
+        total_usd: tot,
         total_amount_bs: o.total_amount_bs != null ? Number(o.total_amount_bs) : null,
         exchange_rate_bs_per_usd:
           o.exchange_rate_bs_per_usd != null ? Number(o.exchange_rate_bs_per_usd) : null,

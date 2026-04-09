@@ -2,8 +2,6 @@
 
 const pino = require("pino");
 const { parseWebhookJobs } = require("./payloadParser");
-const { findOrCreateCustomer } = require("../services/crmIdentityService");
-const { sanitizeWaPersonName } = require("./waNameCandidate");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -72,21 +70,9 @@ async function routeWebhook(body) {
     }
   }
 
-  if (firstInbound && firstInbound.fromPhone) {
-    try {
-      const rawCn = firstInbound.contactName != null ? String(firstInbound.contactName).trim() : "";
-      const safeCn = rawCn ? sanitizeWaPersonName(rawCn) : null;
-      await findOrCreateCustomer({
-        phoneNumber: firstInbound.fromPhone,
-        fullName: safeCn || null,
-        messageId: firstInbound.messageId || `hub-${Date.now()}`,
-        rawPayload: body,
-        fuzzyThreshold: 0.35,
-      });
-    } catch (err) {
-      logger.warn({ err }, "whatsapp_hub_find_or_create_customer");
-    }
-  }
+  // Tipo H onboarding: no crear customers automáticamente desde el router.
+  // La creación se controla exclusivamente en processors/messages.js cuando el estado AWAITING_NAME
+  // recibe un nombre válido.
 }
 
 module.exports = { routeWebhook, routeWebhookJobs: parseWebhookJobs };

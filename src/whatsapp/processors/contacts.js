@@ -1,7 +1,6 @@
 "use strict";
 
 const { pool } = require("../../../db");
-const { findOrCreateCustomer } = require("../../services/crmIdentityService");
 const { normalizePhoneDigits } = require("./_shared");
 const {
   sanitizeWaPersonName,
@@ -15,23 +14,8 @@ async function handle(normalized) {
   if (!phone) return;
 
   if (ev === "contacts.upsert" || ev === "contacts.update") {
-    try {
-      const cn = normalized.contactName ? sanitizeWaPersonName(String(normalized.contactName)) : null;
-      const disp = normalized.contactName ? sanitizeContactDisplayName(String(normalized.contactName)) : null;
-      const label =
-        cn ||
-        (disp && !isWaContactNameBlockedForFullName(disp) ? disp : null) ||
-        "Cliente WhatsApp";
-      await findOrCreateCustomer({
-        phoneNumber: phone,
-        fullName: label,
-        messageId: `contact-${phone}-${Date.now()}`,
-        rawPayload: normalized.rawPayload || {},
-        fuzzyThreshold: 0.35,
-      });
-    } catch (_e) {
-      /* ignore */
-    }
+    // Tipo H onboarding: no crear customers por eventos de contactos.
+    // Este processor solo puede enriquecer nombres de clientes existentes.
   }
 
   if (ev === "contacts.update" && normalized.contactName) {

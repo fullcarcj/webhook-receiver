@@ -187,6 +187,7 @@ const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./
 const { handleCustomersApiRequest } = require("./src/routes/customers");
 const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
 const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
+const { handleSseApiRequest, handleSseStatsRequest } = require("./src/handlers/sseApiHandler");
 const { startWorker: startReconciliationWorker, stopWorker: stopReconciliationWorker } = require("./src/workers/reconciliationWorker");
 const { routeWebhook: routeWhatsappHubFromBody } = require("./src/whatsapp/hookRouter");
 const { handleCrmApiRequest } = require("./src/routes/crm");
@@ -1637,6 +1638,11 @@ function scheduleTopicFetchFromWebhook(body) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
+
+  // POSICIÓN 0 — SSE antes de cualquier middleware de auth
+  // EventSource del browser no puede enviar headers custom → token en query param
+  if (await handleSseApiRequest(req, res, url)) return;
+  if (await handleSseStatsRequest(req, res, url)) return;
 
   if (handleCrmApiPreflight(req, res, url)) {
     return;

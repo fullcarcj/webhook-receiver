@@ -18,6 +18,11 @@
 const { pool } = require("../../db");
 const pino     = require("pino");
 const log      = pino({ level: process.env.LOG_LEVEL || "info", name: "reconciliation" });
+const {
+  emitPaymentConfirmed,
+  emitPaymentManualReview,
+  emitPaymentOverdue,
+} = require("./sseService");
 
 const TOLERANCE = {
   BANK_STATEMENT:  0.05,
@@ -242,6 +247,16 @@ async function applyMatch(order, match) {
       tolerance:  match.tolerance,
     }, `reconciliation: NIVEL ${match.level} aprobado`);
 
+    // Notificar frontend en tiempo real — después del COMMIT (no afecta la transacción)
+    emitPaymentConfirmed({
+      orderId:       order.id,
+      customerId:    order.customer_id,
+      amountBs:      order.total_orden,
+      matchLevel:    match.level,
+      source:        match.sourceType,
+      customerPhone: order.customer_phone,
+    });
+
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -318,6 +333,13 @@ async function applyManualReview(order, match) {
 
   log.warn({ orderId: order.id, sourceType: match.sourceType },
     "reconciliation: orden enviada a revisión manual");
+
+  emitPaymentManualReview({
+    orderId:    order.id,
+    customerId: order.customer_id,
+    amountBs:   order.total_orden,
+    source:     match.sourceType,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -333,6 +355,12 @@ async function handleNoMatch(order) {
       [order.id]
     );
     log.warn({ orderId: order.id, hoursOld: Math.round(hoursOld) }, "reconciliation: orden → payment_overdue");
+    emitPaymentOverdue({
+      orderId:    order.id,
+      customerId: order.customer_id,
+      amountBs:   order.total_orden,
+      hoursOld:   Math.round(hoursOld),
+    });
     return;
   }
 

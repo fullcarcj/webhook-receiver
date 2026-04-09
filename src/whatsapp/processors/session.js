@@ -2,6 +2,7 @@
 
 const { pool } = require("../../../db");
 const { normalizePhoneDigits } = require("./_shared");
+const { emitWaSessionStatus } = require("../../services/sseService");
 
 async function handle(normalized) {
   const st = String(normalized.sessionStatus || "").toLowerCase();
@@ -29,6 +30,12 @@ async function handle(normalized) {
       !ok,
     ]
   );
+
+  // Notificar frontend en tiempo real
+  emitWaSessionStatus({
+    status:     normalized.sessionStatus || st,
+    isCritical: !ok,
+  });
 }
 
 module.exports = { handle };

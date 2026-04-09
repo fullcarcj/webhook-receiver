@@ -169,6 +169,19 @@ async function handle(normalized) {
             ref:    extracted?.reference_number,
             amount: extracted?.amount_bs,
           }, "media: payment_attempt guardado");
+
+          // Notificar frontend en tiempo real
+          try {
+            const { emitReceiptDetected } = require("../../services/sseService");
+            emitReceiptDetected({
+              customerId:  customerId  ?? null,
+              chatId:      chatId      ?? null,
+              amountBs:    extracted?.amount_bs        ?? null,
+              reference:   extracted?.reference_number ?? null,
+              bank:        extracted?.bank_name        ?? null,
+              confidence:  extracted?.confidence       ?? null,
+            });
+          } catch (_) { /* SSE opcional — no bloquear flujo */ }
         } catch (receiptErr) {
           log.error({ err: receiptErr.message, messageId: normalized.messageId },
             "media: error procesando comprobante");

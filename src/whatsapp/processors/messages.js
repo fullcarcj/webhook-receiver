@@ -360,17 +360,34 @@ async function handle(normalized) {
       }
     } else if (postAction === "confirm_name") {
       setImmediate(() => {
-        trySendCrmWaWelcomeNameConfirmation({
-          chatId: postChatId,
-          customerId: postCustomerId,
-          phoneRaw: normalized.fromPhone,
-          confirmedName: postConfirmedName,
-        }).catch((err) =>
-          msgLog.error(
-            { err, chatId: postChatId, customerId: postCustomerId },
-            "trySendCrmWaWelcomeNameConfirmation"
+        Promise.resolve()
+          .then(() =>
+            trySendCrmWaWelcomeNameConfirmation({
+              chatId: postChatId,
+              customerId: postCustomerId,
+              phoneRaw: normalized.fromPhone,
+              confirmedName: postConfirmedName,
+            })
           )
-        );
+          .then((r) => {
+            if (r && r.ok) return;
+            // Fallback: si falla la confirmación, intenta saludo estándar para no quedar sin respuesta.
+            msgLog.warn(
+              { outcome: r && r.outcome, chatId: postChatId, customerId: postCustomerId },
+              "crm_name_confirm_failed_fallback_to_welcome"
+            );
+            return trySendCrmWaWelcome({
+              chatId: postChatId,
+              customerId: postCustomerId,
+              phoneRaw: normalized.fromPhone,
+            });
+          })
+          .catch((err) =>
+            msgLog.error(
+              { err, chatId: postChatId, customerId: postCustomerId },
+              "trySendCrmWaWelcomeNameConfirmation"
+            )
+          );
       });
     } else if (postAction === "ask_name") {
       setImmediate(() => {

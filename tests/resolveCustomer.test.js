@@ -13,7 +13,7 @@
 
 const assert = require("assert");
 const { normalizePhone, phonesMatch } = require("../src/utils/phoneNormalizer");
-const { shouldForceNameUpgrade } = require("../src/services/resolveCustomer");
+const { shouldForceNameUpgrade } = require("../src/services/customerNameUpgrade");
 
 async function testSanitizeWaPersonName() {
   const {

@@ -12,14 +12,9 @@ const {
   isWaContactNameBlockedForFullName,
 } = require("../whatsapp/waNameCandidate");
 const { findCustomerIdByPhoneAndPersonName } = require("./customerDedupPhoneName");
+const { shouldForceNameUpgrade, isWaPhonePlaceholderFullName } = require("./customerNameUpgrade");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "resolveCustomer" });
-
-/** Placeholder antiguo `WA-584…` o variante con espacios; no es nombre real. */
-function isWaPhonePlaceholderFullName(s) {
-  const t = String(s || "").trim();
-  return /^WA-\d+$/i.test(t);
-}
 
 const identitySchema = z.object({
   source: z.enum(["whatsapp", "mercadolibre", "mostrador"]),
@@ -98,24 +93,6 @@ function resolveNameForEnrich(data, source) {
   const display = sanitizeContactDisplayName(cn);
   if (display && !isWaContactNameBlockedForFullName(display)) return display;
   return null;
-}
-
-/**
- * Permite "subir" full_name cuando el actual es débil (placeholder/1 palabra/no-persona)
- * y llega un nombre+apellido válido desde WhatsApp.
- */
-function shouldForceNameUpgrade(currentFullName, incomingName) {
-  const nextRaw = incomingName != null ? String(incomingName).trim() : "";
-  const nextPerson = nextRaw ? sanitizeWaPersonName(nextRaw) : null;
-  if (!nextPerson) return false;
-
-  const cur = currentFullName != null ? String(currentFullName).trim() : "";
-  if (!cur) return true;
-  if (isWaPhonePlaceholderFullName(cur)) return true;
-  if (cur === "Cliente WhatsApp" || cur === "Cliente") return true;
-
-  const curPerson = sanitizeWaPersonName(cur);
-  return !curPerson;
 }
 
 async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2, source = "mercadolibre") {
@@ -465,4 +442,4 @@ async function resolveCustomer(identity, options = {}) {
   }
 }
 
-module.exports = { resolveCustomer, identitySchema, shouldForceNameUpgrade };
+module.exports = { resolveCustomer, identitySchema };

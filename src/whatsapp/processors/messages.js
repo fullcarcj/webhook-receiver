@@ -88,29 +88,84 @@ async function findExistingCustomerByPhone(db, phoneRaw) {
   return rows[0] ? { customerId: Number(rows[0].customer_id) } : null;
 }
 
+/**
+ * Palabras que NUNCA son parte de un nombre propio en español.
+ * Pronombres, artículos, verbos comunes, adverbios, conjunciones,
+ * adjetivos técnicos y expresiones de chat.
+ * La regla: si CUALQUIER palabra del texto está aquí → rechazar todo.
+ */
+const NON_NAME_WORDS = new Set([
+  // Pronombres
+  "yo","tu","tú","el","él","ella","nosotros","ustedes","ellos","ellas",
+  "me","te","se","nos","les","lo","le","les",
+  // Artículos
+  "un","una","unos","unas","los","las",
+  // Preposiciones
+  "de","del","al","en","con","por","para","sin","sobre","bajo","entre",
+  "ante","tras","hacia","hasta","desde","durante","mediante","según",
+  // Conjunciones / conectores
+  "y","e","o","u","ni","pero","sino","aunque","porque","pues","que",
+  "como","cuando","donde","si","ya","mas","más","pero","luego","entonces",
+  // Verbos comunes (conjugados o infinitivos)
+  "es","son","era","fue","ser","estar","sido","tengo","tiene","tienen",
+  "hay","hace","hacer","ir","voy","va","ven","voy","venir","puede","pueden",
+  "sé","se","no","soy","quiero","quiere","sabe","ver","veo","vea","doy","da",
+  "decir","digo","dice","llevar","llegar","poner","pongo","pasar","pasa",
+  "comprar","compro","busco","buscar","enviar","envío","salir","sale","salen",
+  // Adverbios
+  "solo","sólo","si","sí","no","también","tampoco","nunca","siempre","ya",
+  "muy","bien","mal","mejor","peor","más","menos","todo","nada","algo","aquí",
+  "allá","ahora","hoy","mañana","antes","después","igual","claro","exacto",
+  "obvio","seguro","listo","entendido","perfecto","correcto","genial",
+  // Chat / respuestas comunes
+  "hola","buenas","buenos","tardes","noches","días","gracias","ok","dale",
+  "chao","bye","adiós","adios","oye","mira","ojo","hey","epa","oe",
+  // Adjetivos que nunca son apellidos
+  "nuevo","nueva","bueno","buena","malo","mala","grande","pequeño","viejo",
+  "carburado","inyeccion","inyección","disponible","urgente",
+  // Sustantivos comunes (no nombres propios)
+  "carro","moto","repuesto","precio","envío","envio","mano","cosa","parte",
+  "nombre","apellido","numero","número","cliente","persona","trabajo","prueba",
+  "test","testing","celular","teléfono","telefono","whatsapp",
+]);
+
+/**
+ * Validación positiva: el texto es un nombre válido si:
+ * 1. Solo contiene letras (con tildes/ñ) y espacios.
+ * 2. Tiene entre 2 y 4 palabras.
+ * 3. Cada palabra tiene entre 3 y 20 caracteres.
+ * 4. NINGUNA palabra pertenece al vocabulario cotidiano (NON_NAME_WORDS).
+ * 5. No termina con sufijos verbales (-ando, -iendo, -ado, -ido, -ar, -er, -ir).
+ */
 function normalizeOnboardingNameUpper(rawText) {
   const raw = String(rawText || "").trim();
   if (!raw) return null;
   if (isLikelyChatNotName(raw)) return null;
+
+  // Solo letras y espacios (incluye tildes, ñ, ü)
+  if (!/^[a-záéíóúüñA-ZÁÉÍÓÚÜÑ\s'-]+$/.test(raw)) return null;
+
   const sanitized = sanitizeWaPersonName(raw);
   if (!sanitized) return null;
-  const lower = sanitized.toLowerCase();
-  // Bloquea textos de prueba y frases conversacionales comunes que contaminan customers.
-  if (
-    /\b(prueba|test|testing|nombre|apellido|nuevo|nueva|cliente|hola|buenas|gracias|ok|dale|mano|confirm(e|o|as|ar)|cuando|pregunt(o|a|ar|ame)|av[ií]same|ayuda|precio|disponible)\b/i.test(
-      lower
-    )
-  ) {
-    return null;
-  }
+
   const words = sanitized.split(/\s+/).filter(Boolean);
   if (words.length < 2 || words.length > 4) return null;
-  // Cada palabra de nombre/apellido debe tener al menos 2 letras.
-  if (words.some((w) => w.length < 2)) return null;
-  // Evita entradas con demasiadas palabras funcionales (texto libre).
-  const stopWords = new Set(["de", "del", "la", "las", "los", "el", "y", "e", "o", "u"]);
-  const lexicalWords = words.filter((w) => !stopWords.has(w.toLowerCase()));
-  if (lexicalWords.length < 2) return null;
+
+  // Longitud por palabra: mínimo 2, máximo 20
+  if (words.some((w) => w.length < 2 || w.length > 20)) return null;
+
+  const lower = words.map((w) => w.toLowerCase());
+
+  // Validación positiva: ninguna palabra puede ser vocabulario cotidiano
+  if (lower.some((w) => NON_NAME_WORDS.has(w))) return null;
+
+  // Ninguna palabra termina con sufijo verbal claro
+  const verbalSuffix = /(?:ando|iendo|ado|ido|ción|cion|ando|ente|mente|able|ible)$/i;
+  if (lower.some((w) => verbalSuffix.test(w))) return null;
+
+  // Al menos 2 palabras tienen 3+ letras (descarta iniciales sueltas)
+  if (lower.filter((w) => w.length >= 3).length < 2) return null;
+
   return sanitized.toUpperCase();
 }
 

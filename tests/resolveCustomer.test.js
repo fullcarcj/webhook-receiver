@@ -13,6 +13,7 @@
 
 const assert = require("assert");
 const { normalizePhone, phonesMatch } = require("../src/utils/phoneNormalizer");
+const { shouldForceNameUpgrade } = require("../src/services/resolveCustomer");
 
 async function testSanitizeWaPersonName() {
   const {
@@ -61,6 +62,15 @@ async function testSanitizeWaPersonName() {
   console.log("sanitizeWaPersonName: OK");
 }
 
+function testNameUpgradeRule() {
+  assert.strictEqual(shouldForceNameUpgrade("Carlos", "Carlos Pérez"), true);
+  assert.strictEqual(shouldForceNameUpgrade("Cliente WhatsApp", "Ana María"), true);
+  assert.strictEqual(shouldForceNameUpgrade("WA-584121234567", "Pedro López"), true);
+  assert.strictEqual(shouldForceNameUpgrade("Juan Pérez", "Juan Pérez"), false);
+  assert.strictEqual(shouldForceNameUpgrade("Juan Pérez", "Juan"), false);
+  console.log("name upgrade rule: OK");
+}
+
 function testNormalizer() {
   assert.strictEqual(normalizePhone("+584121234567"), "584121234567");
   assert.strictEqual(normalizePhone("04121234567"), "584121234567");
@@ -100,6 +110,7 @@ async function testResolveIntegration() {
 
 (async () => {
   await testSanitizeWaPersonName();
+  testNameUpgradeRule();
   testNormalizer();
   await testResolveIntegration();
   console.log("tests/resolveCustomer: done");

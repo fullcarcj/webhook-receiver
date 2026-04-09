@@ -100,16 +100,43 @@ function resolveNameForEnrich(data, source) {
   return null;
 }
 
+/**
+ * Permite "subir" full_name cuando el actual es débil (placeholder/1 palabra/no-persona)
+ * y llega un nombre+apellido válido desde WhatsApp.
+ */
+function shouldForceNameUpgrade(currentFullName, incomingName) {
+  const nextRaw = incomingName != null ? String(incomingName).trim() : "";
+  const nextPerson = nextRaw ? sanitizeWaPersonName(nextRaw) : null;
+  if (!nextPerson) return false;
+
+  const cur = currentFullName != null ? String(currentFullName).trim() : "";
+  if (!cur) return true;
+  if (isWaPhonePlaceholderFullName(cur)) return true;
+  if (cur === "Cliente WhatsApp" || cur === "Cliente") return true;
+
+  const curPerson = sanitizeWaPersonName(cur);
+  return !curPerson;
+}
+
 async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2, source = "mercadolibre") {
   const resolved = resolveNameForEnrich(data, source);
   const name = resolved && String(resolved).trim() ? String(resolved).trim() : null;
   const email = data.email ? String(data.email).toLowerCase().trim() : null;
   const hasP2 = await customersHasPhone2Column(db);
+  let forceNameUpgrade = false;
+
+  if (name) {
+    const { rows: currentRows } = await db.query(`SELECT full_name FROM customers WHERE id = $1`, [customerId]);
+    const currentFullName = currentRows[0] ? currentRows[0].full_name : null;
+    forceNameUpgrade = shouldForceNameUpgrade(currentFullName, name);
+  }
 
   if (hasP2) {
     await db.query(
       `UPDATE customers SET
          full_name = CASE
+           WHEN $8::boolean IS TRUE AND $2::text IS NOT NULL
+             THEN $2::text
            WHEN $2::text IS NOT NULL AND full_name LIKE 'WA-%' AND $2::text NOT LIKE 'WA-%'
              THEN $2::text
            WHEN $2::text IS NOT NULL AND TRIM(full_name) = 'Cliente WhatsApp' AND NOT ($2::text LIKE 'WA-%')
@@ -135,12 +162,15 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
         email,
         data.id_type ?? null,
         data.id_number ?? null,
+        forceNameUpgrade,
       ]
     );
   } else {
     await db.query(
       `UPDATE customers SET
          full_name = CASE
+           WHEN $7::boolean IS TRUE AND $2::text IS NOT NULL
+             THEN $2::text
            WHEN $2::text IS NOT NULL AND full_name LIKE 'WA-%' AND $2::text NOT LIKE 'WA-%'
              THEN $2::text
            WHEN $2::text IS NOT NULL AND TRIM(full_name) = 'Cliente WhatsApp' AND NOT ($2::text LIKE 'WA-%')
@@ -157,7 +187,7 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
          id_number = COALESCE(NULLIF(TRIM(id_number), ''), $6::text),
          updated_at = NOW()
        WHERE id = $1`,
-      [customerId, name, normalizedPhone, email, data.id_type ?? null, data.id_number ?? null]
+      [customerId, name, normalizedPhone, email, data.id_type ?? null, data.id_number ?? null, forceNameUpgrade]
     );
   }
 }
@@ -435,4 +465,4 @@ async function resolveCustomer(identity, options = {}) {
   }
 }
 
-module.exports = { resolveCustomer, identitySchema };
+module.exports = { resolveCustomer, identitySchema, shouldForceNameUpgrade };

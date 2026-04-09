@@ -72,7 +72,8 @@
     "db:payment-attempts": "node scripts/run-payment-attempts-migration.js",
     "db:reconciliation-log": "node scripts/run-reconciliation-log-migration.js",
     "db:sales-orders-overdue": "node scripts/run-sales-orders-overdue-migration.js",
-    "db:reconciliation-all": "npm run db:payment-attempts && npm run db:reconciliation-log && npm run db:sales-orders-overdue"
+    "db:reconciliation-all": "npm run db:payment-attempts && npm run db:reconciliation-log && npm run db:sales-orders-overdue",
+    "db:financial-tables": "node scripts/run-financial-tables-migration.js"
   },
   "engines": {
     "node": ">=18"

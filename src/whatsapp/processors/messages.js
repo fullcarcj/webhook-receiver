@@ -422,8 +422,13 @@ async function handle(normalized) {
         messageText.length > 0 &&
         !validatedOnboardingName
       ) {
-        // Mantiene el estado pendiente y vuelve a pedir nombre/apellido válido.
-        postAction = "ask_name";
+        // Mantiene el estado pendiente pero NO repite el mensaje.
+        // Queda en stand by hasta que llegue un nombre válido o intervención manual.
+        postAction = null;
+        msgLog.info(
+          { fromPhone: normalized.fromPhone, messageText: messageText.slice(0, 120) },
+          "tipo_h_invalid_name_standby"
+        );
       } else if (!chatState || isTriggerReplay) {
         // ══════════════════════════════════════════════════════════════
         // CASO 3: Contacto completamente nuevo (o mismo trigger replay)

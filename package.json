@@ -60,6 +60,7 @@
     "db:crm-wa-welcome": "node scripts/run-crm-wa-welcome-migration.js",
     "db:crm-chat-states": "node scripts/run-crm-chat-states-migration.js",
     "db:crm-messages-media": "node scripts/run-crm-messages-media-migration.js",
+    "db:wasender-webhook-media-status": "node scripts/run-wasender-webhook-media-status-migration.js",
     "crm-chat-states:cleanup": "node scripts/cleanup-crm-chat-states.js",
     "diagnose:crm-welcome": "node scripts/diagnose-crm-welcome.js",
     "import-ml-sales": "node scripts/importMlOrdersToSales.js",

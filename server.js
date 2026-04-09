@@ -634,6 +634,33 @@ function extractWasenderEvent(body) {
 }
 
 /**
+ * Detecta si payload Wasender trae media y extrae tipo+messageId inbound.
+ * @param {object} body
+ * @returns {{ hasMedia: boolean, mediaType: string|null, inboundMessageId: string|null }}
+ */
+function extractWasenderMediaMeta(body) {
+  const dataTop = body && typeof body === "object" && body.data != null ? body.data : body;
+  const msgEntry = Array.isArray(dataTop && dataTop.messages) ? dataTop.messages[0] : null;
+  const msgObj = (msgEntry && msgEntry.message) || (dataTop && dataTop.message) || {};
+  const key = (msgEntry && msgEntry.key) || (dataTop && dataTop.key) || {};
+  const inboundMessageId = key && key.id != null ? String(key.id).slice(0, 200) : null;
+
+  const map = [
+    ["imageMessage", "image"],
+    ["audioMessage", "audio"],
+    ["videoMessage", "video"],
+    ["documentMessage", "document"],
+    ["stickerMessage", "sticker"],
+  ];
+  for (const [k, t] of map) {
+    if (msgObj && typeof msgObj === "object" && msgObj[k]) {
+      return { hasMedia: true, mediaType: t, inboundMessageId };
+    }
+  }
+  return { hasMedia: false, mediaType: null, inboundMessageId };
+}
+
+/**
  * POST /webhook compartido con ML: Wasender trae `event` (p. ej. messages.update) y no usa
  * `topic`/`resource` como las notificaciones ML. Opcional: cabecera X-Webhook-Signature si no hay `event`.
  */
@@ -668,6 +695,7 @@ async function handleWasenderWebhookPost(req, res, body, sourceLabel) {
       ? String(req.headers["x-webhook-signature"]).slice(0, 500)
       : null;
   const event = extractWasenderEvent(body);
+  const mediaMeta = extractWasenderMediaMeta(body);
   const payloadStr = JSON.stringify(body);
 
   // Log de trazabilidad: muestra el evento crudo y datos clave del payload entrante.
@@ -691,6 +719,11 @@ async function handleWasenderWebhookPost(req, res, body, sourceLabel) {
       payload: payloadStr,
       x_webhook_signature: sigHeader,
       signature_ok: sigCheck.skipped ? null : true,
+      has_media: mediaMeta.hasMedia,
+      media_type: mediaMeta.mediaType,
+      inbound_message_id: mediaMeta.inboundMessageId,
+      media_pipeline_status: mediaMeta.hasMedia ? "queued" : "not_media",
+      media_pipeline_detail: mediaMeta.hasMedia ? "webhook_received" : "no_media_in_payload",
     });
   } catch (e) {
     console.error("[db] wasender_webhook no guardado:", e.message);
@@ -706,6 +739,9 @@ async function handleWasenderWebhookPost(req, res, body, sourceLabel) {
   console.log("[wasender-webhook] id=%s event=%s source=%s", id, event, src);
 
   if (String(process.env.WA_CRM_HUB_FROM_WASENDER || "1").trim() !== "0") {
+    if (body && typeof body === "object") {
+      body.__wasender_webhook_event_id = id;
+    }
     setImmediate(() => {
       routeWhatsappHubFromBody(body).catch((err) => {
         console.error("[wasender->crm_hub]", err && err.message ? err.message : err);
@@ -2205,6 +2241,11 @@ const server = http.createServer(async (req, res) => {
   <td class="muted">${escapeHtml(row.received_at)}</td>
   <td>${escapeHtml(row.event)}</td>
   <td>${row.signature_ok === null ? "—" : row.signature_ok ? "sí" : "no"}</td>
+  <td>${row.has_media ? "sí" : "no"}</td>
+  <td>${escapeHtml(row.media_type || "—")}</td>
+  <td>${escapeHtml(row.media_pipeline_status || "—")}</td>
+  <td>${escapeHtml(row.media_pipeline_detail || "—")}</td>
+  <td>${row.media_firebase_url ? `<a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>` : "—"}</td>
   <td><pre class="payload">${escapeHtml(preview)}${preview.length >= 320 ? "…" : ""}</pre></td>
 </tr>`;
       })
@@ -2243,8 +2284,8 @@ const server = http.createServer(async (req, res) => {
     <li><strong>Uso práctico</strong> — confirmar entrega de tipo E/F, automatizar respuestas a texto entrante, métricas, evitar doble envío cuando el usuario ya respondió por WhatsApp.</li>
   </ul>
   <table>
-    <thead><tr><th>id</th><th>Recibido</th><th>event</th><th>firma OK</th><th>payload (vista)</th></tr></thead>
-    <tbody>${hookRows || '<tr><td colspan="5">Sin registros.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>Recibido</th><th>event</th><th>firma OK</th><th>has_media</th><th>media_type</th><th>pipeline_status</th><th>pipeline_detail</th><th>firebase_url</th><th>payload (vista)</th></tr></thead>
+    <tbody>${hookRows || '<tr><td colspan="10">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

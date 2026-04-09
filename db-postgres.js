@@ -85,10 +85,26 @@ async function runSchemaAndSeed() {
       event TEXT,
       payload TEXT NOT NULL,
       x_webhook_signature TEXT,
-      signature_ok BOOLEAN
+      signature_ok BOOLEAN,
+      has_media BOOLEAN NOT NULL DEFAULT FALSE,
+      media_type TEXT,
+      inbound_message_id TEXT,
+      media_pipeline_status TEXT NOT NULL DEFAULT 'not_media',
+      media_pipeline_detail TEXT,
+      media_firebase_url TEXT,
+      media_processed_at TIMESTAMPTZ
     )`,
+    `ALTER TABLE IF EXISTS wasender_webhook_events ADD COLUMN IF NOT EXISTS has_media BOOLEAN NOT NULL DEFAULT FALSE`,
+    `ALTER TABLE IF EXISTS wasender_webhook_events ADD COLUMN IF NOT EXISTS media_type TEXT`,
+    `ALTER TABLE IF EXISTS wasender_webhook_events ADD COLUMN IF NOT EXISTS inbound_message_id TEXT`,
+    `ALTER TABLE IF EXISTS wasender_webhook_events ADD COLUMN IF NOT EXISTS media_pipeline_status TEXT NOT NULL DEFAULT 'not_media'`,
+    `ALTER TABLE IF EXISTS wasender_webhook_events ADD COLUMN IF NOT EXISTS media_pipeline_detail TEXT`,
+    `ALTER TABLE IF EXISTS wasender_webhook_events ADD COLUMN IF NOT EXISTS media_firebase_url TEXT`,
+    `ALTER TABLE IF EXISTS wasender_webhook_events ADD COLUMN IF NOT EXISTS media_processed_at TIMESTAMPTZ`,
     `CREATE INDEX IF NOT EXISTS idx_wasender_webhook_received ON wasender_webhook_events(received_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_wasender_webhook_event ON wasender_webhook_events(event)`,
+    `CREATE INDEX IF NOT EXISTS idx_wasender_webhook_inbound_message_id ON wasender_webhook_events(inbound_message_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_wasender_webhook_media_status ON wasender_webhook_events(media_pipeline_status, received_at DESC)`,
     `CREATE TABLE IF NOT EXISTS ml_accounts (
       ml_user_id BIGINT PRIMARY KEY,
       refresh_token TEXT NOT NULL,
@@ -1201,7 +1217,17 @@ async function insertWebhook(payloadObj) {
 
 /**
  * Webhooks entrantes de Wasender API (eventos de sesión WhatsApp).
- * @param {{ event?: string|null, payload: string, x_webhook_signature?: string|null, signature_ok?: boolean|null }} row
+ * @param {{
+ *   event?: string|null,
+ *   payload: string,
+ *   x_webhook_signature?: string|null,
+ *   signature_ok?: boolean|null,
+ *   has_media?: boolean|null,
+ *   media_type?: string|null,
+ *   inbound_message_id?: string|null,
+ *   media_pipeline_status?: string|null,
+ *   media_pipeline_detail?: string|null
+ * }} row
  */
 async function insertWasenderWebhookEvent(row) {
   await ensureSchema();
@@ -1211,12 +1237,80 @@ async function insertWasenderWebhookEvent(row) {
     row.x_webhook_signature != null ? String(row.x_webhook_signature).slice(0, 500) : null;
   let sigOk = null;
   if (row.signature_ok === true || row.signature_ok === false) sigOk = row.signature_ok;
+  const hasMedia = row.has_media === true;
+  const mediaType = row.media_type != null ? String(row.media_type).slice(0, 50) : null;
+  const inboundMessageId =
+    row.inbound_message_id != null ? String(row.inbound_message_id).slice(0, 200) : null;
+  const mediaStatus = row.media_pipeline_status != null
+    ? String(row.media_pipeline_status).slice(0, 50)
+    : hasMedia ? "queued" : "not_media";
+  const mediaDetail =
+    row.media_pipeline_detail != null ? String(row.media_pipeline_detail).slice(0, 2000) : null;
   const { rows } = await pool.query(
-    `INSERT INTO wasender_webhook_events (event, payload, x_webhook_signature, signature_ok)
-     VALUES ($1, $2, $3, $4) RETURNING id`,
-    [event, payload, xSig, sigOk]
+    `INSERT INTO wasender_webhook_events (
+       event, payload, x_webhook_signature, signature_ok,
+       has_media, media_type, inbound_message_id, media_pipeline_status, media_pipeline_detail
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id`,
+    [event, payload, xSig, sigOk, hasMedia, mediaType, inboundMessageId, mediaStatus, mediaDetail]
   );
   return rows[0] ? Number(rows[0].id) : null;
+}
+
+/**
+ * Actualiza estado del pipeline de media de un webhook Wasender.
+ * Puede actualizar por `id` o por `inbound_message_id` (último registro).
+ * @param {{
+ *   id?: number|null,
+ *   inbound_message_id?: string|null,
+ *   media_pipeline_status: string,
+ *   media_pipeline_detail?: string|null,
+ *   media_firebase_url?: string|null,
+ *   media_type?: string|null
+ * }} row
+ */
+async function updateWasenderWebhookMediaStatus(row) {
+  await ensureSchema();
+  const status = String(row.media_pipeline_status || "").trim();
+  if (!status) return 0;
+  const detail = row.media_pipeline_detail != null ? String(row.media_pipeline_detail).slice(0, 2000) : null;
+  const firebaseUrl = row.media_firebase_url != null ? String(row.media_firebase_url).slice(0, 2000) : null;
+  const mediaType = row.media_type != null ? String(row.media_type).slice(0, 50) : null;
+
+  const byId = Number(row.id);
+  if (Number.isFinite(byId) && byId > 0) {
+    const r = await pool.query(
+      `UPDATE wasender_webhook_events
+       SET media_pipeline_status = $2,
+           media_pipeline_detail = COALESCE($3, media_pipeline_detail),
+           media_firebase_url = COALESCE($4, media_firebase_url),
+           media_type = COALESCE($5, media_type),
+           media_processed_at = NOW()
+       WHERE id = $1`,
+      [byId, status, detail, firebaseUrl, mediaType]
+    );
+    return r.rowCount || 0;
+  }
+
+  const mid = row.inbound_message_id != null ? String(row.inbound_message_id).trim() : "";
+  if (!mid) return 0;
+  const r = await pool.query(
+    `UPDATE wasender_webhook_events
+     SET media_pipeline_status = $2,
+         media_pipeline_detail = COALESCE($3, media_pipeline_detail),
+         media_firebase_url = COALESCE($4, media_firebase_url),
+         media_type = COALESCE($5, media_type),
+         media_processed_at = NOW()
+     WHERE id = (
+       SELECT id FROM wasender_webhook_events
+       WHERE inbound_message_id = $1
+       ORDER BY id DESC
+       LIMIT 1
+     )`,
+    [mid, status, detail, firebaseUrl, mediaType]
+  );
+  return r.rowCount || 0;
 }
 
 async function listWasenderWebhookEvents(limit, maxAllowed) {
@@ -1224,7 +1318,9 @@ async function listWasenderWebhookEvents(limit, maxAllowed) {
   const cap = maxAllowed != null ? maxAllowed : 2000;
   const n = Math.min(Math.max(Number(limit) || 50, 1), cap);
   const { rows } = await pool.query(
-    `SELECT id, received_at, event, payload, x_webhook_signature, signature_ok
+    `SELECT id, received_at, event, payload, x_webhook_signature, signature_ok,
+            has_media, media_type, inbound_message_id, media_pipeline_status,
+            media_pipeline_detail, media_firebase_url, media_processed_at
      FROM wasender_webhook_events ORDER BY id DESC LIMIT $1`,
     [n]
   );
@@ -1235,6 +1331,14 @@ async function listWasenderWebhookEvents(limit, maxAllowed) {
     event: r.event,
     x_webhook_signature: r.x_webhook_signature,
     signature_ok: r.signature_ok,
+    has_media: r.has_media === true,
+    media_type: r.media_type,
+    inbound_message_id: r.inbound_message_id,
+    media_pipeline_status: r.media_pipeline_status,
+    media_pipeline_detail: r.media_pipeline_detail,
+    media_firebase_url: r.media_firebase_url,
+    media_processed_at:
+      r.media_processed_at instanceof Date ? r.media_processed_at.toISOString() : r.media_processed_at,
     data: JSON.parse(r.payload),
   }));
 }
@@ -4415,6 +4519,7 @@ module.exports = {
   listWebhooks,
   deleteWebhooks,
   insertWasenderWebhookEvent,
+  updateWasenderWebhookMediaStatus,
   listWasenderWebhookEvents,
   get dbPath() {
     return dbPathDisplay();

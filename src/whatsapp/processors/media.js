@@ -13,6 +13,7 @@ const { uploadToFirebase, buildFileName } = require("../media/firebaseUpload");
 const { transcribeWithOpenAI } = require("../media/openaiTranscribe");
 const { saveInboundMedia } = require("../media/mediaSaver");
 const { pool } = require("../../../db");
+const { updateWasenderWebhookMediaStatus } = require("../../../db");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "media_processor" });
 
@@ -30,8 +31,24 @@ async function handle(normalized) {
   if (!detected) return;
 
   const { messageKey, config, meta } = detected;
+  const webhookEventId = normalized?.rawPayload?.__wasender_webhook_event_id || null;
+  const mark = async (status, detail, firebaseUrl) => {
+    try {
+      await updateWasenderWebhookMediaStatus({
+        id: webhookEventId || null,
+        inbound_message_id: normalized.messageId || null,
+        media_pipeline_status: status,
+        media_pipeline_detail: detail || null,
+        media_firebase_url: firebaseUrl || null,
+        media_type: config.type,
+      });
+    } catch (_e) {
+      /* no romper flujo por fallo de tracking */
+    }
+  };
 
   try {
+    await mark("processing", "media_processor_started");
     // 1. Buscar chat + customer: solo procesar si ya están registrados
     const { rows } = await pool.query(
       `SELECT c.id AS chat_id, c.customer_id
@@ -43,6 +60,7 @@ async function handle(normalized) {
 
     if (!rows.length) {
       log.info({ fromPhone: normalized.fromPhone }, "media: chat no existe, skip (onboarding pendiente)");
+      await mark("skipped_no_chat", "chat_not_found_or_onboarding_pending");
       return;
     }
 
@@ -56,6 +74,7 @@ async function handle(normalized) {
         type:       config.type,
         messageId:  normalized.messageId,
       }, "media: archivo supera el límite — ignorado");
+      await mark("skipped_size_limit", `size=${meta.fileLength},limit=${config.sizeLimit}`);
       return;
     }
 
@@ -94,8 +113,10 @@ async function handle(normalized) {
       meta,
       transcription,
     });
+    await mark("completed", "saved_in_crm_messages", firebaseUrl);
 
   } catch (err) {
+    await mark("failed", String(err && err.message ? err.message : err).slice(0, 1800));
     log.error({
       err:       err.message,
       messageId: normalized.messageId,

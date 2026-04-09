@@ -180,6 +180,7 @@ const { handleCrmApiPreflight } = require("./src/middleware/crmApiCors");
 const { handleVehicleApiRequest } = require("./src/handlers/vehicleApiHandler");
 const { handlePurchaseApiRequest } = require("./src/handlers/purchaseApiHandler");
 const { handleSalesApiRequest } = require("./src/handlers/salesApiHandler");
+const salesService = require("./src/services/salesService");
 const { handleMediaApiRequest } = require("./src/handlers/mediaApiHandler");
 const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory");
 const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./src/handlers/customerLoyalty");
@@ -1797,6 +1798,113 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handlePurchaseApiRequest(req, res, url)) {
+    return;
+  }
+
+  /** Ventas globales — vista HTML (misma clave que /api/sales; sin prefijo /api). */
+  if (req.method === "GET" && (url.pathname === "/sales" || url.pathname === "/sales/")) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Ventas</title><p>Define <code>ADMIN_SECRET</code> y reinicia el servidor.</p>"
+      );
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        "<!DOCTYPE html><meta charset=\"utf-8\"><title>Ventas</title><p>Acceso denegado. Usa <code>/sales?k=…</code> (misma clave que <code>ADMIN_SECRET</code>).</p>"
+      );
+      return;
+    }
+    const limit = url.searchParams.get("limit");
+    const offset = url.searchParams.get("offset");
+    const source = url.searchParams.get("source") || undefined;
+    const status = url.searchParams.get("status") || undefined;
+    const from = url.searchParams.get("from") || undefined;
+    const to = url.searchParams.get("to") || undefined;
+    const includeCompleted = url.searchParams.get("include_completed") === "1";
+    let out;
+    try {
+      out = await salesService.listSalesOrders({
+        limit: limit != null ? Number(limit) : undefined,
+        offset: offset != null ? Number(offset) : undefined,
+        source,
+        status,
+        from,
+        to,
+        excludeCompleted: !includeCompleted,
+      });
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          data: out.rows,
+          meta: {
+            total: out.total,
+            limit: out.limit,
+            offset: out.offset,
+            exclude_completed_default: !includeCompleted,
+            timestamp: new Date().toISOString(),
+          },
+        })
+      );
+      return;
+    }
+    const baseQs = `k=${encodeURIComponent(k)}${includeCompleted ? "&include_completed=1" : ""}${limit != null && String(limit).trim() !== "" ? `&limit=${encodeURIComponent(String(limit))}` : ""}${offset != null && String(offset).trim() !== "" ? `&offset=${encodeURIComponent(String(offset))}` : ""}${source ? `&source=${encodeURIComponent(source)}` : ""}${status ? `&status=${encodeURIComponent(status)}` : ""}${from ? `&from=${encodeURIComponent(from)}` : ""}${to ? `&to=${encodeURIComponent(to)}` : ""}`;
+    const rowsHtml = out.rows
+      .map(
+        (r) => `<tr>
+  <td>${escapeHtml(String(r.id))}</td>
+  <td class="muted">${escapeHtml(r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at))}</td>
+  <td>${escapeHtml(String(r.source || "—"))}</td>
+  <td><code>${escapeHtml(String(r.external_order_id || "—"))}</code></td>
+  <td>${escapeHtml(String(r.customer_id ?? "—"))}</td>
+  <td>${escapeHtml(String(r.status || "—"))}</td>
+  <td>${escapeHtml(String(r.total_amount_usd != null ? r.total_amount_usd : "—"))}</td>
+  <td>${escapeHtml(String(r.loyalty_points_earned ?? "—"))}</td>
+  <td>${escapeHtml(String(r.sold_by ?? "—"))}</td>
+  <td><pre class="notes">${escapeHtml(String(r.notes || "").slice(0, 400))}${String(r.notes || "").length > 400 ? "…" : ""}</pre></td>
+</tr>`
+      )
+      .join("");
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Ventas globales</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    p.lead { color: #71767b; font-size: 0.9rem; margin-top: 0.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 1400px; margin-top: 1rem; font-size: 0.78rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.8rem; }
+    pre.notes { margin: 0; max-height: 80px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+    code { font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <h1>Ventas globales (sales_orders)</h1>
+  <p class="lead">${out.total} orden(es) en total · mostrando ${out.rows.length} (limit ${out.limit}, offset ${out.offset}). Por defecto se excluyen <code>completed</code> salvo <code>?include_completed=1</code>. JSON: <code>?format=json</code>. API JSON: <code>/api/sales?${baseQs.replace(/^&/, "")}</code></p>
+  <table>
+    <thead><tr><th>id</th><th>creado</th><th>source</th><th>external_order_id</th><th>customer_id</th><th>status</th><th>total USD</th><th>puntos</th><th>sold_by</th><th>notes</th></tr></thead>
+    <tbody>${rowsHtml || '<tr><td colspan="10">Sin registros.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
     return;
   }
 

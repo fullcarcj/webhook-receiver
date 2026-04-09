@@ -313,9 +313,13 @@ function parseWebhookJobs(body) {
       typeof dataTop === "object" &&
       dataTop.key &&
       (dataTop.key.fromMe === true || dataTop.key.fromMe === "true");
+    const senderHintRaw =
+      dataTop && typeof dataTop === "object"
+        ? dataTop.sender || dataTop.from || dataTop.senderPn || dataTop.cleanedSenderPn || null
+        : null;
     const hasInboundHints =
       !!(
-        (dataTop && typeof dataTop === "object" && (dataTop.sender || dataTop.from || dataTop.senderPn)) ||
+        senderHintRaw ||
         (norm && norm.fromPhone && !norm.toPhone)
       );
     // Heurística defensiva: si hay pistas de inbound, priorizar messages.received.

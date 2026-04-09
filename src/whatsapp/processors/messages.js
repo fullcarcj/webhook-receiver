@@ -420,9 +420,16 @@ async function handle(normalized) {
       });
     } else if (postAction === "ask_name") {
       setImmediate(() => {
-        trySendCrmWaAskName({ phoneRaw: normalized.fromPhone }).catch((err) =>
-          msgLog.error({ err, phoneRaw: normalized.fromPhone }, "trySendCrmWaAskName")
-        );
+        Promise.resolve()
+          .then(() => trySendCrmWaAskName({ phoneRaw: normalized.fromPhone }))
+          .then((r) => {
+            if (r && r.ok) return;
+            msgLog.warn(
+              { outcome: r && r.outcome, phoneRaw: normalized.fromPhone },
+              "trySendCrmWaAskName_not_sent"
+            );
+          })
+          .catch((err) => msgLog.error({ err, phoneRaw: normalized.fromPhone }, "trySendCrmWaAskName"));
       });
     }
 

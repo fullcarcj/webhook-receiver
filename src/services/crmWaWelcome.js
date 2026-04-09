@@ -404,9 +404,176 @@ async function trySendCrmWaWelcomeAfterName({ chatId, customerId, phoneRaw }) {
   return { ok: true, outcome: "sent" };
 }
 
+/**
+ * Primer contacto (Caso 3): contacto nuevo, sin cliente en BD.
+ * Envía el mensaje de bienvenida + solicitud de nombre.
+ * No requiere customerId ni chatId porque el cliente todavía NO está registrado.
+ * Env: CRM_WA_WELCOME_ASK_NAME (override del texto).
+ */
+async function trySendCrmWaAskName({ phoneRaw }) {
+  if (!isCrmWelcomeFeatureEnabled()) {
+    return { ok: false, outcome: "disabled" };
+  }
+
+  const cfg = await resolveWasenderRuntimeConfig();
+  if (!cfg.enabled) {
+    if (!_hintLoggedWasenderOff) {
+      _hintLoggedWasenderOff = true;
+      log.warn("crm_wa_ask_name: Wasender no habilitado — revisar WASENDER_ENABLED / BD ml_wasender_settings");
+    }
+    return { ok: false, outcome: "wasender_off" };
+  }
+
+  const to = normalizePhoneToE164(phoneRaw, cfg.defaultCountryCode);
+  if (!to) {
+    log.warn({ phoneRaw }, "crm_wa_ask_name: teléfono no normalizable a E.164");
+    return { ok: false, outcome: "bad_phone" };
+  }
+
+  const text =
+    process.env.CRM_WA_WELCOME_ASK_NAME ||
+    "¡Hola! Bienvenido a Solomotor3k. No tenemos tu nombre registrado en nuestro sistema. Por favor, dinos tu Nombre y Apellido para poder atenderte.";
+
+  const res = await sendWasenderTextMessage({
+    apiBaseUrl: cfg.apiBaseUrl,
+    apiKey: cfg.apiKey,
+    to,
+    text,
+  });
+
+  const msgId =
+    res.json && res.json.data && res.json.data.msgId != null ? Number(res.json.data.msgId) : null;
+  const preview = text.slice(0, 200);
+
+  try {
+    await insertMlWhatsappWasenderLog({
+      message_kind: "F",
+      ml_user_id: null,
+      buyer_id: null,
+      order_id: null,
+      ml_question_id: null,
+      phone_e164: to,
+      phone_source: null,
+      outcome: res.ok ? "success" : "api_error",
+      http_status: res.status,
+      wasender_msg_id: res.ok && Number.isFinite(msgId) ? msgId : null,
+      response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
+      error_message: res.ok ? null : `HTTP ${res.status}`,
+      text_preview: preview,
+      tipo_e_activation_source: "crm_wa_ask_name",
+    });
+  } catch (_e) { /* ignore */ }
+
+  if (res.ok) {
+    log.info({ to }, "crm_wa_ask_name: enviado");
+    return { ok: true, outcome: "sent" };
+  }
+  log.warn({ status: res.status, to }, "crm_wa_ask_name: Wasender no OK");
+  return { ok: false, outcome: "send_failed", httpStatus: res.status };
+}
+
+/**
+ * Confirmación de registro: se envía tras recibir el nombre real en el flujo AWAITING_NAME.
+ * Mensaje: "Gracias [NOMBRE], ya te hemos registrado. ¿En qué podemos ayudarte?"
+ */
+async function trySendCrmWaWelcomeNameConfirmation({ chatId, customerId, phoneRaw, confirmedName }) {
+  if (!isCrmWelcomeFeatureEnabled()) {
+    return { ok: false, outcome: "disabled" };
+  }
+  const cid = Number(chatId);
+  const custId = Number(customerId);
+  if (!Number.isFinite(cid) || cid <= 0 || !Number.isFinite(custId) || custId <= 0) {
+    return { ok: false, outcome: "bad_args" };
+  }
+  if (!confirmedName || !String(confirmedName).trim()) {
+    return { ok: false, outcome: "no_name" };
+  }
+
+  const cfg = await resolveWasenderRuntimeConfig();
+  if (!cfg.enabled) {
+    return { ok: false, outcome: "wasender_off" };
+  }
+
+  const to = normalizePhoneToE164(phoneRaw, cfg.defaultCountryCode);
+  if (!to) {
+    log.warn({ phoneRaw, chatId: cid }, "crm_welcome_confirm: teléfono no normalizable a E.164");
+    return { ok: false, outcome: "bad_phone" };
+  }
+
+  const confirmTemplate =
+    process.env.CRM_WA_WELCOME_NAME_CONFIRMED ||
+    "Gracias {{nombre}}, ya te hemos registrado. ¿En qué podemos ayudarte?";
+  const text = String(confirmTemplate).replace(/\{\{nombre\}\}/g, String(confirmedName).trim());
+
+  const res = await sendWasenderTextMessage({
+    apiBaseUrl: cfg.apiBaseUrl,
+    apiKey: cfg.apiKey,
+    to,
+    text,
+  });
+
+  const msgId =
+    res.json && res.json.data && res.json.data.msgId != null ? Number(res.json.data.msgId) : null;
+  const preview = text.slice(0, 200);
+
+  let buyerId = null;
+  try {
+    const r = await pool.query(
+      `SELECT primary_ml_buyer_id FROM customers WHERE id = $1`, [custId]
+    );
+    const v = r.rows[0]?.primary_ml_buyer_id;
+    if (v != null && Number.isFinite(Number(v))) buyerId = Number(v);
+  } catch (_e) { /* ignore */ }
+
+  if (!res.ok) {
+    try {
+      await insertMlWhatsappWasenderLog({
+        message_kind: "F",
+        ml_user_id: null,
+        buyer_id: buyerId,
+        order_id: null,
+        ml_question_id: null,
+        phone_e164: to,
+        phone_source: null,
+        outcome: "api_error",
+        http_status: res.status,
+        response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
+        error_message: `HTTP ${res.status}`,
+        text_preview: preview,
+        tipo_e_activation_source: "crm_wa_welcome_confirm",
+      });
+    } catch (_e) { /* ignore */ }
+    log.warn({ status: res.status, to }, "crm_welcome_confirm: Wasender no OK");
+    return { ok: false, outcome: "send_failed", httpStatus: res.status };
+  }
+
+  try {
+    await insertMlWhatsappWasenderLog({
+      message_kind: "F",
+      ml_user_id: null,
+      buyer_id: buyerId,
+      order_id: null,
+      ml_question_id: null,
+      phone_e164: to,
+      phone_source: null,
+      outcome: "success",
+      http_status: res.status,
+      wasender_msg_id: Number.isFinite(msgId) ? msgId : null,
+      response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
+      text_preview: preview,
+      tipo_e_activation_source: "crm_wa_welcome_confirm",
+    });
+  } catch (_e) { /* ignore */ }
+
+  log.info({ chatId: cid, customerId: custId, confirmedName }, "crm_welcome_confirm: enviado");
+  return { ok: true, outcome: "sent" };
+}
+
 module.exports = {
   trySendCrmWaWelcome,
   trySendCrmWaWelcomeAfterName,
+  trySendCrmWaWelcomeNameConfirmation,
+  trySendCrmWaAskName,
   isPlaceholderCustomerName,
   greetingNombreApellido,
   hasRealNameForGreeting,

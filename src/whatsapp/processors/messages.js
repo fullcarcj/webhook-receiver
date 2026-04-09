@@ -326,10 +326,14 @@ async function handle(normalized) {
         });
         postChatId = chatRow.id;
 
-        // Limpiar pending_name para que trySendCrmWaWelcomeAfterName no duplique la respuesta
+        // Tras confirmar nombre ya enviamos respuesta; marcar bienvenida como enviada
+        // evita que el siguiente mensaje vuelva a disparar "Hola {{nombre}}...".
         try {
           await client.query(
-            `UPDATE crm_chats SET wa_welcome_pending_name = FALSE WHERE id = $1`,
+            `UPDATE crm_chats
+             SET wa_welcome_pending_name = FALSE,
+                 wa_welcome_sent_at = COALESCE(wa_welcome_sent_at, NOW())
+             WHERE id = $1`,
             [postChatId]
           );
         } catch (_e) { /* columna puede no existir */ }

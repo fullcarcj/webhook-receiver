@@ -59,6 +59,7 @@
     "db:whatsapp-hub": "node scripts/run-whatsapp-hub-migration.js",
     "db:crm-wa-welcome": "node scripts/run-crm-wa-welcome-migration.js",
     "db:crm-chat-states": "node scripts/run-crm-chat-states-migration.js",
+    "crm-chat-states:cleanup": "node scripts/cleanup-crm-chat-states.js",
     "diagnose:crm-welcome": "node scripts/diagnose-crm-welcome.js",
     "import-ml-sales": "node scripts/importMlOrdersToSales.js",
     "import-ml-sales:all": "node scripts/importMlOrdersToSales.js --all-accounts",

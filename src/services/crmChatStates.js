@@ -16,6 +16,38 @@ const { normalizePhone } = require("../utils/phoneNormalizer");
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "crmChatStates" });
 
 const TABLE_MISSING = "42P01";
+const STATE_TTL_SECONDS = Math.max(
+  3600,
+  Number.parseInt(String(process.env.CRM_CHAT_STATE_TTL_SECONDS || 7 * 24 * 3600), 10) || 7 * 24 * 3600
+);
+const PRUNE_EVERY_MS = Math.max(
+  60 * 1000,
+  Number.parseInt(String(process.env.CRM_CHAT_STATE_PRUNE_EVERY_MS || 15 * 60 * 1000), 10) ||
+    15 * 60 * 1000
+);
+let _lastPruneAt = 0;
+
+async function pruneCrmChatStatesIfDue(db) {
+  const now = Date.now();
+  if (now - _lastPruneAt < PRUNE_EVERY_MS) return;
+  _lastPruneAt = now;
+  try {
+    const r = await db.query(
+      `DELETE FROM crm_chat_states
+       WHERE updated_at < NOW() - ($1 * INTERVAL '1 second')`,
+      [STATE_TTL_SECONDS]
+    );
+    if (r.rowCount > 0) {
+      log.info(
+        { deleted: r.rowCount, ttlSeconds: STATE_TTL_SECONDS },
+        "crm_chat_states pruned"
+      );
+    }
+  } catch (e) {
+    if (e && e.code === TABLE_MISSING) return;
+    throw e;
+  }
+}
 
 /**
  * Obtiene el estado de onboarding para un teléfono.
@@ -27,11 +59,29 @@ async function getCrmChatState(db, phoneRaw) {
   const phone = normalizePhone(phoneRaw) || String(phoneRaw).replace(/\D/g, "");
   if (!phone) return null;
   try {
+    await pruneCrmChatStatesIfDue(db);
     const { rows } = await db.query(
-      `SELECT status, push_name, trigger_message_id FROM crm_chat_states WHERE phone = $1 LIMIT 1`,
+      `SELECT status, push_name, trigger_message_id, updated_at
+       FROM crm_chat_states
+       WHERE phone = $1
+       LIMIT 1`,
       [phone]
     );
-    return rows[0] || null;
+    const row = rows[0] || null;
+    if (!row) return null;
+
+    const updatedAtMs = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+    const stale = !updatedAtMs || Date.now() - updatedAtMs > STATE_TTL_SECONDS * 1000;
+    if (stale) {
+      await db.query(`DELETE FROM crm_chat_states WHERE phone = $1`, [phone]);
+      log.info({ phone, ttlSeconds: STATE_TTL_SECONDS }, "crm_chat_state expired and removed");
+      return null;
+    }
+    return {
+      status: row.status,
+      push_name: row.push_name,
+      trigger_message_id: row.trigger_message_id,
+    };
   } catch (e) {
     if (e && e.code === TABLE_MISSING) return null;
     throw e;
@@ -52,6 +102,7 @@ async function upsertCrmChatStateAwaitingName(db, phoneRaw, pushName, triggerMes
   const phone = normalizePhone(phoneRaw) || String(phoneRaw).replace(/\D/g, "");
   if (!phone) return;
   try {
+    await pruneCrmChatStatesIfDue(db);
     await db.query(
       `INSERT INTO crm_chat_states (phone, status, push_name, trigger_message_id, created_at, updated_at)
        VALUES ($1, 'AWAITING_NAME', $2, $3, NOW(), NOW())

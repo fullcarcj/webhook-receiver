@@ -1,5 +1,6 @@
 "use strict";
 
+/* eslint-disable no-console */
 function normalizePhoneDigits(raw) {
   return String(raw || "").replace(/\D/g, "") || null;
 }
@@ -337,6 +338,17 @@ function parseWebhookJobs(body) {
     evOut = "reactions.received";
   }
   norm.eventType = evOut;
+
+  console.log(
+    "[parser] rawEvent=%s → evOut=%s fromPhone=%s toPhone=%s msgId=%s type=%s",
+    ev,
+    evOut,
+    norm.fromPhone || "-",
+    norm.toPhone || "-",
+    norm.messageId || "-",
+    norm.type || "-"
+  );
+
   return [{ eventType: evOut, normalized: norm }];
 }
 

@@ -1,16 +1,48 @@
 "use strict";
 
+const pino = require("pino");
 const { pool } = require("../../../db");
-const { resolveCustomerId, upsertChat } = require("./_shared");
+const { upsertChat } = require("./_shared");
+const { normalizePhone } = require("../../utils/phoneNormalizer");
+
+const sentLog = pino({ level: process.env.LOG_LEVEL || "info", name: "whatsapp_sent" });
 
 async function handle(normalized) {
   const phone = normalized.toPhone || normalized.fromPhone;
   if (!phone || !normalized.messageId) return;
 
+  const normalizedPhone = normalizePhone(phone);
+  const digits = (normalizedPhone || String(phone)).replace(/\D/g, "");
+  if (!digits) return;
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const { customerId } = await resolveCustomerId(client, phone);
+
+    // Solo registrar mensaje saliente si el cliente ya existe en customers.
+    // NO crear clientes con placeholder "Cliente WhatsApp" desde eventos messages.sent.
+    const { rows } = await client.query(
+      `SELECT c.id AS customer_id
+       FROM customers c
+       WHERE NULLIF(TRIM(c.phone), '') IS NOT NULL
+         AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
+       UNION
+       SELECT ci.customer_id
+       FROM crm_customer_identities ci
+       WHERE ci.external_id = $1
+         AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
+       LIMIT 1`,
+      [digits]
+    );
+
+    if (!rows.length) {
+      // Cliente aún no registrado (espera onboarding Tipo H). No crear placeholder.
+      sentLog.info({ phone, digits, messageId: normalized.messageId }, "sent: cliente no encontrado, skip (onboarding pendiente)");
+      await client.query("ROLLBACK");
+      return;
+    }
+
+    const customerId = Number(rows[0].customer_id);
     const lastAt = new Date((normalized.timestamp || Math.floor(Date.now() / 1000)) * 1000);
     const preview = normalized.content?.text ? String(normalized.content.text).slice(0, 200) : "";
 
@@ -38,6 +70,7 @@ async function handle(normalized) {
     );
 
     await client.query("COMMIT");
+    sentLog.info({ phone, customerId, messageId: normalized.messageId }, "sent: mensaje saliente guardado");
   } catch (e) {
     try {
       await client.query("ROLLBACK");

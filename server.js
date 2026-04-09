@@ -668,6 +668,21 @@ async function handleWasenderWebhookPost(req, res, body, sourceLabel) {
       : null;
   const event = extractWasenderEvent(body);
   const payloadStr = JSON.stringify(body);
+
+  // Log de trazabilidad: muestra el evento crudo y datos clave del payload entrante.
+  const _dataTop = body && body.data != null ? body.data : body;
+  const _msgs = Array.isArray(_dataTop && _dataTop.messages) ? _dataTop.messages : [];
+  const _key0 = (_msgs[0] && _msgs[0].key) || (_dataTop && _dataTop.key) || {};
+  console.log(
+    "[wasender-recv] src=%s event=%s remoteJid=%s fromMe=%s msgId=%s pushName=%s",
+    src,
+    event,
+    _key0.remoteJid || _dataTop.remoteJid || "-",
+    _key0.fromMe != null ? String(_key0.fromMe) : "-",
+    _key0.id || "-",
+    (_msgs[0] && (_msgs[0].pushName || _msgs[0].pushname)) || _dataTop.pushName || "-"
+  );
+
   let id = null;
   try {
     id = await insertWasenderWebhookEvent({

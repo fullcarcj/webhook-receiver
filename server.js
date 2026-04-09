@@ -2245,6 +2245,7 @@ const server = http.createServer(async (req, res) => {
    <td>${escapeHtml(row.media_type || "—")}</td>
    <td>${row.media_firebase_url ? `<a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>` : "—"}</td>
    <td>${escapeHtml(row.media_pipeline_status || "—")}</td>
+   <td>${escapeHtml(row.media_pipeline_detail || "—")}</td>
   <td><pre class="payload">${escapeHtml(preview)}${preview.length >= 320 ? "…" : ""}</pre></td>
 </tr>`;
       })

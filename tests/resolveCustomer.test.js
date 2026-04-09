@@ -71,6 +71,27 @@ function testNameUpgradeRule() {
   console.log("name upgrade rule: OK");
 }
 
+function testPhoneMatchSqlIncludesPhone2Fallback() {
+  const sql = `
+    SELECT c.id AS customer_id
+    FROM customers c
+    WHERE NULLIF(TRIM(c.phone), '') IS NOT NULL
+      AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
+    UNION
+    SELECT c.id AS customer_id
+    FROM customers c
+    WHERE NULLIF(TRIM(c.phone_2), '') IS NOT NULL
+      AND REGEXP_REPLACE(c.phone_2, '\\D', '', 'g') = $1
+    UNION
+    SELECT ci.customer_id
+    FROM crm_customer_identities ci
+    WHERE ci.external_id = $1
+      AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
+    LIMIT 1`;
+  assert.ok(/REGEXP_REPLACE\(c\.phone_2/.test(sql), "debe contemplar phone_2 en el match por teléfono");
+  console.log("phone match sql (phone_2): OK");
+}
+
 function testNormalizer() {
   assert.strictEqual(normalizePhone("+584121234567"), "584121234567");
   assert.strictEqual(normalizePhone("04121234567"), "584121234567");
@@ -111,6 +132,7 @@ async function testResolveIntegration() {
 (async () => {
   await testSanitizeWaPersonName();
   testNameUpgradeRule();
+  testPhoneMatchSqlIncludesPhone2Fallback();
   testNormalizer();
   await testResolveIntegration();
   console.log("tests/resolveCustomer: done");

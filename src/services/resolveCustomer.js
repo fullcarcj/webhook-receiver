@@ -235,19 +235,41 @@ async function resolveCustomer(identity, options = {}) {
     normalizedPhone ?? (source === "whatsapp" ? normalizePhone(extRaw) || String(extRaw).replace(/\D/g, "") : null);
 
   if (phoneToSearch) {
-    const { rows: phoneRows } = await db.query(
-      `SELECT c.id AS customer_id
-       FROM customers c
-       WHERE NULLIF(TRIM(c.phone), '') IS NOT NULL
-         AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
-       UNION
-       SELECT ci.customer_id
-       FROM crm_customer_identities ci
-       WHERE ci.external_id = $1
-         AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
-       LIMIT 1`,
-      [phoneToSearch]
-    );
+    let phoneRows;
+    try {
+      const r = await db.query(
+        `SELECT c.id AS customer_id
+         FROM customers c
+         WHERE REGEXP_REPLACE(COALESCE(c.phone, ''), '\\D', '', 'g') = $1
+            OR REGEXP_REPLACE(COALESCE(c.phone_2, ''), '\\D', '', 'g') = $1
+         UNION
+         SELECT ci.customer_id
+         FROM crm_customer_identities ci
+         WHERE ci.external_id = $1
+           AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
+         LIMIT 1`,
+        [phoneToSearch]
+      );
+      phoneRows = r.rows;
+    } catch (e) {
+      if (e && e.code === "42703") {
+        const r = await db.query(
+          `SELECT c.id AS customer_id
+           FROM customers c
+           WHERE REGEXP_REPLACE(COALESCE(c.phone, ''), '\\D', '', 'g') = $1
+           UNION
+           SELECT ci.customer_id
+           FROM crm_customer_identities ci
+           WHERE ci.external_id = $1
+             AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
+           LIMIT 1`,
+          [phoneToSearch]
+        );
+        phoneRows = r.rows;
+      } else {
+        throw e;
+      }
+    }
 
     if (phoneRows.length) {
       const customerId = Number(phoneRows[0].customer_id);

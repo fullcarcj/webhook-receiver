@@ -35,6 +35,10 @@ async function runProcessor(eventType, normalized) {
  */
 async function routeWebhook(body) {
   const jobs = parseWebhookJobs(body);
+  logger.info(
+    { rawEvent: body && body.event, jobCount: jobs.length, jobs: jobs.map(j => ({ eventType: j.eventType, fromPhone: j.normalized && j.normalized.fromPhone, messageId: j.normalized && j.normalized.messageId, type: j.normalized && j.normalized.type })) },
+    "whatsapp_hub_route"
+  );
   let firstInbound = null;
 
   for (const job of jobs) {

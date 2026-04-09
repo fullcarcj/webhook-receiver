@@ -144,15 +144,18 @@ async function resetWelcomeClaim(chatId) {
  */
 async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
   if (!isCrmWelcomeFeatureEnabled()) {
+    log.warn({ chatId, customerId, phoneRaw }, "crm_welcome: feature disabled (CRM_WA_WELCOME_ENABLED=0)");
     return { ok: false, outcome: "disabled" };
   }
   const cid = Number(chatId);
   const custId = Number(customerId);
   if (!Number.isFinite(cid) || cid <= 0 || !Number.isFinite(custId) || custId <= 0) {
+    log.warn({ chatId, customerId, phoneRaw }, "crm_welcome: bad_args (chatId/customerId inválido)");
     return { ok: false, outcome: "bad_args" };
   }
 
   const cfg = resolveWasenderRuntimeConfigForTipoH();
+  log.info({ chatId: cid, customerId: custId, phoneRaw, enabled: cfg.enabled, hasApiKey: !!cfg.apiKey }, "crm_welcome: cfg");
   if (!cfg.enabled) {
     if (!_hintLoggedWasenderOff) {
       _hintLoggedWasenderOff = true;
@@ -460,14 +463,23 @@ async function trySendCrmWaWelcomeAfterName({ chatId, customerId, phoneRaw }) {
  */
 async function trySendCrmWaAskName({ phoneRaw }) {
   if (!isCrmWelcomeFeatureEnabled()) {
+    log.warn({ phoneRaw }, "crm_wa_ask_name: feature disabled (CRM_WA_WELCOME_ENABLED=0)");
     return { ok: false, outcome: "disabled" };
   }
 
   const cfg = resolveWasenderRuntimeConfigForTipoH();
+  log.info({
+    phoneRaw,
+    enabled: cfg.enabled,
+    hasApiKey: !!cfg.apiKey,
+    apiBaseUrl: cfg.apiBaseUrl,
+    defaultCountryCode: cfg.defaultCountryCode,
+  }, "crm_wa_ask_name: cfg");
+
   if (!cfg.enabled) {
     if (!_hintLoggedWasenderOff) {
       _hintLoggedWasenderOff = true;
-      log.warn("crm_wa_ask_name: Wasender no habilitado — revisar WASENDER_ENABLED / BD ml_wasender_settings");
+      log.warn("crm_wa_ask_name: Wasender no habilitado — revisar WASENDER_ENABLED / WASENDER_API_KEY");
     }
     return { ok: false, outcome: "wasender_off" };
   }

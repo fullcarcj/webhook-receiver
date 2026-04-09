@@ -142,8 +142,17 @@ async function saveMessageAndUpdateChat(client, { chatId, customerId, normalized
 async function handle(normalized) {
   const eventType = normalized.eventType || "messages.received";
   if (!normalized.fromPhone || !normalized.messageId) {
+    msgLog.warn(
+      { fromPhone: normalized.fromPhone, messageId: normalized.messageId, eventType },
+      "tipo_h_skip: fromPhone o messageId ausente"
+    );
     return;
   }
+
+  msgLog.info(
+    { fromPhone: normalized.fromPhone, messageId: normalized.messageId, eventType, type: normalized.type },
+    "tipo_h_handle_start"
+  );
 
   const client = await pool.connect();
 
@@ -168,6 +177,10 @@ async function handle(normalized) {
 
     // ── Verificación inicial: ¿el teléfono ya tiene cliente en BD? ───
     const existingCustomer = await findExistingCustomerByPhone(client, normalized.fromPhone);
+    msgLog.info(
+      { fromPhone: normalized.fromPhone, existingCustomer: existingCustomer || null },
+      "tipo_h_customer_lookup"
+    );
 
     if (existingCustomer) {
       // ════════════════════════════════════════════════════════════════
@@ -226,6 +239,10 @@ async function handle(normalized) {
     } else {
       // ── El teléfono NO está en customers ────────────────────────────
       const chatState = await getCrmChatState(client, normalized.fromPhone);
+      msgLog.info(
+        { fromPhone: normalized.fromPhone, chatState: chatState || null },
+        "tipo_h_chat_state_lookup"
+      );
 
       const messageText = normalized.content?.text ? String(normalized.content.text).trim() : "";
       const validatedOnboardingName = normalizeOnboardingNameUpper(messageText);
@@ -355,6 +372,7 @@ async function handle(normalized) {
     }
 
     await client.query("COMMIT");
+    msgLog.info({ fromPhone: normalized.fromPhone, postAction, postCustomerId }, "tipo_h_post_commit");
 
     // ── Post-commit ──────────────────────────────────────────────────
     if (postAction === "existing_welcome") {
@@ -419,17 +437,20 @@ async function handle(normalized) {
           );
       });
     } else if (postAction === "ask_name") {
+      const _askPhone = normalized.fromPhone;
+      msgLog.info({ phoneRaw: _askPhone }, "tipo_h_ask_name_dispatch");
       setImmediate(() => {
         Promise.resolve()
-          .then(() => trySendCrmWaAskName({ phoneRaw: normalized.fromPhone }))
+          .then(() => trySendCrmWaAskName({ phoneRaw: _askPhone }))
           .then((r) => {
+            msgLog.info({ outcome: r && r.outcome, ok: r && r.ok, phoneRaw: _askPhone }, "tipo_h_ask_name_result");
             if (r && r.ok) return;
             msgLog.warn(
-              { outcome: r && r.outcome, phoneRaw: normalized.fromPhone },
+              { outcome: r && r.outcome, phoneRaw: _askPhone },
               "trySendCrmWaAskName_not_sent"
             );
           })
-          .catch((err) => msgLog.error({ err, phoneRaw: normalized.fromPhone }, "trySendCrmWaAskName"));
+          .catch((err) => msgLog.error({ err, phoneRaw: _askPhone }, "trySendCrmWaAskName"));
       });
     }
 

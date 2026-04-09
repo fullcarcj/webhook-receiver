@@ -2265,7 +2265,7 @@ const server = http.createServer(async (req, res) => {
   <td>${row.signature_ok === null ? "—" : row.signature_ok ? "sí" : "no"}</td>
   <td>${row.has_media ? "sí" : "no"}</td>
    <td>${escapeHtml(row.media_type || "—")}</td>
-   <td>${row.media_firebase_url ? `<a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>` : "—"}</td>
+   <td>${row.media_type === "audio" && row.media_firebase_url ? `<audio controls src="${escapeHtml(row.media_firebase_url)}"></audio>` : row.media_firebase_url ? `<a href="${escapeHtml(row.media_firebase_url)}" target="_blank" rel="noreferrer">abrir</a>` : "—"}</td>
    <td>${escapeHtml(row.media_pipeline_status || "—")}</td>
    <td>${escapeHtml(row.media_pipeline_detail || "—")}</td>
   <td><pre class="payload">${escapeHtml(preview)}${preview.length >= payloadPreviewLimit ? "…" : ""}</pre></td>

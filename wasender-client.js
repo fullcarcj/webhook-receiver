@@ -3,9 +3,23 @@
  * @see https://wasenderapi.com/api-docs/messages/send-text-message
  *
  * Env típico:
- *   WASENDER_API_KEY — Bearer token (obligatorio para enviar)
+ *   WASENDER_API_KEY      — Bearer token (obligatorio para enviar)
  *   WASENDER_API_BASE_URL — opcional, default https://www.wasenderapi.com
+ *   WA_DAILY_CAP          — límite de mensajes por número por día, default 5
+ *
+ * Todos los sends pasan por checkWaSendCap() antes de llegar a la API.
+ * Para bypass puntual pasar opts.skipThrottle = true (solo para mensajes críticos).
  */
+
+/** Lazy-load del pool para evitar circular dependencies. */
+function getPool() {
+  try { return require("./db").pool; } catch (_) { return null; }
+}
+
+/** Lazy-load del throttle service. */
+function getThrottle() {
+  try { return require("./src/services/waThrottle"); } catch (_) { return null; }
+}
 
 /**
  * @param {object} opts
@@ -13,7 +27,8 @@
  * @param {string} opts.apiKey
  * @param {string} opts.to — E.164, p. ej. +584121234567
  * @param {string} opts.text
- * @returns {Promise<{ ok: boolean, status: number, json: object|null, bodyText: string }>}
+ * @param {boolean} [opts.skipThrottle=false] — bypass del cap diario
+ * @returns {Promise<{ ok: boolean, status: number, json: object|null, bodyText: string, throttled?: boolean }>}
  */
 async function sendWasenderTextMessage(opts) {
   const apiBaseUrl = (opts.apiBaseUrl || "https://www.wasenderapi.com").replace(/\/$/, "");
@@ -26,6 +41,18 @@ async function sendWasenderTextMessage(opts) {
   if (!to || !text) {
     return { ok: false, status: 0, json: null, bodyText: "" };
   }
+
+  // ── Throttle: verificar cap diario antes de enviar ──
+  const pool = getPool();
+  const throttle = getThrottle();
+  if (pool && throttle) {
+    const cap = await throttle.checkWaSendCap(to, pool, { skipThrottle: !!opts.skipThrottle });
+    if (!cap.allowed) {
+      console.warn(`[waThrottle] BLOQUEADO ${to} — ${cap.count}/${cap.cap} mensajes hoy`);
+      return { ok: false, status: 0, json: null, bodyText: "", throttled: true, throttle_count: cap.count, throttle_cap: cap.cap };
+    }
+  }
+
   const url = `${apiBaseUrl}/api/send-message`;
   const res = await fetch(url, {
     method: "POST",
@@ -52,6 +79,7 @@ async function sendWasenderTextMessage(opts) {
  * @param {object} opts
  * @param {string} opts.imageUrl — URL pública HTTPS (JPEG/PNG, máx. ~5MB)
  * @param {string} [opts.text] — caption
+ * @param {boolean} [opts.skipThrottle=false]
  */
 async function sendWasenderImageMessage(opts) {
   const apiBaseUrl = (opts.apiBaseUrl || "https://www.wasenderapi.com").replace(/\/$/, "");
@@ -64,6 +92,17 @@ async function sendWasenderImageMessage(opts) {
   }
   if (!to || !imageUrl) {
     return { ok: false, status: 0, json: null, bodyText: "" };
+  }
+
+  // ── Throttle ──
+  const pool = getPool();
+  const throttle = getThrottle();
+  if (pool && throttle) {
+    const cap = await throttle.checkWaSendCap(to, pool, { skipThrottle: !!opts.skipThrottle });
+    if (!cap.allowed) {
+      console.warn(`[waThrottle] BLOQUEADO imagen ${to} — ${cap.count}/${cap.cap} mensajes hoy`);
+      return { ok: false, status: 0, json: null, bodyText: "", throttled: true };
+    }
   }
   const url = `${apiBaseUrl}/api/send-message`;
   const body = { to, imageUrl };
@@ -96,6 +135,7 @@ async function sendWasenderImageMessage(opts) {
  * @param {string} [opts.name]
  * @param {string} [opts.address]
  * @param {string} [opts.text] — leyenda opcional (p. ej. enlace a Maps)
+ * @param {boolean} [opts.skipThrottle=false]
  */
 async function sendWasenderLocationMessage(opts) {
   const apiBaseUrl = (opts.apiBaseUrl || "https://www.wasenderapi.com").replace(/\/$/, "");
@@ -108,6 +148,17 @@ async function sendWasenderLocationMessage(opts) {
   }
   if (!to || !Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     return { ok: false, status: 0, json: null, bodyText: "" };
+  }
+
+  // ── Throttle ──
+  const pool = getPool();
+  const throttle = getThrottle();
+  if (pool && throttle) {
+    const cap = await throttle.checkWaSendCap(to, pool, { skipThrottle: !!opts.skipThrottle });
+    if (!cap.allowed) {
+      console.warn(`[waThrottle] BLOQUEADO location ${to} — ${cap.count}/${cap.cap} mensajes hoy`);
+      return { ok: false, status: 0, json: null, bodyText: "", throttled: true };
+    }
   }
   const location = { latitude, longitude };
   const name = opts.name != null ? String(opts.name).trim() : "";

@@ -132,6 +132,7 @@ async function handleStatsApiRequest(req, res) {
   const method = req.method || "GET";
 
   if (!path.startsWith("/api/stats") && !path.startsWith("/api/finance")) return false;
+  // También maneja /api/stats/wa-throttle
 
   if (!isAdmin(req, url)) {
     return fail(res, 401, "UNAUTHORIZED", "Token inválido o ausente");
@@ -346,6 +347,14 @@ async function handleStatsApiRequest(req, res) {
       if (!parsed.success) return fail(res, 400, "VALIDATION_ERROR", parsed.error.errors[0]?.message);
       const data = await financialService.upsertExchangeRate(parsed.data);
       return ok(res, 201, data, buildMeta(t0, "realtime"));
+    }
+
+    // GET /api/stats/wa-throttle — monitoreo del cap diario por teléfono
+    if (path === "/api/stats/wa-throttle" && method === "GET") {
+      const { getWaThrottleSummary } = require("../services/waThrottle");
+      const { pool } = require("../../db");
+      const data = await getWaThrottleSummary(pool);
+      return ok(res, 200, data, buildMeta(t0, "wa-throttle"));
     }
 
     // Ruta no encontrada dentro del módulo

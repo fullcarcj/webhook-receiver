@@ -294,6 +294,32 @@ async function applyMatch(order, match) {
       }
     }
   } catch (_) { /* notificación WA opcional */ }
+
+  try {
+    const { rows: deliveryRows } = await pool.query(
+      `SELECT ds.id, ds.provider_amount_bs, ds.status, dp.name AS provider_name
+       FROM delivery_services ds
+       LEFT JOIN delivery_providers dp ON dp.id = ds.provider_id
+       WHERE ds.order_id = $1
+       LIMIT 1`,
+      [order.id]
+    );
+    if (deliveryRows.length) {
+      const d = deliveryRows[0];
+      log.info(
+        {
+          orderId: order.id,
+          deliveryId: d.id,
+          deliveryStatus: d.status,
+          providerOwed_bs: d.provider_amount_bs,
+          providerName: d.provider_name,
+        },
+        "reconciliation: orden conciliada incluye delivery"
+      );
+    }
+  } catch (_) {
+    /* delivery opcional */
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

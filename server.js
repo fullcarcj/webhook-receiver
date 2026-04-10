@@ -180,6 +180,7 @@ const { handleCrmApiPreflight } = require("./src/middleware/crmApiCors");
 const { handleVehicleApiRequest } = require("./src/handlers/vehicleApiHandler");
 const { handlePurchaseApiRequest } = require("./src/handlers/purchaseApiHandler");
 const { handleSalesApiRequest } = require("./src/handlers/salesApiHandler");
+const { handleDeliveryApiRequest } = require("./src/handlers/deliveryApiHandler");
 const salesService = require("./src/services/salesService");
 const { handleMediaApiRequest } = require("./src/handlers/mediaApiHandler");
 const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory");
@@ -1879,6 +1880,7 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(String(r.customer_id ?? "—"))}</td>
   <td>${escapeHtml(String(r.status || "—"))}</td>
   <td>${escapeHtml(String(r.order_total_amount != null ? r.order_total_amount : r.total_amount_usd != null ? r.total_amount_usd : "—"))}</td>
+  <td>${escapeHtml(String(r.reconciled_statement_id ?? "—"))}</td>
   <td>${escapeHtml(String(r.loyalty_points_earned ?? "—"))}</td>
   <td>${escapeHtml(String(r.sold_by ?? "—"))}</td>
   <td><pre class="notes">${escapeHtml(String(r.notes || "").slice(0, 400))}${String(r.notes || "").length > 400 ? "…" : ""}</pre></td>
@@ -1908,8 +1910,8 @@ const server = http.createServer(async (req, res) => {
   <h1>Ventas globales (sales_orders)</h1>
   <p class="lead">${out.total} orden(es) en total · mostrando ${out.rows.length} (limit ${out.limit}, offset ${out.offset}). Por defecto se excluyen <code>completed</code> salvo <code>?include_completed=1</code>. JSON: <code>?format=json</code>. API JSON: <code>/api/sales?${baseQs.replace(/^&/, "")}</code></p>
   <table>
-    <thead><tr><th>id</th><th>creado</th><th>source</th><th>external_order_id</th><th>customer_id</th><th>status</th><th>total orden</th><th>puntos</th><th>sold_by</th><th>notes</th></tr></thead>
-    <tbody>${rowsHtml || '<tr><td colspan="10">Sin registros.</td></tr>'}</tbody>
+    <thead><tr><th>id</th><th>creado</th><th>source</th><th>external_order_id</th><th>customer_id</th><th>status</th><th>total orden</th><th>statement_id</th><th>puntos</th><th>sold_by</th><th>notes</th></tr></thead>
+    <tbody>${rowsHtml || '<tr><td colspan="11">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;
@@ -1919,6 +1921,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleSalesApiRequest(req, res, url)) {
+    return;
+  }
+  if (await handleDeliveryApiRequest(req, res, url)) {
     return;
   }
 

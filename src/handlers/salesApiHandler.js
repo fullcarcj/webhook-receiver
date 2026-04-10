@@ -58,6 +58,7 @@ const createBodySchema = z.object({
   payment_method: paymentMethodEnum.optional(),
   identity_external_id: z.string().min(1).max(255).optional(),
   company_id: z.number().int().positive().optional(),
+  zone_id: z.number().int().positive().optional(),
 });
 
 const patchBodySchema = z.object({
@@ -235,6 +236,7 @@ async function handleSalesApiRequest(req, res, url) {
         paymentMethod: d.payment_method,
         identityExternalId: d.identity_external_id,
         companyId: d.company_id,
+        zoneId: d.zone_id,
       });
       const code = created.idempotent ? 200 : 201;
       writeJson(res, code, {
@@ -321,6 +323,10 @@ async function handleSalesApiRequest(req, res, url) {
     }
     if (e && e.code === "NOT_FOUND") {
       writeJson(res, 404, { error: "NOT_FOUND" });
+      return true;
+    }
+    if (e && e.code === "ZONE_NOT_FOUND") {
+      writeJson(res, 404, { error: "zone_not_found", message: String(e.message || "") });
       return true;
     }
     if ((e && e.code === "SALES_SCHEMA_MISSING") || (e && e.code === "42P01")) {

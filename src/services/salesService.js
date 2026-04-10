@@ -231,6 +231,7 @@ async function fetchOrderItems(client, salesOrderId) {
  * @param {'cash'|'card'|'transfer'|'mercadopago'|'pago_movil'|'other'|'unknown'} [p.paymentMethod]
  * @param {string} [p.identityExternalId] — clave en crm_customer_identities (default: external_order_id)
  * @param {number} [p.companyId] — tasas Bs (currency)
+ * @param {number|undefined|null} [p.zoneId] — zona delivery (opcional)
  */
 async function createOrder({
   source,
@@ -243,6 +244,7 @@ async function createOrder({
   paymentMethod,
   identityExternalId,
   companyId,
+  zoneId,
 }) {
   if (!MANUAL_SOURCES.has(source)) {
     const e = new Error("source no permitido para creación manual");
@@ -252,6 +254,7 @@ async function createOrder({
   const st =
     status === "pending" || status === "pending_payment" ? "pending" : "paid";
   let cid = null;
+  let zId = null;
   if (customerId != null && customerId !== "") {
     const n = Number(customerId);
     if (!Number.isFinite(n) || n <= 0) {
@@ -260,6 +263,15 @@ async function createOrder({
       throw e;
     }
     cid = n;
+  }
+  if (zoneId != null && zoneId !== "") {
+    const z = Number(zoneId);
+    if (!Number.isFinite(z) || z <= 0) {
+      const e = new Error("zone_id inválido");
+      e.code = "BAD_REQUEST";
+      throw e;
+    }
+    zId = z;
   }
 
   const extId =
@@ -340,6 +352,47 @@ async function createOrder({
     await insertItems(client, orderId, linesForInsert);
     await decrementStock(client, stockDecrements);
 
+    // Delivery opcional: suma al total de la orden y crea la carrera en la misma transacción.
+    if (zId != null) {
+      const { rows: zrows } = await client.query(
+        `SELECT id, zone_name, base_cost_bs, client_price_bs, currency_pago
+         FROM delivery_zones
+         WHERE id = $1 AND is_active = TRUE`,
+        [zId]
+      );
+      if (!zrows.length) {
+        await client.query("ROLLBACK");
+        const e = new Error(`Zona de delivery ${zId} no existe o está inactiva`);
+        e.code = "ZONE_NOT_FOUND";
+        throw e;
+      }
+      const zone = zrows[0];
+      const deliveryAddedBs = Number(zone.client_price_bs || 0);
+      if (deliveryAddedBs > 0) {
+        await client.query(
+          `UPDATE sales_orders
+           SET order_total_amount = order_total_amount + $1,
+               total_amount_bs = COALESCE(total_amount_bs, 0) + $1,
+               zone_id = $2,
+               has_delivery = TRUE,
+               updated_at = NOW()
+           WHERE id = $3`,
+          [deliveryAddedBs, zId, orderId]
+        );
+      } else {
+        await client.query(
+          `UPDATE sales_orders
+           SET zone_id = $1,
+               has_delivery = TRUE,
+               updated_at = NOW()
+           WHERE id = $2`,
+          [zId, orderId]
+        );
+      }
+      const deliveryService = require("./deliveryService");
+      await deliveryService.createDeliveryService(client, { orderId, zoneId: zId, zone });
+    }
+
     let pointsEarned = 0;
     if (st === "paid") {
       if (cid != null) {
@@ -419,9 +472,19 @@ async function getSalesOrderById(id) {
               notes, sold_by, created_at, updated_at,
               COALESCE(applies_stock, TRUE) AS applies_stock,
               COALESCE(records_cash, TRUE) AS records_cash,
-              ml_user_id
+              ml_user_id,
+              rl.bank_statement_id AS reconciled_statement_id
               ${lifecycleCols}
-       FROM sales_orders WHERE id = $1`,
+       FROM sales_orders so
+       LEFT JOIN LATERAL (
+         SELECT r.bank_statement_id
+         FROM reconciliation_log r
+         WHERE r.order_id = so.id
+           AND r.bank_statement_id IS NOT NULL
+         ORDER BY r.created_at DESC, r.id DESC
+         LIMIT 1
+       ) rl ON TRUE
+       WHERE so.id = $1`,
       [oid]
     );
     if (!orows.length) {
@@ -467,6 +530,8 @@ async function getSalesOrderById(id) {
       is_rating_alert: hasLifecycle ? o.is_rating_alert : null,
       created_at: o.created_at,
       updated_at: o.updated_at,
+      reconciled_statement_id:
+        o.reconciled_statement_id != null ? Number(o.reconciled_statement_id) : null,
       items: irows.map((r) => {
         const sub = Number(r.line_total_usd);
         return {
@@ -502,43 +567,57 @@ async function listSalesOrders({
   let n = 1;
   const explicitStatus = status != null && String(status).trim() !== "";
   if (excludeCompleted && !explicitStatus) {
-    cond.push(`status <> $${n++}`);
+    cond.push(`so.status <> $${n++}`);
     params.push("completed");
   }
   if (source) {
-    cond.push(`source = $${n++}`);
+    cond.push(`so.source = $${n++}`);
     params.push(source);
   }
   if (explicitStatus) {
-    cond.push(`status = $${n++}`);
+    cond.push(`so.status = $${n++}`);
     params.push(status);
   }
   if (from) {
-    cond.push(`created_at >= $${n++}`);
+    cond.push(`so.created_at >= $${n++}`);
     params.push(from);
   }
   if (to) {
-    cond.push(`created_at <= $${n++}`);
+    cond.push(`so.created_at <= $${n++}`);
     params.push(to);
   }
   // Evita contaminar "ventas activas" con órdenes ML antiguas.
   const mlActiveDays = resolveMlActiveMaxDays();
   cond.push(
-    `(source <> 'mercadolibre' OR created_at >= (NOW() - ($${n++}::text || ' days')::interval))`
+    `(so.source <> 'mercadolibre' OR so.created_at >= (NOW() - ($${n++}::text || ' days')::interval))`
   );
   params.push(String(mlActiveDays));
   const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
   params.push(lim, off);
   try {
     const { rows } = await pool.query(
-      `SELECT id, source, external_order_id, customer_id, status, order_total_amount, loyalty_points_earned,
-              notes, sold_by, created_at
-       FROM sales_orders ${where}
-       ORDER BY created_at DESC
+      `SELECT so.id, so.source, so.external_order_id, so.customer_id, so.status,
+              so.order_total_amount, so.loyalty_points_earned,
+              so.notes, so.sold_by, so.created_at,
+              rl.bank_statement_id AS reconciled_statement_id
+       FROM sales_orders so
+       LEFT JOIN LATERAL (
+         SELECT r.bank_statement_id
+         FROM reconciliation_log r
+         WHERE r.order_id = so.id
+           AND r.bank_statement_id IS NOT NULL
+         ORDER BY r.created_at DESC, r.id DESC
+         LIMIT 1
+       ) rl ON TRUE
+       ${where}
+       ORDER BY so.created_at DESC
        LIMIT $${n++} OFFSET $${n}`,
       params
     );
-    const { rows: countRows } = await pool.query(`SELECT COUNT(*)::bigint AS c FROM sales_orders ${where}`, params.slice(0, -2));
+    const { rows: countRows } = await pool.query(
+      `SELECT COUNT(*)::bigint AS c FROM sales_orders so ${where}`,
+      params.slice(0, -2)
+    );
     return {
       rows: rows.map((o) => {
         const tot = Number(o.order_total_amount);
@@ -555,6 +634,8 @@ async function listSalesOrders({
         notes: o.notes,
         sold_by: o.sold_by,
         created_at: o.created_at,
+        reconciled_statement_id:
+          o.reconciled_statement_id != null ? Number(o.reconciled_statement_id) : null,
       };
       }),
       total: Number(countRows[0].c),
@@ -985,23 +1066,36 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
 
     const hasLifecycle = await salesOrdersHasLifecycleColumns(client);
     let ins;
+    const mlCreatedAt = ml.date_created || null;
     if (hasLifecycle) {
       ins = await client.query(
         `INSERT INTO sales_orders (source, external_order_id, customer_id, status, order_total_amount, notes, sold_by,
           applies_stock, records_cash, ml_user_id, loyalty_points_earned,
-          lifecycle_status, ml_status, rating_deadline_at)
+          lifecycle_status, ml_status, rating_deadline_at, created_at)
          VALUES ('mercadolibre', $1, $2, $3, $4, $5, NULL, FALSE, FALSE, $6, $7,
-          $8, $9, NOW() + ($10::text || ' days')::interval)
+          $8, $9, NOW() + ($10::text || ' days')::interval, COALESCE($11::timestamptz, NOW()))
          RETURNING id`,
-        [extId, customerId, st, totalUsd.toFixed(2), notes, mUid, loyaltyPoints, lifecycle, mlStatusRaw, String(ratingDays)]
+        [
+          extId,
+          customerId,
+          st,
+          totalUsd.toFixed(2),
+          notes,
+          mUid,
+          loyaltyPoints,
+          lifecycle,
+          mlStatusRaw,
+          String(ratingDays),
+          mlCreatedAt,
+        ]
       );
     } else {
       ins = await client.query(
         `INSERT INTO sales_orders (source, external_order_id, customer_id, status, order_total_amount, notes, sold_by,
-          applies_stock, records_cash, ml_user_id, loyalty_points_earned)
-         VALUES ('mercadolibre', $1, $2, $3, $4, $5, NULL, FALSE, FALSE, $6, $7)
+          applies_stock, records_cash, ml_user_id, loyalty_points_earned, created_at)
+         VALUES ('mercadolibre', $1, $2, $3, $4, $5, NULL, FALSE, FALSE, $6, $7, COALESCE($8::timestamptz, NOW()))
          RETURNING id`,
-        [extId, customerId, st, totalUsd.toFixed(2), notes, mUid, loyaltyPoints]
+        [extId, customerId, st, totalUsd.toFixed(2), notes, mUid, loyaltyPoints, mlCreatedAt]
       );
     }
     const salesId = ins.rows[0].id;
@@ -1229,7 +1323,7 @@ async function previewMlOrdersImport({ mlUserId, allAccounts = false, mlFeedback
   const params = [String(mlActiveDays)];
   if (allAccounts) {
     whereSql = `${ML_ORDERS_REGISTERED_ACCOUNTS_SQL}
-      AND date_created >= (NOW() - ($1::text || ' days')::interval)`;
+      AND (NULLIF(TRIM(date_created::text), '')::timestamptz) >= (NOW() - ($1::text || ' days')::interval)`;
   } else {
     const mUid = Number(mlUserId);
     if (!Number.isFinite(mUid) || mUid <= 0) {
@@ -1238,7 +1332,7 @@ async function previewMlOrdersImport({ mlUserId, allAccounts = false, mlFeedback
       throw e;
     }
     whereSql = `ml_user_id = $2
-      AND date_created >= (NOW() - ($1::text || ' days')::interval)`;
+      AND (NULLIF(TRIM(date_created::text), '')::timestamptz) >= (NOW() - ($1::text || ' days')::interval)`;
     params.push(mUid);
   }
   const qBase = `FROM ml_orders WHERE ${whereSql}`;
@@ -1284,7 +1378,7 @@ async function importSalesOrdersFromMlTable({
   let mUidSingle;
   if (allAccounts) {
     whereSql = `${ML_ORDERS_REGISTERED_ACCOUNTS_SQL}
-      AND date_created >= (NOW() - ($1::text || ' days')::interval)`;
+      AND (NULLIF(TRIM(date_created::text), '')::timestamptz) >= (NOW() - ($1::text || ' days')::interval)`;
   } else {
     mUidSingle = Number(mlUserId);
     if (!Number.isFinite(mUidSingle) || mUidSingle <= 0) {
@@ -1293,7 +1387,7 @@ async function importSalesOrdersFromMlTable({
       throw e;
     }
     whereSql = `ml_user_id = $2
-      AND date_created >= (NOW() - ($1::text || ' days')::interval)`;
+      AND (NULLIF(TRIM(date_created::text), '')::timestamptz) >= (NOW() - ($1::text || ' days')::interval)`;
   }
   const limitOffset = allAccounts ? `LIMIT $2 OFFSET $3` : `LIMIT $3 OFFSET $4`;
   const qParams = allAccounts

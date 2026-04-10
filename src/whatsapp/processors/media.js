@@ -84,13 +84,17 @@ async function handle(normalized) {
     });
 
     // 5. Transcribir si aplica (audio/video)
-    const transcription = config.transcribable
-      ? await transcribeWithGroq({
-          buffer:    fileBuffer,
-          mimetype:  meta.mimetype,
-          messageId: normalized.messageId,
-        })
-      : null;
+    let transcription = null;
+    let transcriptionError = null;
+    if (config.transcribable) {
+      const tr = await transcribeWithGroq({
+        buffer:    fileBuffer,
+        mimetype:  meta.mimetype,
+        messageId: normalized.messageId,
+      });
+      transcription = tr.text;
+      transcriptionError = tr.error;
+    }
 
     // 6. Buscar chat existente (opcional — no bloquea el flujo)
     const { rows: chatRows } = await pool.query(
@@ -116,6 +120,7 @@ async function handle(normalized) {
         mimetype:   meta.mimetype,
         meta,
         transcription,
+        transcriptionError,
       });
       await mark("completed", "saved_in_crm_messages", firebaseUrl);
     } else {

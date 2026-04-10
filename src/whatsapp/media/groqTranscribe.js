@@ -33,19 +33,30 @@ function getExtFromMimetype(mimetype) {
   return "ogg";
 }
 
+const MAX_ERROR_LEN = 480;
+
+function trimErr(msg) {
+  const s = String(msg || "").replace(/\s+/g, " ").trim();
+  if (s.length <= MAX_ERROR_LEN) return s;
+  return `${s.slice(0, MAX_ERROR_LEN)}…`;
+}
+
 /**
  * Transcribe audio/video con Groq Whisper.
- * Requiere GROQ_API_KEY; si no está configurada retorna null sin romper flujo.
- * @returns {Promise<string|null>}
+ * Requiere GROQ_API_KEY; si no está configurada no rompe el flujo.
+ * @returns {Promise<{ text: string|null, error: string|null }>}
  */
 async function transcribeWithGroq({ buffer, mimetype, messageId }) {
-  if (!process.env.GROQ_API_KEY) return null;
-  if (!isTranscribable(mimetype)) return null;
+  if (!process.env.GROQ_API_KEY) {
+    return { text: null, error: "GROQ_API_KEY no configurada" };
+  }
+  if (!isTranscribable(mimetype)) {
+    return { text: null, error: `MIME no soportado para transcripción: ${mimetype || "(vacío)"}` };
+  }
 
-  // Límite conservador para evitar payload excesivo en plan gratis.
   if (buffer.length > 25 * 1024 * 1024) {
     log.warn({ size: buffer.length, messageId }, "Audio/video supera 25MB — skip transcripción");
-    return null;
+    return { text: null, error: `Archivo supera límite 25MB (${Math.round(buffer.length / 1024 / 1024)}MB)` };
   }
 
   try {
@@ -64,21 +75,24 @@ async function transcribeWithGroq({ buffer, mimetype, messageId }) {
     });
 
     if (!res.ok) {
-      throw new Error(`Groq [${res.status}]: ${await res.text()}`);
+      const body = await res.text();
+      return { text: null, error: trimErr(`Groq HTTP ${res.status}: ${body}`) };
     }
 
     const data = await res.json();
     const text = String(data?.text || "").trim();
-    if (!text) return null;
+    if (!text) {
+      return { text: null, error: "Groq devolvió texto vacío" };
+    }
 
     log.info(
       { messageId, chars: text.length, preview: text.substring(0, 60) },
       "Transcripción Groq exitosa"
     );
-    return text;
+    return { text, error: null };
   } catch (err) {
     log.error({ err: err.message, messageId }, "Error transcripción Groq");
-    return null;
+    return { text: null, error: trimErr(err.message || "Error desconocido en transcripción") };
   }
 }
 

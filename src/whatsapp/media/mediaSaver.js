@@ -23,12 +23,12 @@ function buildPreview(mediaType, ptt) {
 async function saveInboundMedia({
   chatId, customerId, messageId,
   mediaType, firebaseUrl, mimetype,
-  meta, transcription,
+  meta, transcription, transcriptionError,
 }) {
   const preview  = buildPreview(mediaType, meta.ptt);
   const lastText = meta.caption?.substring(0, 80)
     ?? transcription?.substring(0, 80)
-    ?? preview;
+    ?? (transcriptionError ? `⚠ ${String(transcriptionError).substring(0, 70)}` : preview);
 
   const client = await pool.connect();
   try {
@@ -43,15 +43,16 @@ async function saveInboundMedia({
       [
         chatId, customerId, messageId, mediaType,
         JSON.stringify({
-          mediaUrl:      firebaseUrl,
-          mimeType:      mimetype,
-          caption:       meta.caption    ?? null,
-          fileSize:      meta.fileLength ?? 0,
-          fileName:      meta.fileName   ?? null,
-          is_voice_note: meta.ptt        ?? false,
-          duration_sec:  meta.seconds    ?? meta.duration ?? 0,
-          page_count:    meta.pageCount  ?? null,
-          transcription: transcription   ?? null,
+          mediaUrl:             firebaseUrl,
+          mimeType:             mimetype,
+          caption:              meta.caption    ?? null,
+          fileSize:             meta.fileLength ?? 0,
+          fileName:             meta.fileName   ?? null,
+          is_voice_note:        meta.ptt        ?? false,
+          duration_sec:         meta.seconds    ?? meta.duration ?? 0,
+          page_count:           meta.pageCount  ?? null,
+          transcription:        transcription   ?? null,
+          transcription_error:  transcriptionError ?? null,
         }),
       ]
     );
@@ -78,7 +79,16 @@ async function saveInboundMedia({
     );
 
     await client.query("COMMIT");
-    log.info({ chatId, messageId, mediaType, hasTranscription: !!transcription }, "Media entrante guardado");
+    log.info(
+      {
+        chatId,
+        messageId,
+        mediaType,
+        hasTranscription: !!transcription,
+        hasTranscriptionError: !!transcriptionError,
+      },
+      "Media entrante guardado"
+    );
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;

@@ -222,7 +222,8 @@ async function handleMediaApiRequest(req, res, url) {
            m.content->>'mimeType' AS mime_type,
            m.content->>'caption' AS caption,
            m.content->>'fileName' AS file_name,
-           m.content->>'transcription' AS transcription
+           m.content->>'transcription' AS transcription,
+           m.content->>'transcription_error' AS transcription_error
          FROM crm_messages m
          LEFT JOIN crm_chats c ON c.id = m.chat_id
          WHERE ${where.join(" AND ")}
@@ -285,7 +286,8 @@ async function handleMediaApiRequest(req, res, url) {
            m.content->>'mimeType' AS mime_type,
            m.content->>'caption' AS caption,
            m.content->>'fileName' AS file_name,
-           m.content->>'transcription' AS transcription
+           m.content->>'transcription' AS transcription,
+           m.content->>'transcription_error' AS transcription_error
          FROM crm_messages m
          LEFT JOIN crm_chats c ON c.id = m.chat_id
          WHERE ${where.join(" AND ")}
@@ -323,6 +325,7 @@ async function handleMediaApiRequest(req, res, url) {
   <td>${esc(r.caption || "")}</td>
   <td>${mediaCell(r)}</td>
   <td style="max-width:280px;white-space:pre-wrap;">${esc(r.transcription || "")}</td>
+  <td style="max-width:280px;white-space:pre-wrap;color:#f88;">${esc(r.transcription_error || "")}</td>
 </tr>`
         )
         .join("\n");
@@ -358,10 +361,11 @@ async function handleMediaApiRequest(req, res, url) {
         <th>Caption</th>
         <th>Media</th>
         <th>Transcripción</th>
+        <th>Motivo error</th>
       </tr>
     </thead>
     <tbody>
-      ${rowsHtml || '<tr><td colspan="9">Sin registros.</td></tr>'}
+      ${rowsHtml || '<tr><td colspan="10">Sin registros.</td></tr>'}
     </tbody>
   </table>
 </body>

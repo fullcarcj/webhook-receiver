@@ -364,7 +364,9 @@ async function handleNoMatch(order) {
     return;
   }
 
-  if (hoursOld >= 6 && order.customer_phone) {
+  // Recordatorios deshabilitados hasta nuevo aviso.
+  // Para reactivar: RECONCILIATION_WA_REMINDERS_ENABLED=1
+  if (process.env.RECONCILIATION_WA_REMINDERS_ENABLED === "1" && hoursOld >= 6 && order.customer_phone) {
     // Dedup: solo enviar recordatorio si nunca se envió O si han pasado >= 6h desde el último
     const lastReminder = order.wa_payment_reminder_at
       ? (Date.now() - new Date(order.wa_payment_reminder_at)) / 3_600_000

@@ -163,8 +163,7 @@ async function generateResponse({ messageId, customerId, chatId, inputText, rece
     const confidence = parseInt(String(parsed.confidence ?? 0), 10);
     const minC = confidenceMin();
     const needsHuman =
-      !isForceSend() &&
-      (parsed.needs_human === true || !Number.isFinite(confidence) || confidence < minC);
+      parsed.needs_human === true || !Number.isFinite(confidence) || confidence < minC;
 
     return {
       replyText: String(parsed.reply_text || "").trim() || null,
@@ -406,8 +405,7 @@ async function processOneMessage(message) {
     return;
   }
 
-  if (result.needsHuman) {
-    const forceNote = isForceSend() ? " [force_send ignoró needs_human]" : "";
+  if (result.needsHuman && !isForceSend()) {
     await pool.query(
       `UPDATE crm_messages
        SET ai_reply_status = 'needs_human_review',
@@ -417,7 +415,7 @@ async function processOneMessage(message) {
            ai_provider = $4,
            ai_processed_at = NOW()
        WHERE id = $5`,
-      [result.replyText, result.confidence, result.reasoning + forceNote, result.provider, messageId]
+      [result.replyText, result.confidence, result.reasoning, result.provider, messageId]
     );
     await logAiResponse(pool, {
       crm_message_id: messageId,
@@ -445,10 +443,10 @@ async function processOneMessage(message) {
     return;
   }
 
-  if (isForceSend()) {
+  if (result.needsHuman && isForceSend()) {
     log.warn(
       { messageId, confidence: result.confidence },
-      "ai_responder: AI_RESPONDER_FORCE_SEND=1 — enviando sin revisión humana"
+      "ai_responder: AI_RESPONDER_FORCE_SEND=1 — omite cola revisión humana, envío directo"
     );
   }
 

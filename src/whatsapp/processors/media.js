@@ -10,7 +10,7 @@ const pino = require("pino");
 const { detectMedia, extractRawMessage } = require("../media/mediaDetector");
 const { decryptMediaWithWasender, downloadDecryptedFile } = require("../media/wasenderDecrypt");
 const { uploadToFirebase, buildFileName } = require("../media/firebaseUpload");
-const { transcribeWithOpenAI } = require("../media/openaiTranscribe");
+const { transcribeWithGroq } = require("../media/groqTranscribe");
 const { saveInboundMedia } = require("../media/mediaSaver");
 const { pool } = require("../../../db");
 const { updateWasenderWebhookMediaStatus } = require("../../../db");
@@ -85,7 +85,7 @@ async function handle(normalized) {
 
     // 5. Transcribir si aplica (audio/video)
     const transcription = config.transcribable
-      ? await transcribeWithOpenAI({
+      ? await transcribeWithGroq({
           buffer:    fileBuffer,
           mimetype:  meta.mimetype,
           messageId: normalized.messageId,

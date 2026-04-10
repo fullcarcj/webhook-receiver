@@ -1,10 +1,8 @@
 "use strict";
 
 /**
- * Extractor de datos de comprobantes bancarios venezolanos via GPT-4o Vision.
- * Solo se ejecuta si OPENAI_API_KEY está configurada.
- * Usa gpt-4o (no mini) con detail:high — necesario para leer números de referencia
- * bancaria venezolana en fondos grises con tipografía pequeña.
+ * Extractor de datos de comprobantes bancarios venezolanos vía Gemini Vision.
+ * Solo se ejecuta si GEMINI_API_KEY está configurada.
  */
 
 const pino = require("pino");
@@ -45,66 +43,85 @@ function normalizeVenezuelanAmount(raw) {
  * @returns {Promise<object|null>}
  */
 async function extractReceiptData(firebaseUrl) {
-  if (!process.env.OPENAI_API_KEY) {
-    log.warn("OPENAI_API_KEY no configurada — extracción de comprobante omitida");
+  if (!process.env.GEMINI_API_KEY) {
+    log.warn("GEMINI_API_KEY no configurada — extracción de comprobante omitida");
     return null;
   }
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const imgRes = await fetch(firebaseUrl);
+    if (!imgRes.ok) {
+      throw new Error(`No se pudo descargar imagen para Gemini [${imgRes.status}]`);
+    }
+    const mimeType = imgRes.headers.get("content-type") || "image/jpeg";
+    const arr = await imgRes.arrayBuffer();
+    const base64 = Buffer.from(arr).toString("base64");
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`,
+      {
       method: "POST",
-      headers: {
-        Authorization:  `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model:       "gpt-4o",
-        max_tokens:  300,
-        temperature: 0,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: [
-              {
-                type:      "image_url",
-                image_url: { url: firebaseUrl, detail: "high" },
-              },
-              {
-                type: "text",
-                text: "Extrae los datos de este comprobante bancario venezolano.",
-              },
-            ],
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          generationConfig: {
+            temperature: 0,
+            maxOutputTokens: 300,
           },
-        ],
-      }),
-    });
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: SYSTEM_PROMPT },
+                { text: "Extrae los datos de este comprobante bancario venezolano y responde SOLO JSON válido." },
+                {
+                  inlineData: {
+                    mimeType,
+                    data: base64,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      }
+    );
 
     if (!response.ok) {
-      throw new Error(`OpenAI [${response.status}]: ${await response.text()}`);
+      throw new Error(`Gemini [${response.status}]: ${await response.text()}`);
     }
 
-    const result  = await response.json();
-    const content = result.choices?.[0]?.message?.content?.trim();
-    if (!content) throw new Error("GPT-4o sin contenido en respuesta");
+    const result = await response.json();
+    const content = result?.candidates?.[0]?.content?.parts
+      ?.map((p) => p?.text || "")
+      .join("\n")
+      .trim();
+    if (!content) throw new Error("Gemini sin contenido en respuesta");
 
-    const parsed = JSON.parse(content.replace(/```json|```/g, "").trim());
+    let jsonText = content;
+    const m = content.match(/```json\s*([\s\S]*?)```/i) || content.match(/```\s*([\s\S]*?)```/i);
+    if (m && m[1]) jsonText = m[1].trim();
+    const parsed = JSON.parse(jsonText);
 
     if (parsed.amount_bs != null) {
       parsed.amount_bs = normalizeVenezuelanAmount(String(parsed.amount_bs));
     }
 
-    log.info({
-      ref:        parsed.reference_number,
-      amount_bs:  parsed.amount_bs,
-      tx_date:    parsed.tx_date,
-      bank:       parsed.bank_name,
-      confidence: parsed.confidence,
-    }, "receipt_extractor: comprobante extraído");
+    log.info(
+      {
+        ref: parsed.reference_number,
+        amount_bs: parsed.amount_bs,
+        tx_date: parsed.tx_date,
+        bank: parsed.bank_name,
+        confidence: parsed.confidence,
+      },
+      "receipt_extractor: comprobante extraído"
+    );
 
     return parsed;
   } catch (err) {
-    log.error({ err: err.message }, "receipt_extractor: error GPT-4o Vision");
+    log.error({ err: err.message }, "receipt_extractor: error Gemini Vision");
     return null;
   }
 }

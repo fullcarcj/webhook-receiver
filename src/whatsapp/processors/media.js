@@ -111,7 +111,7 @@ async function handle(normalized) {
     if (chatRows.length) {
       // 7. Guardar en crm_messages solo si el chat ya existe
       ({ chat_id: chatId, customer_id: customerId } = chatRows[0]);
-      await saveInboundMedia({
+      const saveResult = await saveInboundMedia({
         chatId,
         customerId,
         messageId:  normalized.messageId,
@@ -122,6 +122,25 @@ async function handle(normalized) {
         transcription,
         transcriptionError,
       });
+      const crmMsgId = saveResult && saveResult.id;
+      if (crmMsgId && transcription && String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1") {
+        try {
+          await pool.query(
+            `UPDATE crm_messages SET transcription = $1 WHERE id = $2`,
+            [transcription, crmMsgId]
+          );
+          await pool.query(
+            `UPDATE crm_messages
+             SET ai_reply_status = 'pending_ai_reply'
+             WHERE id = $1 AND ai_reply_status IS NULL`,
+            [crmMsgId]
+          );
+        } catch (e) {
+          if (e && e.code !== "42703") {
+            log.warn({ err: e.message, crmMsgId }, "media: cola IA transcripción no aplicada");
+          }
+        }
+      }
       await mark("completed", "saved_in_crm_messages", firebaseUrl);
     } else {
       // Chat aún no existe (onboarding pendiente): media subida a Firebase, sin guardar en crm_messages
@@ -190,6 +209,31 @@ async function handle(normalized) {
             ref:    extracted?.reference_number,
             amount: extracted?.amount_bs,
           }, "media: payment_attempt guardado");
+
+          if (
+            String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1" &&
+            normalized.messageId &&
+            extracted &&
+            (extracted.amount_bs != null || extracted.reference_number)
+          ) {
+            try {
+              await pool.query(
+                `UPDATE crm_messages
+                 SET receipt_data = $1::jsonb,
+                     ai_reply_status = CASE
+                       WHEN ai_reply_status IS NULL THEN 'pending_receipt_confirm'
+                       ELSE ai_reply_status
+                     END
+                 WHERE external_message_id = $2
+                   AND direction = 'inbound'`,
+                [JSON.stringify(extracted), normalized.messageId]
+              );
+            } catch (e) {
+              if (e && e.code !== "42703") {
+                log.warn({ err: e.message }, "media: receipt_data / cola IA no aplicada");
+              }
+            }
+          }
 
           // Trigger 2 event-driven: conciliar este comprobante específico sin bloquear el webhook
           if (attemptId && extracted?.amount_bs != null) {

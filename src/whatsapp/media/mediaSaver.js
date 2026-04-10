@@ -34,12 +34,13 @@ async function saveInboundMedia({
   try {
     await client.query("BEGIN");
 
-    await client.query(
+    const ins = await client.query(
       `INSERT INTO crm_messages
          (chat_id, customer_id, external_message_id,
           direction, type, content, is_priority, created_at)
        VALUES ($1, $2, $3, 'inbound', $4, $5::jsonb, FALSE, NOW())
-       ON CONFLICT (external_message_id) DO NOTHING`,
+       ON CONFLICT (external_message_id) DO NOTHING
+       RETURNING id`,
       [
         chatId, customerId, messageId, mediaType,
         JSON.stringify({
@@ -56,6 +57,14 @@ async function saveInboundMedia({
         }),
       ]
     );
+    let savedMessageId = ins.rows[0]?.id ?? null;
+    if (!savedMessageId) {
+      const ex = await client.query(
+        `SELECT id FROM crm_messages WHERE external_message_id = $1 LIMIT 1`,
+        [messageId]
+      );
+      savedMessageId = ex.rows[0]?.id ?? null;
+    }
 
     // Si tiene caption, guardar también como mensaje de texto plano
     if (meta.caption?.trim()) {
@@ -84,11 +93,13 @@ async function saveInboundMedia({
         chatId,
         messageId,
         mediaType,
+        crmMessageId: savedMessageId,
         hasTranscription: !!transcription,
         hasTranscriptionError: !!transcriptionError,
       },
       "Media entrante guardado"
     );
+    return { id: savedMessageId };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;

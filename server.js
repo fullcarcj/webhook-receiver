@@ -195,11 +195,13 @@ const { handleCustomersApiRequest } = require("./src/routes/customers");
 const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
 const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
 const { handleProviderApiRequest } = require("./src/handlers/providerApiHandler");
+const { handleAiResponderRequest } = require("./src/handlers/aiResponderApiHandler");
 const { handleSseApiRequest, handleSseStatsRequest } = require("./src/handlers/sseApiHandler");
 const { startWorker: startReconciliationWorker, stopWorker: stopReconciliationWorker } = require("./src/workers/reconciliationWorker");
 const { startInventoryWorker, stopInventoryWorker } = require("./src/workers/inventoryWorker");
 const { startMlStockWatcher, stopMlStockWatcher } = require("./src/workers/mlStockWatcher");
 const { startAiResetWorker, stopAiResetWorker } = require("./src/workers/aiResetWorker");
+const { startAiResponderWorker, stopAiResponderWorker } = require("./src/workers/aiResponderWorker");
 const { handleInventoryApiRequest } = require("./src/handlers/inventoryApiHandler");
 const { routeWebhook: routeWhatsappHubFromBody } = require("./src/whatsapp/hookRouter");
 const { handleCrmApiRequest } = require("./src/routes/crm");
@@ -2314,6 +2316,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (await handleProviderApiRequest(req, res, url)) {
+    return;
+  }
+  if (await handleAiResponderRequest(req, res, url)) {
     return;
   }
   if (await handleDeliveryApiRequest(req, res, url)) {
@@ -6504,6 +6509,7 @@ server.listen(PORT, "0.0.0.0", () => {
   startInventoryWorker();
   startMlStockWatcher();
   startAiResetWorker();
+  startAiResponderWorker();
   refreshSettings().catch((e) =>
     console.error("[price_engine] refreshSettings init:", e.message || e)
   );
@@ -6612,6 +6618,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Extractos bank_statements: http://localhost:${PORT}/statements?k=TU_ADMIN_SECRET`);
     console.log(`Comprobantes pago (tabla): http://localhost:${PORT}/payment-attempts?k=TU_ADMIN_SECRET&today=1`);
     console.log(`Monitor tiempo real (SSE): http://localhost:${PORT}/monitor?k=TU_ADMIN_SECRET`);
+    console.log(`AI Responder (piloto): http://localhost:${PORT}/ai-responder?k=TU_ADMIN_SECRET`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
     console.log(`Órdenes ML (sync-orders): http://localhost:${PORT}/ordenes-ml?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes pack órdenes (BD): http://localhost:${PORT}/mensajes-pack-orden?k=TU_ADMIN_SECRET`);
@@ -6657,5 +6664,6 @@ process.on("SIGTERM", () => {
   stopInventoryWorker();
   stopMlStockWatcher();
   stopAiResetWorker();
+  stopAiResponderWorker();
   server.close(() => process.exit(0));
 });

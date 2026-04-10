@@ -38,6 +38,7 @@ const {
   upsertCrmChatStateAwaitingName,
   deleteCrmChatState,
 } = require("../../services/crmChatStates");
+const { maybeQueueInboundText } = require("../../services/aiResponder");
 
 const msgLog = pino({ level: process.env.LOG_LEVEL || "info", name: "whatsapp_messages" });
 
@@ -229,6 +230,10 @@ async function saveMessageAndUpdateChat(client, { chatId, customerId, normalized
       `UPDATE crm_chats SET unread_count = unread_count + 1, updated_at = NOW() WHERE id = $1`,
       [chatId]
     );
+    const t = String(normalized.type || "text").toLowerCase();
+    if (eventType === "messages.received" && t === "text") {
+      await maybeQueueInboundText(client, ins.rows[0].id);
+    }
   }
 }
 

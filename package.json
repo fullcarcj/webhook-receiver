@@ -77,6 +77,8 @@
     "db:kits-bundles": "node scripts/run-kits-bundles-migration.js",
     "db:provider-settings": "node scripts/run-provider-settings-migration.js",
     "db:wa-enrichment": "node scripts/run-wa-enrichment-migration.js",
+    "db:ai-responder": "node scripts/run-ai-responder-migration.js",
+    "verify:ai-responder": "node scripts/verify-ai-responder-setup.js",
     "db:financial-tables": "node scripts/run-financial-tables-migration.js",
     "db:cash-approval": "node scripts/run-cash-approval-migration.js",
     "db:inventory": "node scripts/run-inventory-migration.js",

@@ -1,0 +1,133 @@
+"use strict";
+
+/**
+ * Worker: toma mensajes inbound en cola IA con UPDATE … FOR UPDATE SKIP LOCKED.
+ * Desactivado por defecto — activar AI_RESPONDER_ENABLED=1.
+ */
+
+const pino = require("pino");
+const { pool } = require("../../db");
+const { processOneMessage, isEnabled } = require("../services/aiResponder");
+
+const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder_worker" });
+
+let isRunning = false;
+let workerHandle = null;
+let stuckHandle = null;
+
+async function cleanStuckProcessing() {
+  try {
+    const r = await pool.query(
+      `UPDATE crm_messages
+       SET ai_reply_status = 'needs_human_review',
+           ai_reasoning = COALESCE(ai_reasoning, '') ||
+             ' [recuperado: processing colgado >10 min]'
+       WHERE ai_reply_status = 'processing'
+         AND ai_processed_at IS NOT NULL
+         AND ai_processed_at < NOW() - INTERVAL '10 minutes'`
+    );
+    if (r.rowCount > 0) {
+      log.warn({ count: r.rowCount }, "ai_responder: mensajes processing liberados");
+    }
+  } catch (e) {
+    if (e && e.code === "42703") return;
+    log.error({ err: e.message }, "cleanStuckProcessing");
+  }
+}
+
+async function responderCycle() {
+  if (!isEnabled()) return;
+  if (isRunning) return;
+  isRunning = true;
+
+  try {
+    let provOk = false;
+    try {
+      const { rows } = await pool.query(
+        `SELECT enabled FROM provider_settings WHERE provider_id = 'GROQ_LLAMA' LIMIT 1`
+      );
+      provOk = rows[0] && rows[0].enabled === true;
+    } catch (e) {
+      if (e && e.code === "42P01") {
+        const k = process.env.GROQ_API_KEY;
+        provOk = !!k;
+      } else {
+        throw e;
+      }
+    }
+    if (!provOk) {
+      log.debug("ai_responder: GROQ_LLAMA desactivado o sin fallback — skip");
+      return;
+    }
+
+    const { rows: claimed } = await pool.query(`
+      UPDATE crm_messages AS m
+      SET ai_reply_status = 'processing',
+          ai_processed_at = NOW()
+      WHERE m.id = (
+        SELECT id FROM crm_messages
+        WHERE ai_reply_status IN ('pending_ai_reply', 'pending_receipt_confirm')
+          AND direction = 'inbound'
+          AND created_at >= NOW() - INTERVAL '24 hours'
+        ORDER BY created_at ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING m.id, m.customer_id, m.chat_id, m.content, m.transcription,
+                m.receipt_data, m.ai_reply_status, m.direction
+    `);
+
+    if (!claimed.length) return;
+
+    const message = claimed[0];
+    try {
+      await processOneMessage(message);
+    } catch (err) {
+      log.error({ err: err.message, messageId: message.id }, "processOneMessage");
+      await pool
+        .query(
+          `UPDATE crm_messages
+           SET ai_reply_status = 'needs_human_review',
+               ai_reasoning = $1
+           WHERE id = $2`,
+          [`Error: ${String(err.message || err).slice(0, 500)}`, message.id]
+        )
+        .catch(() => {});
+    }
+  } catch (e) {
+    if (e && e.code === "42703") {
+      log.debug("ai_responder: columnas IA no migradas — npm run db:ai-responder");
+      return;
+    }
+    log.error({ err: e.message }, "responderCycle");
+  } finally {
+    isRunning = false;
+  }
+}
+
+function startAiResponderWorker() {
+  if (process.env.NODE_ENV === "test") return;
+  if (!isEnabled()) {
+    log.info("ai_responder worker: OFF (AI_RESPONDER_ENABLED≠1)");
+    return;
+  }
+  log.info("ai_responder worker: ON — ciclo 5s");
+  cleanStuckProcessing().catch(() => {});
+  responderCycle();
+  workerHandle = setInterval(responderCycle, 5_000);
+  stuckHandle = setInterval(cleanStuckProcessing, 30 * 60 * 1_000);
+}
+
+function stopAiResponderWorker() {
+  if (workerHandle) {
+    clearInterval(workerHandle);
+    workerHandle = null;
+  }
+  if (stuckHandle) {
+    clearInterval(stuckHandle);
+    stuckHandle = null;
+  }
+  log.info("ai_responder worker detenido");
+}
+
+module.exports = { startAiResponderWorker, stopAiResponderWorker, responderCycle, cleanStuckProcessing };

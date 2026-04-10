@@ -471,7 +471,7 @@ async function processOneMessage(message) {
       action_taken: "sent",
       error_message: null,
     });
-    log.info({ messageId, confidence: result.confidence }, "ai_responder: enviado");
+    log.info({ messageId, confidence: result.confidence }, "ai_responder: mensaje procesado");
     return;
   }
 

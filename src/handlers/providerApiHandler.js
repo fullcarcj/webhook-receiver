@@ -69,6 +69,151 @@ const limitsSchema = z.object({
   circuit_breaker_threshold: z.number().int().min(1).max(1000).optional(),
 });
 
+const RECEIPT_TEST_TIMEOUT_MS = 30_000;
+
+/**
+ * Ejecuta el pipeline completo de conciliación bancaria sobre una URL de imagen.
+ * Etapas: prefiltro sharp → extracción Gemini → (opcional) persistencia + reconciliación.
+ */
+async function runReceiptTest(req, res) {
+  const t0 = Date.now();
+  let body;
+  try {
+    body = await parseJsonBody(req);
+  } catch (e) {
+    writeJson(res, 400, { ok: false, error: "json_invalido", detail: e.message });
+    return true;
+  }
+
+  const imageUrl  = typeof body.url === "string" ? body.url.trim() : null;
+  const dryRun    = body.dry_run !== false;
+  const customerId = body.customer_id ? Number(body.customer_id) : null;
+
+  if (!imageUrl || !/^https?:\/\//i.test(imageUrl)) {
+    writeJson(res, 400, { ok: false, error: "url_requerida", detail: "url debe empezar con https://" });
+    return true;
+  }
+
+  const stages = {
+    prefiltro:      { ran: false },
+    extraction:     { ran: false },
+    persistence:    { ran: false, reason: dryRun ? "dry_run" : null },
+    reconciliation: { ran: false, reason: dryRun ? "dry_run" : null },
+  };
+
+  try {
+    // ── Etapa 1: Descargar imagen y prefiltro sharp ───────────────────────────
+    let fileBuffer;
+    try {
+      const ctrl = new AbortController();
+      const to   = setTimeout(() => ctrl.abort(), RECEIPT_TEST_TIMEOUT_MS);
+      const imgRes = await fetch(imageUrl, { signal: ctrl.signal });
+      clearTimeout(to);
+      if (!imgRes.ok) throw new Error(`HTTP ${imgRes.status} al descargar imagen`);
+      fileBuffer = Buffer.from(await imgRes.arrayBuffer());
+    } catch (e) {
+      writeJson(res, 422, { ok: false, error: "download_failed", detail: e.message, elapsed_ms: Date.now() - t0 });
+      return true;
+    }
+
+    const { isPaymentReceipt } = require("../whatsapp/media/receiptDetector");
+    const prefiltro = await isPaymentReceipt(fileBuffer);
+    stages.prefiltro = { ran: true, is_receipt: prefiltro.isReceipt, score: prefiltro.score, reason: prefiltro.reason };
+
+    if (!prefiltro.isReceipt) {
+      writeJson(res, 200, {
+        ok: true, dry_run: dryRun, url: imageUrl, stages,
+        summary: "prefiltro_rechazado",
+        elapsed_ms: Date.now() - t0,
+      });
+      return true;
+    }
+
+    // ── Etapa 2: Extracción con Gemini Vision via AI Gateway ─────────────────
+    const { extractReceiptData } = require("../whatsapp/media/receiptExtractor");
+    let extracted = null;
+    let extractionError = null;
+    try {
+      extracted = await extractReceiptData(imageUrl);
+    } catch (e) {
+      extractionError = e.message;
+    }
+    stages.extraction = {
+      ran: true,
+      result: extracted,
+      error: extractionError ?? (extracted ? null : "Gemini devolvió null"),
+    };
+
+    if (dryRun) {
+      writeJson(res, 200, {
+        ok: true, dry_run: true, url: imageUrl, stages,
+        summary: extracted ? "extraction_ok_dry_run" : "extraction_failed_dry_run",
+        elapsed_ms: Date.now() - t0,
+      });
+      return true;
+    }
+
+    // ── Etapa 3: Persistencia en payment_attempts ─────────────────────────────
+    let attemptId = null;
+    try {
+      const { rows } = await pool.query(
+        `INSERT INTO payment_attempts
+           (customer_id, chat_id, firebase_url,
+            extracted_reference, extracted_amount_bs, extracted_date,
+            extracted_bank, extracted_payment_type, extraction_confidence,
+            is_receipt, prefiler_score)
+         VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, TRUE, $9)
+         RETURNING id`,
+        [
+          customerId ?? null,
+          imageUrl,
+          extracted?.reference_number ?? null,
+          extracted?.amount_bs        ?? null,
+          extracted?.tx_date          ?? null,
+          extracted?.bank_name        ?? null,
+          extracted?.payment_type     ?? null,
+          extracted?.confidence       ?? null,
+          prefiltro.score,
+        ]
+      );
+      attemptId = rows[0]?.id ?? null;
+      stages.persistence = { ran: true, attempt_id: attemptId };
+    } catch (e) {
+      stages.persistence = { ran: true, error: e.message };
+    }
+
+    // ── Etapa 4: Conciliación ─────────────────────────────────────────────────
+    if (attemptId && extracted?.amount_bs != null) {
+      try {
+        const { reconcileAttempt } = require("../services/reconciliationService");
+        const reconResult = await reconcileAttempt(attemptId);
+        stages.reconciliation = {
+          ran: true,
+          status: reconResult?.status ?? "desconocido",
+          matched_statement_id: reconResult?.bank_statement_id ?? null,
+          detail: reconResult,
+        };
+      } catch (e) {
+        stages.reconciliation = { ran: true, error: e.message };
+      }
+    } else if (attemptId) {
+      stages.reconciliation = { ran: false, reason: "amount_bs_null" };
+    }
+
+    writeJson(res, 200, {
+      ok: true, dry_run: false, url: imageUrl, stages,
+      summary: stages.reconciliation.ran ? `reconciliation_${stages.reconciliation.status}` : "persisted_no_reconciliation",
+      elapsed_ms: Date.now() - t0,
+    });
+    return true;
+
+  } catch (e) {
+    log.error({ err: e.message }, "receipt_test");
+    writeJson(res, 500, { ok: false, error: e.message, stages, elapsed_ms: Date.now() - t0 });
+    return true;
+  }
+}
+
 /**
  * @param {import("http").IncomingMessage} req
  * @param {import("http").ServerResponse} res
@@ -101,6 +246,15 @@ async function handleProviderApiRequest(req, res, url) {
       writeJson(res, 500, { ok: false, error: e.message });
     }
     return true;
+  }
+
+  if (pathname === "/api/admin/test/receipt" || pathname === "/api/admin/test/receipt/") {
+    if (!ensureAdmin(req, res, url)) return true;
+    if (req.method !== "POST") {
+      writeJson(res, 405, { error: "method_not_allowed" });
+      return true;
+    }
+    return runReceiptTest(req, res);
   }
 
   if (!pathname.startsWith("/api/admin/providers")) {

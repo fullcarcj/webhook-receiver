@@ -1,0 +1,8 @@
+feat: Analytics ERP/CRM + Control Financiero Multi-Moneda (Punto 9)
+
+- sql/20260413_financial_tables.sql: expense_categories (16 categorias reales), debit_justifications, manual_transactions (ENUM currencies), exchange_rates
+- src/utils/statsHelpers.js: fillGaps, calcChange, calcPct, resolvePeriod (America/Caracas), buildMeta
+- src/services/statsService.js: 14 funciones de analytics (overview, realtime, sales, hourly heatmap, products, customers, vehicles, whatsapp, mercadolibre, reconciliation, cashflow, expenses, pnl, exchange-rates)
+- src/services/financialService.js: justifyDebit (409 si ya justificado), categories CRUD, manual_transactions CRUD con calculo USD-equiv automatico, exchange_rates upsert
+- src/handlers/statsApiHandler.js: handler unificado 22 endpoints /api/stats/* + /api/finance/*, auth X-Admin-Secret/query, zod validation, formato { data, meta } unificado
+- package.json: script db:financial-tables

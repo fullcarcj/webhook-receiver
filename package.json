@@ -73,19 +73,22 @@
     "db:reconciliation-log": "node scripts/run-reconciliation-log-migration.js",
     "db:sales-orders-overdue": "node scripts/run-sales-orders-overdue-migration.js",
     "db:reconciliation-all": "npm run db:payment-attempts && npm run db:reconciliation-log && npm run db:sales-orders-overdue",
-    "db:financial-tables": "node scripts/run-financial-tables-migration.js"
+    "db:financial-tables": "node scripts/run-financial-tables-migration.js",
+    "db:inventory": "node scripts/run-inventory-migration.js",
+    "migrate:inventory": "node scripts/migrateInventory.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "pino": "^9.6.0",
-    "zod": "^3.24.1",
-    "playwright": "^1.44.0",
     "better-sqlite3": "^11.7.0",
     "firebase-admin": "^13.0.2",
+    "node-cron": "^4.2.1",
     "p-limit": "^6.2.0",
     "pg": "^8.13.1",
-    "sharp": "^0.33.5"
+    "pino": "^9.6.0",
+    "playwright": "^1.44.0",
+    "sharp": "^0.33.5",
+    "zod": "^3.24.1"
   }
 }

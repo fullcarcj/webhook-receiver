@@ -189,6 +189,8 @@ const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
 const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
 const { handleSseApiRequest, handleSseStatsRequest } = require("./src/handlers/sseApiHandler");
 const { startWorker: startReconciliationWorker, stopWorker: stopReconciliationWorker } = require("./src/workers/reconciliationWorker");
+const { startInventoryWorker } = require("./src/workers/inventoryWorker");
+const { handleInventoryApiRequest } = require("./src/handlers/inventoryApiHandler");
 const { routeWebhook: routeWhatsappHubFromBody } = require("./src/whatsapp/hookRouter");
 const { handleCrmApiRequest } = require("./src/routes/crm");
 const { handleBankBanescoRequest } = require("./src/routes/bankBanesco");
@@ -1945,6 +1947,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleStatsApiRequest(req, res)) {
+    return;
+  }
+
+  if (await handleInventoryApiRequest(req, res, url)) {
     return;
   }
 
@@ -6083,6 +6089,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   startReconciliationWorker();
+  startInventoryWorker();
   console.log(`[db] PostgreSQL: ${dbPath}`);
   const forwards = getForwardPostUrls();
   console.log(`Escuchando en http://localhost:${PORT} (0.0.0.0 — todas las interfaces)`);

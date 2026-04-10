@@ -45,7 +45,7 @@ async function runReconciliation() {
   const { rows: orders } = await pool.query(`
     SELECT so.id, so.source, so.external_order_id,
            so.customer_id, so.order_total_amount AS total_orden, so.notes,
-           so.created_at, so.payment_method,
+           so.created_at, so.payment_method, so.wa_payment_reminder_at,
            c.phone AS customer_phone
     FROM sales_orders so
     LEFT JOIN customers c ON c.id = so.customer_id
@@ -365,12 +365,14 @@ async function handleNoMatch(order) {
   }
 
   if (hoursOld >= 6 && order.customer_phone) {
-    // Solo enviar recordatorio si no existe ningún log previo para esta orden
-    const { rows } = await pool.query(
-      `SELECT id FROM reconciliation_log WHERE order_id = $1 LIMIT 1`,
-      [order.id]
-    );
-    if (!rows.length) {
+    // Dedup: solo enviar recordatorio si nunca se envió O si han pasado >= 6h desde el último
+    const lastReminder = order.wa_payment_reminder_at
+      ? (Date.now() - new Date(order.wa_payment_reminder_at)) / 3_600_000
+      : null;
+
+    const shouldSend = lastReminder === null || lastReminder >= 6;
+
+    if (shouldSend) {
       try {
         const { sendWasenderTextMessage } = require("../../wasender-client");
         const apiKey     = process.env.WASENDER_API_KEY;
@@ -383,6 +385,13 @@ async function handleNoMatch(order) {
             to:   `+${String(order.customer_phone).replace(/\D/g, "")}`,
             text: `⏳ Hola, aún no hemos recibido tu pago de la orden *#${order.id}*.\nMonto: *Bs ${totalFmt}*\nPor favor envía tu comprobante cuando puedas. 📸`,
           }).catch((e) => log.error({ err: e.message }, "reconciliation: recordatorio WA falló"));
+
+          // Registrar el envío para evitar reenvíos en el próximo ciclo
+          await pool.query(
+            `UPDATE sales_orders SET wa_payment_reminder_at = NOW() WHERE id = $1`,
+            [order.id]
+          );
+          log.info({ orderId: order.id }, "reconciliation: recordatorio WA enviado");
         }
       } catch (_) { /* notificación opcional */ }
     }

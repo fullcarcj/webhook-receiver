@@ -9,6 +9,13 @@ const { customersHasPhone2Column } = require("../utils/customersPhone2");
 const { salesOrdersHasLifecycleColumns } = require("../utils/salesOrdersLifecycle");
 
 const MANUAL_SOURCES = new Set(["mostrador", "social_media"]);
+const DEFAULT_ML_ACTIVE_MAX_DAYS = 10;
+
+function resolveMlActiveMaxDays() {
+  const raw = Number(process.env.SALES_ML_ACTIVE_MAX_DAYS || DEFAULT_ML_ACTIVE_MAX_DAYS);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_ML_ACTIVE_MAX_DAYS;
+  return Math.max(1, Math.floor(raw));
+}
 
 function isSchemaMissing(err) {
   const c = err && err.code;
@@ -514,6 +521,12 @@ async function listSalesOrders({
     cond.push(`created_at <= $${n++}`);
     params.push(to);
   }
+  // Evita contaminar "ventas activas" con órdenes ML antiguas.
+  const mlActiveDays = resolveMlActiveMaxDays();
+  cond.push(
+    `(source <> 'mercadolibre' OR created_at >= (NOW() - ($${n++}::text || ' days')::interval))`
+  );
+  params.push(String(mlActiveDays));
   const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
   params.push(lim, off);
   try {
@@ -909,7 +922,8 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     await client.query("BEGIN");
 
     const { rows: mrows } = await client.query(
-      `SELECT ml_user_id, order_id, status, total_amount, buyer_id FROM ml_orders WHERE ml_user_id = $1 AND order_id = $2`,
+      `SELECT ml_user_id, order_id, status, total_amount, buyer_id, date_created
+       FROM ml_orders WHERE ml_user_id = $1 AND order_id = $2`,
       [mUid, oid]
     );
     if (!mrows.length) {
@@ -919,6 +933,22 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
       throw e;
     }
     const ml = mrows[0];
+    const mlActiveDays = resolveMlActiveMaxDays();
+    if (ml.date_created) {
+      const ageMs = Date.now() - new Date(ml.date_created).getTime();
+      const maxMs = mlActiveDays * 24 * 60 * 60 * 1000;
+      if (Number.isFinite(ageMs) && ageMs > maxMs) {
+        await client.query("ROLLBACK");
+        return {
+          skipped: true,
+          reason: "too_old_ml_order",
+          max_days: mlActiveDays,
+          ml_user_id: mUid,
+          order_id: oid,
+          date_created: ml.date_created,
+        };
+      }
+    }
     const customerId = await ensureCustomerAndLinkMlBuyer(client, ml.buyer_id);
 
     const dup = await client.query(
@@ -1194,10 +1224,12 @@ const ML_ORDERS_REGISTERED_ACCOUNTS_SQL = `ml_user_id IN (SELECT ml_user_id FROM
  */
 async function previewMlOrdersImport({ mlUserId, allAccounts = false, mlFeedbackFilter = "none" }) {
   const { clause } = mlOrdersFeedbackPendingSql(mlFeedbackFilter);
+  const mlActiveDays = resolveMlActiveMaxDays();
   let whereSql;
-  const params = [];
+  const params = [String(mlActiveDays)];
   if (allAccounts) {
-    whereSql = ML_ORDERS_REGISTERED_ACCOUNTS_SQL;
+    whereSql = `${ML_ORDERS_REGISTERED_ACCOUNTS_SQL}
+      AND date_created >= (NOW() - ($1::text || ' days')::interval)`;
   } else {
     const mUid = Number(mlUserId);
     if (!Number.isFinite(mUid) || mUid <= 0) {
@@ -1205,7 +1237,8 @@ async function previewMlOrdersImport({ mlUserId, allAccounts = false, mlFeedback
       e.code = "BAD_REQUEST";
       throw e;
     }
-    whereSql = `ml_user_id = $1`;
+    whereSql = `ml_user_id = $2
+      AND date_created >= (NOW() - ($1::text || ' days')::interval)`;
     params.push(mUid);
   }
   const qBase = `FROM ml_orders WHERE ${whereSql}`;
@@ -1219,6 +1252,7 @@ async function previewMlOrdersImport({ mlUserId, allAccounts = false, mlFeedback
     scope: allAccounts ? "all_accounts" : "single",
     ml_user_id: allAccounts ? null : Number(mlUserId),
     ml_feedback_filter: mlFeedbackFilter || "none",
+    ml_active_max_days: mlActiveDays,
     total_ml_orders: Number(t[0].n),
     matching_filter: Number(m[0].n),
     sample: samp,
@@ -1245,10 +1279,12 @@ async function importSalesOrdersFromMlTable({
   const lim = Math.min(Math.max(Number(limit) || 50, 1), 500);
   const off = Math.max(Number(offset) || 0, 0);
   const { clause } = mlOrdersFeedbackPendingSql(mlFeedbackFilter);
+  const mlActiveDays = resolveMlActiveMaxDays();
   let whereSql;
   let mUidSingle;
   if (allAccounts) {
-    whereSql = ML_ORDERS_REGISTERED_ACCOUNTS_SQL;
+    whereSql = `${ML_ORDERS_REGISTERED_ACCOUNTS_SQL}
+      AND date_created >= (NOW() - ($1::text || ' days')::interval)`;
   } else {
     mUidSingle = Number(mlUserId);
     if (!Number.isFinite(mUidSingle) || mUidSingle <= 0) {
@@ -1256,10 +1292,13 @@ async function importSalesOrdersFromMlTable({
       e.code = "BAD_REQUEST";
       throw e;
     }
-    whereSql = `ml_user_id = $1`;
+    whereSql = `ml_user_id = $2
+      AND date_created >= (NOW() - ($1::text || ' days')::interval)`;
   }
-  const limitOffset = allAccounts ? `LIMIT $1 OFFSET $2` : `LIMIT $2 OFFSET $3`;
-  const qParams = allAccounts ? [lim, off] : [mUidSingle, lim, off];
+  const limitOffset = allAccounts ? `LIMIT $2 OFFSET $3` : `LIMIT $3 OFFSET $4`;
+  const qParams = allAccounts
+    ? [String(mlActiveDays), lim, off]
+    : [String(mlActiveDays), mUidSingle, lim, off];
   const { rows } = await pool.query(
     `SELECT ml_user_id, order_id FROM ml_orders WHERE ${whereSql}${clause} ORDER BY id DESC ${limitOffset}`,
     qParams
@@ -1270,6 +1309,7 @@ async function importSalesOrdersFromMlTable({
     rows_in_batch: rows.length,
     errors: [],
     ml_feedback_filter: mlFeedbackFilter || "none",
+    ml_active_max_days: mlActiveDays,
     scope: allAccounts ? "all_accounts" : "single",
     ml_user_id: allAccounts ? null : Number(mlUserId),
   };

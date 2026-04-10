@@ -37,6 +37,13 @@ const paymentMethodEnum = z.enum([
   "pago_movil",
   "other",
   "unknown",
+  "zelle",
+  "binance",
+  "usd",
+  "efectivo",
+  "efectivo_bs",
+  "panama",
+  "credito",
 ]);
 
 const createBodySchema = z.object({
@@ -48,6 +55,14 @@ const createBodySchema = z.object({
         sku: z.string().min(1),
         quantity: z.number().int().positive(),
         unit_price_usd: z.number().positive(),
+        selected_components: z
+          .array(
+            z.object({
+              bundle_id: z.number().int().positive(),
+              selected_product_id: z.number().int().positive().optional(),
+            })
+          )
+          .optional(),
       })
     )
     .min(1),
@@ -59,6 +74,10 @@ const createBodySchema = z.object({
   identity_external_id: z.string().min(1).max(255).optional(),
   company_id: z.number().int().positive().optional(),
   zone_id: z.number().int().positive().optional(),
+  /** Monto cobrado (misma unidad que el medio: USD para Zelle, Bs para efectivo_bs si aplica) */
+  payment_amount: z.number().positive().optional(),
+  exchange_rate: z.number().positive().optional(),
+  proof_url: z.string().url().optional().or(z.literal("")),
 });
 
 const quoteCreateSchema = z.object({
@@ -266,6 +285,9 @@ async function handleSalesApiRequest(req, res, url) {
         identityExternalId: d.identity_external_id,
         companyId: d.company_id,
         zoneId: d.zone_id,
+        paymentAmount: d.payment_amount,
+        exchangeRate: d.exchange_rate,
+        proofUrl: d.proof_url,
       });
       const code = created.idempotent ? 200 : 201;
       writeJson(res, code, {

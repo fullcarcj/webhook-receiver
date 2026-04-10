@@ -73,7 +73,10 @@
     "db:reconciliation-log": "node scripts/run-reconciliation-log-migration.js",
     "db:sales-orders-overdue": "node scripts/run-sales-orders-overdue-migration.js",
     "db:reconciliation-all": "npm run db:payment-attempts && npm run db:reconciliation-log && npm run db:sales-orders-overdue",
+    "db:wa-anti-spam": "node scripts/run-wa-anti-spam-migration.js",
+    "db:kits-bundles": "node scripts/run-kits-bundles-migration.js",
     "db:financial-tables": "node scripts/run-financial-tables-migration.js",
+    "db:cash-approval": "node scripts/run-cash-approval-migration.js",
     "db:inventory": "node scripts/run-inventory-migration.js",
     "migrate:inventory": "node scripts/migrateInventory.js"
   },

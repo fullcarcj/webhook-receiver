@@ -98,7 +98,7 @@ Sin OAuth en el job, los POST a la API de ML pueden fallar al renovar token.
 
 ### Ventas globales (`sales_orders`)
 
-- **Servicio / rutas:** `src/services/salesService.js`, `src/handlers/salesApiHandler.js` montado en `server.js` bajo `/api/sales`.
+- **Servicio / rutas:** `src/services/salesService.js`, `src/handlers/salesApiHandler.js` montado en `server.js` bajo `/api/sales`; kits (`bundleApiHandler.js`: `/api/bundles`, `/api/price-review`).
 - **Migraciones:** `npm run db:sales-all` (o `db:sales`, `db:sales-ml`, `db:sales-global`) — scripts con driver `pg` (`scripts/run-sql-file-pg.js`).
 - **Auth admin:** `X-Admin-Secret` o `?k=` / `?secret=` (mismo `ADMIN_SECRET`); desactivar query con `ADMIN_SECRET_QUERY_AUTH=0` (`src/middleware/adminAuth.js`).
 - **Import desde ML:** `SALES_ML_IMPORT_ENABLED=1` en el servidor. Copia desde `ml_orders` → `sales_orders` (sin stock/caja por defecto).
@@ -119,7 +119,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | WMS reservas ML | `ML_WMS_ORDER_RESERVATIONS_ENABLED=1` — tras GET `orders_v2` reserva/libera stock según estado (`src/services/reservationService.js`); requiere migración `sql/ml-reservations.sql`. **API admin (opcional):** `POST /api/wms/ml-order/reserve|commit|release` con `X-Admin-Secret` — mismas funciones que el webhook (pruebas/soporte) |
 | Currency | `CRON_SECRET` (`Authorization: Bearer` en `POST /api/currency/fetch`), `ADMIN_SECRET` vía `X-Admin-Secret` en el mismo endpoint; `BCV_URL`, `BCV_FETCH_TIMEOUT_MS`, `BCV_TLS_INSECURE`; en GitHub Actions: secrets `RENDER_URL`, `CRON_SECRET`, `DATABASE_URL` (`daily-rates.yml`); `CURRENCY_COMPANY_IDS` opcional |
 | Preguntas IA | `ML_QUESTIONS_IA_AUTO_ENABLED`, ventana/horario en `ML_QUESTIONS_IA_AUTO_*` |
-| WhatsApp | `WASENDER_ENABLED`, `WASENDER_API_KEY`, `WASENDER_API_BASE_URL`, `ML_WHATSAPP_TIPO_F_ENABLED`, plantillas E/F en BD o env |
+| WhatsApp | `WASENDER_ENABLED`, `WASENDER_API_KEY`, `WASENDER_API_BASE_URL`, `ML_WHATSAPP_TIPO_F_ENABLED`, plantillas E/F en BD o env; ventana silenciosa: `WA_QUIET_HOURS_*`, `WA_QUIET_HOURS_BLOCK_SEND` (`waQuietHours.js`); anti-spam: `WA_PREVENT_DUPLICATES`, `WA_MAX_REMINDERS_PER_DAY`, tabla `wa_sent_messages_log` (`npm run db:wa-anti-spam`, `waAntiSpam.js`) — `messageType` en `wasender-client` (`CHAT`/`REMINDER`/`MARKETING`/`CRITICAL`) |
 | Post-venta A | `ML_AUTO_SEND_POST_SALE`, `ML_AUTO_SEND_TOPICS`, `ML_POST_SALE_*` |
 | Retiro B | `ML_RETIRO_ENABLED`, `ML_RETIRO_SLOT`, `ML_RETIRO_TIMEZONE`, `ML_RETIRO_LOOKBACK_DAYS`, `ML_RETIRO_MORNING_SEND_AT` / `ML_RETIRO_AFTERNOON_SEND_AT` (referencia HH:MM local), `ML_RETIRO_ENFORCE_SEND_AT`, `ML_RETIRO_SEND_AT_WINDOW_MINUTES`; hora real de ejecución = **cron UTC** en los workflows |
 | Calificación C | `ML_RATING_REQUEST_ENABLED`, `ML_RATING_REQUEST_LOOKBACK_DAYS`, …; hora diaria = **cron** en `rating-request-daily.yml` |
@@ -175,7 +175,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Reservas ML ↔ bin_stock | `src/services/reservationService.js`, `sql/ml-reservations.sql`, enganche en `server.js` (topic `orders_v2` + fetch) |
 | Orden de migración SQL | `sql/run-migrations.md` |
 | Banesco monitor / CSV / statements | `src/services/banescoService.js`, `src/jobs/banescoMonitor.js`, `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`, `src/services/bankStatementsService.js`, `sql/bank-reconciliation.sql` |
-| Ventas globales + import ML | `src/services/salesService.js`, `src/handlers/salesApiHandler.js`, `scripts/importMlOrdersToSales.js`, `scripts/import-ml-sales-http.js`, `sql/20260408_sales_orders*.sql`, `20260409_sales_global.sql` |
+| Ventas globales + import ML | `src/services/salesService.js`, `src/handlers/salesApiHandler.js`, `scripts/importMlOrdersToSales.js`, `scripts/import-ml-sales-http.js`, `sql/20260408_sales_orders*.sql`, `20260409_sales_global.sql`; kits/bundles (`npm run db:kits-bundles`, `sql/20260417_kits_bundles_productos.sql`, `/api/bundles`, `/api/price-review`) |
 
 ---
 

@@ -290,6 +290,8 @@ async function applyMatch(order, match) {
           apiBaseUrl,
           to:   `+${String(order.customer_phone).replace(/\D/g, "")}`,
           text: `✅ *¡Pago confirmado!*\n\nTu orden *#${order.id}* fue conciliada vía ${sourceLabel}.\nMonto: *Bs ${totalFmt}*\n\nEn breve coordinamos la entrega. 🔧`,
+          messageType: "CRITICAL",
+          customerId: order.customer_id != null ? Number(order.customer_id) : undefined,
         }).catch((e) => log.error({ err: e.message }, "reconciliation: WA notify post-match falló"));
       }
     }
@@ -407,19 +409,30 @@ async function handleNoMatch(order) {
         const apiBaseUrl = process.env.WASENDER_API_BASE_URL || "https://www.wasenderapi.com";
         if (apiKey) {
           const totalFmt = Number(order.total_orden).toLocaleString("es-VE");
-          await sendWasenderTextMessage({
-            apiKey,
-            apiBaseUrl,
-            to:   `+${String(order.customer_phone).replace(/\D/g, "")}`,
-            text: `⏳ Hola, aún no hemos recibido tu pago de la orden *#${order.id}*.\nMonto: *Bs ${totalFmt}*\nPor favor envía tu comprobante cuando puedas. 📸`,
-          }).catch((e) => log.error({ err: e.message }, "reconciliation: recordatorio WA falló"));
+          let waRes;
+          try {
+            waRes = await sendWasenderTextMessage({
+              apiKey,
+              apiBaseUrl,
+              to:   `+${String(order.customer_phone).replace(/\D/g, "")}`,
+              text: `⏳ Hola, aún no hemos recibido tu pago de la orden *#${order.id}*.\nMonto: *Bs ${totalFmt}*\nPor favor envía tu comprobante cuando puedas. 📸`,
+              messageType: "REMINDER",
+              customerId: order.customer_id != null ? Number(order.customer_id) : undefined,
+            });
+          } catch (e) {
+            log.error({ err: e.message }, "reconciliation: recordatorio WA falló");
+            waRes = { ok: false };
+          }
 
-          // Registrar el envío para evitar reenvíos en el próximo ciclo
-          await pool.query(
-            `UPDATE sales_orders SET wa_payment_reminder_at = NOW() WHERE id = $1`,
-            [order.id]
-          );
-          log.info({ orderId: order.id }, "reconciliation: recordatorio WA enviado");
+          if (waRes && waRes.ok) {
+            await pool.query(
+              `UPDATE sales_orders SET wa_payment_reminder_at = NOW() WHERE id = $1`,
+              [order.id]
+            );
+            log.info({ orderId: order.id }, "reconciliation: recordatorio WA enviado");
+          } else if (waRes && waRes.status === "blocked" && waRes.reason) {
+            log.warn({ orderId: order.id, reason: waRes.reason }, "reconciliation: recordatorio WA bloqueado (anti-spam)");
+          }
         }
       } catch (_) { /* notificación opcional */ }
     }

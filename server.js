@@ -180,8 +180,11 @@ const { handleCrmApiPreflight } = require("./src/middleware/crmApiCors");
 const { handleVehicleApiRequest } = require("./src/handlers/vehicleApiHandler");
 const { handlePurchaseApiRequest } = require("./src/handlers/purchaseApiHandler");
 const { handleSalesApiRequest } = require("./src/handlers/salesApiHandler");
+const { handleCashApiRequest } = require("./src/handlers/cashApiHandler");
+const { handleBundleApiRequest } = require("./src/handlers/bundleApiHandler");
 const { handleDeliveryApiRequest } = require("./src/handlers/deliveryApiHandler");
 const { handlePriceApiRequest } = require("./src/handlers/priceEngineApiHandler");
+const { handleMlApiRequest } = require("./src/handlers/mlApiHandler");
 const salesService = require("./src/services/salesService");
 const { refreshSettings } = require("./src/services/priceEngineService");
 const { expirePendingRequests } = require("./src/services/priceApprovalService");
@@ -193,7 +196,8 @@ const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
 const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
 const { handleSseApiRequest, handleSseStatsRequest } = require("./src/handlers/sseApiHandler");
 const { startWorker: startReconciliationWorker, stopWorker: stopReconciliationWorker } = require("./src/workers/reconciliationWorker");
-const { startInventoryWorker } = require("./src/workers/inventoryWorker");
+const { startInventoryWorker, stopInventoryWorker } = require("./src/workers/inventoryWorker");
+const { startMlStockWatcher, stopMlStockWatcher } = require("./src/workers/mlStockWatcher");
 const { handleInventoryApiRequest } = require("./src/handlers/inventoryApiHandler");
 const { routeWebhook: routeWhatsappHubFromBody } = require("./src/whatsapp/hookRouter");
 const { handleCrmApiRequest } = require("./src/routes/crm");
@@ -1926,18 +1930,23 @@ const server = http.createServer(async (req, res) => {
   if (await handleSalesApiRequest(req, res, url)) {
     return;
   }
+  if (await handleCashApiRequest(req, res, url)) {
+    return;
+  }
+  if (await handleBundleApiRequest(req, res, url)) {
+    return;
+  }
   if (await handleDeliveryApiRequest(req, res, url)) {
     return;
   }
   if (await handlePriceApiRequest(req, res, url)) {
     return;
   }
-
-  if (await handleMediaApiRequest(req, res, url)) {
+  if (await handleMlApiRequest(req, res, url)) {
     return;
   }
 
-  if (await handleCustomerHistoryRequest(req, res, url)) {
+  if (await handleMediaApiRequest(req, res, url)) {
     return;
   }
 
@@ -1950,6 +1959,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleCustomersApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleCustomerHistoryRequest(req, res, url)) {
     return;
   }
 
@@ -6101,6 +6114,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   startReconciliationWorker();
   startInventoryWorker();
+  startMlStockWatcher();
   refreshSettings().catch((e) =>
     console.error("[price_engine] refreshSettings init:", e.message || e)
   );
@@ -6249,5 +6263,7 @@ startBanescoMonitor();
 
 process.on("SIGTERM", () => {
   stopReconciliationWorker();
+  stopInventoryWorker();
+  stopMlStockWatcher();
   server.close(() => process.exit(0));
 });

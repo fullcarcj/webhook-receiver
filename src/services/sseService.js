@@ -22,6 +22,10 @@ const SSE_EVENTS = {
   RECEIPT_DETECTED:     "receipt_detected",
   WA_SESSION_STATUS:    "wa_session_status",
   ORDER_STATUS_CHANGED: "order_status_changed",
+  CASH_PAYMENT_SUBMITTED: "cash_payment_submitted",
+  CASH_PAYMENT_APPROVED:  "cash_payment_approved",
+  CASH_PAYMENT_REJECTED:  "cash_payment_rejected",
+  CASH_LOSS_ALERT:        "cash_loss_alert",
 };
 
 // ─── Registro de clientes activos ────────────────────────────────────────────

@@ -357,6 +357,89 @@ async function handleStatsApiRequest(req, res) {
       return ok(res, 200, data, buildMeta(t0, "wa-throttle"));
     }
 
+    // GET /api/stats/db-activity — monitoreo técnico DB (actividad, locks, cambios recientes)
+    if (path === "/api/stats/db-activity" && method === "GET") {
+      const minutes = Math.min(Math.max(parseInt(url.searchParams.get("minutes") || "15", 10), 1), 240);
+
+      const { rows: active } = await pool.query(`
+        SELECT
+          pid,
+          usename,
+          application_name,
+          state,
+          wait_event_type,
+          wait_event,
+          NOW() - query_start AS running_for,
+          LEFT(query, 220) AS query_preview
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND state <> 'idle'
+        ORDER BY query_start ASC
+        LIMIT 50
+      `);
+
+      const { rows: waits } = await pool.query(`
+        SELECT
+          COALESCE(wait_event_type, 'none') AS wait_event_type,
+          COUNT(*)::int AS sessions
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND state = 'active'
+        GROUP BY COALESCE(wait_event_type, 'none')
+        ORDER BY sessions DESC
+      `);
+
+      const { rows: lockWaits } = await pool.query(`
+        SELECT COUNT(*)::int AS lock_waiting
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+      `);
+
+      const { rows: recency } = await pool.query(`
+        SELECT *
+        FROM (
+          SELECT
+            'sales_orders'::text AS table_name,
+            COUNT(*)::int AS rows_changed_window,
+            MAX(created_at) AS last_change_at
+          FROM sales_orders
+          WHERE created_at >= NOW() - ($1::text || ' minutes')::interval
+          UNION ALL
+          SELECT
+            'bank_statements'::text AS table_name,
+            COUNT(*)::int AS rows_changed_window,
+            MAX(created_at) AS last_change_at
+          FROM bank_statements
+          WHERE created_at >= NOW() - ($1::text || ' minutes')::interval
+          UNION ALL
+          SELECT
+            'payment_attempts'::text AS table_name,
+            COUNT(*)::int AS rows_changed_window,
+            MAX(created_at) AS last_change_at
+          FROM payment_attempts
+          WHERE created_at >= NOW() - ($1::text || ' minutes')::interval
+          UNION ALL
+          SELECT
+            'inventory_projections'::text AS table_name,
+            COUNT(*)::int AS rows_changed_window,
+            MAX(last_calculated_at) AS last_change_at
+          FROM inventory_projections
+          WHERE last_calculated_at >= NOW() - ($1::text || ' minutes')::interval
+        ) t
+        ORDER BY table_name ASC
+      `, [String(minutes)]);
+
+      return ok(res, 200, {
+        window_minutes: minutes,
+        lock_waiting: Number(lockWaits[0]?.lock_waiting || 0),
+        wait_event_summary: waits,
+        active_sessions: active,
+        recent_table_changes: recency,
+      }, buildMeta(t0, `db_activity_${minutes}m`));
+    }
+
     // Ruta no encontrada dentro del módulo
     return fail(res, 404, "NOT_FOUND", `Endpoint ${path} no existe`, buildMeta(t0, "custom"));
 

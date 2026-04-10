@@ -7,6 +7,7 @@ const { getTodayRate } = require("./currencyService");
 const { CustomerModel } = require("./crmIdentityService");
 const { customersHasPhone2Column } = require("../utils/customersPhone2");
 const { salesOrdersHasLifecycleColumns } = require("../utils/salesOrdersLifecycle");
+const bundleService = require("./bundleService");
 
 const MANUAL_SOURCES = new Set(["mostrador", "social_media"]);
 const DEFAULT_ML_ACTIVE_MAX_DAYS = 10;
@@ -93,6 +94,20 @@ async function resolveSaleLinesAndStock(client, items) {
       line_total_usd: lineTotal,
     });
 
+    // Kits en BD (product_bundles + alternativas) tienen prioridad sobre kit_components JSON.
+    if (await bundleService.hasDbBundlesForParent(row.id, client)) {
+      const dec = await bundleService.buildStockDecrementsForDbKit(
+        client,
+        row.id,
+        qty,
+        Array.isArray(it.selected_components) ? it.selected_components : []
+      );
+      for (const d of dec) {
+        stockDecrements.push(d);
+      }
+      continue;
+    }
+
     const kit = parseKitComponents(row.atributos);
     if (kit && kit.length) {
       for (const comp of kit) {
@@ -166,6 +181,21 @@ async function incrementStockFromOrderLines(client, orderLines) {
       it.product_id,
     ]);
     if (!pr.rows.length) continue;
+    if (await bundleService.hasDbBundlesForParent(it.product_id, client)) {
+      const { rows: comps } = await client.query(
+        `SELECT component_product_id, quantity FROM product_bundles
+         WHERE parent_product_id = $1 AND is_active = TRUE`,
+        [it.product_id]
+      );
+      for (const c of comps) {
+        const add = Number(c.quantity) * it.quantity;
+        await client.query(`UPDATE productos SET stock = stock + $2, updated_at = NOW() WHERE id = $1`, [
+          c.component_product_id,
+          add,
+        ]);
+      }
+      continue;
+    }
     const kit = parseKitComponents(pr.rows[0].atributos);
     if (kit && kit.length) {
       for (const comp of kit) {
@@ -228,10 +258,13 @@ async function fetchOrderItems(client, salesOrderId) {
  * @param {string} [p.soldBy]
  * @param {'pending'|'paid'} [p.status]
  * @param {string} [p.externalOrderId]
- * @param {'cash'|'card'|'transfer'|'mercadopago'|'pago_movil'|'other'|'unknown'} [p.paymentMethod]
+ * @param {'cash'|'card'|'transfer'|'mercadopago'|'pago_movil'|'other'|'unknown'|string} [p.paymentMethod]
  * @param {string} [p.identityExternalId] — clave en crm_customer_identities (default: external_order_id)
  * @param {number} [p.companyId] — tasas Bs (currency)
  * @param {number|undefined|null} [p.zoneId] — zona delivery (opcional)
+ * @param {number} [p.paymentAmount] — monto cobrado (USD o Bs según medio; opcional, default total orden)
+ * @param {number} [p.exchangeRate] — tasa Bs/USD para EFECTIVO_BS (opcional)
+ * @param {string} [p.proofUrl] — URL comprobante (opcional)
  */
 async function createOrder({
   source,
@@ -245,6 +278,9 @@ async function createOrder({
   identityExternalId,
   companyId,
   zoneId,
+  paymentAmount,
+  exchangeRate,
+  proofUrl,
 }) {
   if (!MANUAL_SOURCES.has(source)) {
     const e = new Error("source no permitido para creación manual");
@@ -253,6 +289,7 @@ async function createOrder({
   }
   const st =
     status === "pending" || status === "pending_payment" ? "pending" : "paid";
+  const cashApprovalService = require("./cashApprovalService");
   let cid = null;
   let zId = null;
   if (customerId != null && customerId !== "") {
@@ -286,6 +323,21 @@ async function createOrder({
         ? "unknown"
         : null;
 
+  const needsCashApproval = cashApprovalService.isCashApprovalPaymentMethod(pay);
+  if (needsCashApproval && st === "paid") {
+    const e = new Error(
+      "Medio de cobro distinto de transferencia/pago móvil requiere aprobación de caja; enviar status pending o pending_payment"
+    );
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  if (needsCashApproval && (!soldBy || String(soldBy).trim() === "")) {
+    const e = new Error("sold_by es obligatorio cuando el cobro requiere aprobación de caja");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const insertStatus = needsCashApproval ? "pending_cash_approval" : st;
+
   const compId = Number(companyId || process.env.SALES_CURRENCY_COMPANY_ID || "1") || 1;
   let rate = null;
   let totalBs = null;
@@ -297,6 +349,8 @@ async function createOrder({
   }
 
   const client = await pool.connect();
+  /** @type {null | { tx_id: number, discrepancy_usd: number, has_discrepancy: boolean, amount_usd_equiv: number }} */
+  let cashSsePayload = null;
   try {
     await client.query("BEGIN");
 
@@ -338,7 +392,7 @@ async function createOrder({
         source,
         extId,
         cid,
-        st,
+        insertStatus,
         totalAmountUsd.toFixed(2),
         totalBs != null ? totalBs.toFixed(2) : null,
         rate != null && Number.isFinite(rate) ? rate : null,
@@ -393,6 +447,18 @@ async function createOrder({
       await deliveryService.createDeliveryService(client, { orderId, zoneId: zId, zone });
     }
 
+    if (needsCashApproval) {
+      cashSsePayload = await cashApprovalService.recordNewSaleCashPayment(client, {
+        orderId,
+        paymentMethod: pay,
+        paymentAmount: paymentAmount != null ? Number(paymentAmount) : null,
+        exchangeRate: exchangeRate != null ? Number(exchangeRate) : null,
+        proofUrl: proofUrl != null ? String(proofUrl) : null,
+        soldBy,
+        description: notes || `Venta ${source}`,
+      });
+    }
+
     let pointsEarned = 0;
     if (st === "paid") {
       if (cid != null) {
@@ -416,6 +482,45 @@ async function createOrder({
     }
 
     await client.query("COMMIT");
+
+    if (cashSsePayload && needsCashApproval) {
+      cashApprovalService.emitCashSubmitted({
+        tx_id: cashSsePayload.tx_id,
+        order_id: orderId,
+        currency: pay,
+        amount: cashSsePayload.amount,
+        amount_usd: cashSsePayload.amount_usd_equiv,
+        submitted_by: soldBy,
+        discrepancy_usd: cashSsePayload.discrepancy_usd,
+        has_discrepancy: cashSsePayload.has_discrepancy,
+        message: cashSsePayload.has_discrepancy
+          ? `Pago ${pay} con discrepancia USD ${Math.abs(cashSsePayload.discrepancy_usd).toFixed(4)}`
+          : `Pago ${pay} registrado — revisar en caja`,
+      });
+    }
+
+    // Revisión de precios / rotación (no bloquea respuesta; falla silenciosa si no hay migración).
+    setImmediate(() => {
+      const priceReviewService = require("./priceReviewService");
+      (async () => {
+        try {
+          for (const line of linesForInsert) {
+            const { rows: ar } = await pool.query(`SELECT atributos FROM productos WHERE id = $1`, [
+              line.product_id,
+            ]);
+            const at = ar[0]?.atributos;
+            const dbKit = await bundleService.hasDbBundlesForParent(line.product_id, pool);
+            const jsonKit = !!parseKitComponents(at);
+            if (!dbKit && !jsonKit) {
+              await priceReviewService.enqueueComponentPricing(line.product_id).catch(() => {});
+            }
+            await priceReviewService.checkHighRotation(line.product_id).catch(() => {});
+          }
+        } catch (_e) {
+          /* opcional */
+        }
+      })();
+    });
 
     if (cid != null) {
       const extForCrm = identityExternalId != null && String(identityExternalId).trim() !== "" ? String(identityExternalId).trim() : extId;
@@ -779,7 +884,18 @@ async function patchSalesOrderStatus(orderId, newStatus) {
       }
       await client.query(`UPDATE sales_orders SET status = 'shipped', updated_at = NOW() WHERE id = $1`, [oid]);
     } else if (newStatus === "cancelled") {
-      if (cur === "pending") {
+      if (cur === "pending_cash_approval") {
+        await client.query(
+          `UPDATE manual_transactions
+           SET approval_status = 'cancelled'
+           WHERE order_id = $1 AND approval_status = 'pending'`,
+          [oid]
+        );
+        if (appliesStock) {
+          await incrementStockFromOrderLines(client, items);
+        }
+        await client.query(`UPDATE sales_orders SET status = 'cancelled', updated_at = NOW() WHERE id = $1`, [oid]);
+      } else if (cur === "pending") {
         if (appliesStock) {
           await incrementStockFromOrderLines(client, items);
         }

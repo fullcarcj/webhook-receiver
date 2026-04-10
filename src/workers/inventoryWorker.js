@@ -1,12 +1,27 @@
 'use strict';
 const cron = require('node-cron');
 const { pool } = require('../../db');
+const { triggerAutoPause, triggerAutoActivate } = require('../services/mlPublicationsService');
 
 let log;
 try { log = require('pino')(); } catch { log = console; }
 
 const BATCH_SIZE    = 500;
 const ANALYSIS_DAYS = 30;
+
+function notifyMlByStockTransition(productId, qtyBefore, qtyAfter) {
+  if (qtyAfter <= 0 && qtyBefore > 0) {
+    triggerAutoPause(productId).catch((err) => {
+      log.error && log.error({ err: err.message, productId }, 'Error auto-pause ML');
+    });
+    return;
+  }
+  if (qtyAfter > 0 && qtyBefore <= 0) {
+    triggerAutoActivate(productId, qtyAfter).catch((err) => {
+      log.error && log.error({ err: err.message, productId }, 'Error auto-activate ML');
+    });
+  }
+}
 
 // ── Proyección individual ────────────────────────────────────────────────────
 
@@ -262,4 +277,5 @@ module.exports = {
   stopInventoryWorker,
   calculateProjections,
   generateSuggestedPurchaseOrder,
+  notifyMlByStockTransition,
 };

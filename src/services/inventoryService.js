@@ -1,5 +1,21 @@
 'use strict';
 const { pool } = require('../../db');
+const pino = require('pino');
+const log = pino({ level: process.env.LOG_LEVEL || 'info', name: 'inventory_service' });
+
+function maybeSyncMlPublicationState(productId, qtyBefore, qtyAfter) {
+  if (qtyAfter <= 0 && qtyBefore > 0) {
+    const { triggerAutoPause } = require('./mlPublicationsService');
+    triggerAutoPause(productId).catch((err) => {
+      log.error({ err: err.message, productId }, 'inventory_service: error triggerAutoPause');
+    });
+  } else if (qtyAfter > 0 && qtyBefore <= 0) {
+    const { triggerAutoActivate } = require('./mlPublicationsService');
+    triggerAutoActivate(productId, qtyAfter).catch((err) => {
+      log.error({ err: err.message, productId }, 'inventory_service: error triggerAutoActivate');
+    });
+  }
+}
 
 // ── Catálogo + Stock ─────────────────────────────────────────────────────────
 
@@ -185,6 +201,7 @@ async function adjustStock(productId, { qty_change, type, notes, created_by, ref
     `, [productId, type, qtyBefore, qty_change, qtyAfter, reference_id || null, notes, created_by]);
 
     await client.query('COMMIT');
+    maybeSyncMlPublicationState(productId, qtyBefore, qtyAfter);
     return { product_id: productId, qty_before: qtyBefore, qty_change, qty_after: qtyAfter, stock_alert: stockAlert };
 
   } catch (err) {
@@ -395,6 +412,7 @@ async function updatePurchaseOrderStatus(id, { status, approved_by, notes }) {
 
     // Al recibir: actualizar stock por cada ítem
     if (status === 'received') {
+      const mlTransitions = [];
       const { rows: items } = await client.query(
         'SELECT * FROM purchase_order_items WHERE purchase_order_id = $1', [id]
       );
@@ -420,7 +438,18 @@ async function updatePurchaseOrderStatus(id, { status, approved_by, notes }) {
             (product_id, type, qty_before, qty_change, qty_after, reference_id, notes, created_by)
           VALUES ($1,'purchase',$2,$3,$4,$5,'Recepción orden de compra','system')
         `, [item.product_id, qtyBefore, qtyChange, qtyAfter, `PO-${id}`]);
+
+        mlTransitions.push({
+          product_id: Number(item.product_id),
+          qty_before: qtyBefore,
+          qty_after: qtyAfter,
+        });
       }
+      await client.query('COMMIT');
+      for (const t of mlTransitions) {
+        maybeSyncMlPublicationState(t.product_id, t.qty_before, t.qty_after);
+      }
+      return getPurchaseOrderById(id);
     }
 
     await client.query('COMMIT');

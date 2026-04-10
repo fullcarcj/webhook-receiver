@@ -239,6 +239,8 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
     apiKey: cfg.apiKey,
     to,
     text,
+    messageType: "MARKETING",
+    customerId: custId,
   });
 
   const msgId =
@@ -261,9 +263,9 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
         phone_e164: to,
         phone_source: null,
         outcome: "api_error",
-        http_status: res.status,
+        http_status: typeof res.status === "number" ? res.status : null,
         response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
-        error_message: `HTTP ${res.status}`,
+        error_message: res.reason ? `policy:${res.reason}` : `HTTP ${res.status}`,
         text_preview: preview,
         tipo_e_activation_source: CRM_WELCOME_SOURCE_TAG,
       });
@@ -271,7 +273,7 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
       /* ignore */
     }
     log.warn({ status: res.status, to, body: res.bodyText && String(res.bodyText).slice(0, 500) }, "crm_welcome: Wasender no OK");
-    return { ok: false, outcome: "send_failed", httpStatus: res.status };
+    return { ok: false, outcome: "send_failed", httpStatus: typeof res.status === "number" ? res.status : 0 };
   }
 
   try {
@@ -284,7 +286,7 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
       phone_e164: to,
       phone_source: null,
       outcome: "success",
-      http_status: res.status,
+      http_status: typeof res.status === "number" ? res.status : null,
       wasender_msg_id: Number.isFinite(msgId) ? msgId : null,
       response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
       text_preview: preview,
@@ -396,6 +398,8 @@ async function trySendCrmWaWelcomeAfterName({ chatId, customerId, phoneRaw }) {
     apiKey: cfg.apiKey,
     to,
     text,
+    messageType: "MARKETING",
+    customerId: custId,
   });
 
   const msgId =
@@ -418,9 +422,9 @@ async function trySendCrmWaWelcomeAfterName({ chatId, customerId, phoneRaw }) {
         phone_e164: to,
         phone_source: null,
         outcome: "api_error",
-        http_status: res.status,
+        http_status: typeof res.status === "number" ? res.status : null,
         response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
-        error_message: `HTTP ${res.status}`,
+        error_message: res.reason ? `policy:${res.reason}` : `HTTP ${res.status}`,
         text_preview: preview,
         tipo_e_activation_source: `${CRM_WELCOME_SOURCE_TAG}_followup`,
       });
@@ -428,7 +432,7 @@ async function trySendCrmWaWelcomeAfterName({ chatId, customerId, phoneRaw }) {
       /* ignore */
     }
     log.warn({ status: res.status, to }, "crm_welcome_followup: Wasender no OK");
-    return { ok: false, outcome: "send_failed", httpStatus: res.status };
+    return { ok: false, outcome: "send_failed", httpStatus: typeof res.status === "number" ? res.status : 0 };
   }
 
   try {
@@ -441,7 +445,7 @@ async function trySendCrmWaWelcomeAfterName({ chatId, customerId, phoneRaw }) {
       phone_e164: to,
       phone_source: null,
       outcome: "success",
-      http_status: res.status,
+      http_status: typeof res.status === "number" ? res.status : null,
       wasender_msg_id: Number.isFinite(msgId) ? msgId : null,
       response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
       text_preview: preview,
@@ -499,6 +503,7 @@ async function trySendCrmWaAskName({ phoneRaw }) {
     apiKey: cfg.apiKey,
     to,
     text,
+    messageType: "MARKETING",
   });
 
   const msgId =
@@ -515,10 +520,10 @@ async function trySendCrmWaAskName({ phoneRaw }) {
       phone_e164: to,
       phone_source: null,
       outcome: res.ok ? "success" : "api_error",
-      http_status: res.status,
+      http_status: typeof res.status === "number" ? res.status : null,
       wasender_msg_id: res.ok && Number.isFinite(msgId) ? msgId : null,
       response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
-      error_message: res.ok ? null : `HTTP ${res.status}`,
+      error_message: res.ok ? null : (res.reason ? `policy:${res.reason}` : `HTTP ${res.status}`),
       text_preview: preview,
       tipo_e_activation_source: `${CRM_WELCOME_SOURCE_TAG}_ask_name`,
     });
@@ -529,7 +534,7 @@ async function trySendCrmWaAskName({ phoneRaw }) {
     return { ok: true, outcome: "sent" };
   }
   log.warn({ status: res.status, to }, "crm_wa_ask_name: Wasender no OK");
-  return { ok: false, outcome: "send_failed", httpStatus: res.status };
+  return { ok: false, outcome: "send_failed", httpStatus: typeof res.status === "number" ? res.status : 0 };
 }
 
 /**
@@ -570,6 +575,8 @@ async function trySendCrmWaWelcomeNameConfirmation({ chatId, customerId, phoneRa
     apiKey: cfg.apiKey,
     to,
     text,
+    messageType: "MARKETING",
+    customerId: custId,
   });
 
   const msgId =
@@ -596,15 +603,15 @@ async function trySendCrmWaWelcomeNameConfirmation({ chatId, customerId, phoneRa
         phone_e164: to,
         phone_source: null,
         outcome: "api_error",
-        http_status: res.status,
+        http_status: typeof res.status === "number" ? res.status : null,
         response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
-        error_message: `HTTP ${res.status}`,
+        error_message: res.reason ? `policy:${res.reason}` : `HTTP ${res.status}`,
         text_preview: preview,
         tipo_e_activation_source: `${CRM_WELCOME_SOURCE_TAG}_confirm`,
       });
     } catch (_e) { /* ignore */ }
     log.warn({ status: res.status, to }, "crm_welcome_confirm: Wasender no OK");
-    return { ok: false, outcome: "send_failed", httpStatus: res.status };
+    return { ok: false, outcome: "send_failed", httpStatus: typeof res.status === "number" ? res.status : 0 };
   }
 
   try {
@@ -617,7 +624,7 @@ async function trySendCrmWaWelcomeNameConfirmation({ chatId, customerId, phoneRa
       phone_e164: to,
       phone_source: null,
       outcome: "success",
-      http_status: res.status,
+      http_status: typeof res.status === "number" ? res.status : null,
       wasender_msg_id: Number.isFinite(msgId) ? msgId : null,
       response_body: res.bodyText ? res.bodyText.slice(0, 8000) : null,
       text_preview: preview,

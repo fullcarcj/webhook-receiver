@@ -57,7 +57,7 @@ async function handle(normalized) {
       return;
     }
 
-    // 2. Deduplicación: si ya existe en crm_messages, marcar completed y salir
+    // 2. Deduplicación: fila creada solo por este pipeline (messages.js no inserta media entrante).
     const { rows: existing } = await pool.query(
       `SELECT id FROM crm_messages WHERE external_message_id = $1 LIMIT 1`,
       [normalized.messageId]

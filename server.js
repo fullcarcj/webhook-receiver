@@ -2390,8 +2390,8 @@ const server = http.createServer(async (req, res) => {
     const lim = url.searchParams.get("limit");
     const payloadPreviewRaw = Number(url.searchParams.get("payload_chars"));
     const payloadPreviewLimit = Number.isFinite(payloadPreviewRaw)
-      ? Math.min(Math.max(payloadPreviewRaw, 120), 30000)
-      : 3000;
+      ? Math.min(Math.max(payloadPreviewRaw, 120), 2_000_000)
+      : null;
     let items;
     try {
       items = await listWasenderWebhookEvents(lim, 2000);
@@ -2407,7 +2407,15 @@ const server = http.createServer(async (req, res) => {
     }
     const hookRows = items
       .map((row) => {
-        const preview = JSON.stringify(row.data).slice(0, payloadPreviewLimit);
+        let payloadText;
+        try {
+          payloadText = JSON.stringify(row.data, null, 2);
+        } catch (_e) {
+          payloadText = String(row.data);
+        }
+        const truncated =
+          payloadPreviewLimit != null && payloadText.length > payloadPreviewLimit;
+        const preview = truncated ? payloadText.slice(0, payloadPreviewLimit) : payloadText;
         return `<tr>
   <td>${escapeHtml(row.id)}</td>
   <td class="muted">${escapeHtml(row.received_at)}</td>
@@ -2425,7 +2433,7 @@ const server = http.createServer(async (req, res) => {
    }</td>
    <td>${escapeHtml(row.media_pipeline_status || "—")}</td>
    <td>${escapeHtml(row.media_pipeline_detail || "—")}</td>
-  <td><pre class="payload">${escapeHtml(preview)}${preview.length >= payloadPreviewLimit ? "…" : ""}</pre></td>
+  <td><pre class="payload">${escapeHtml(preview)}${truncated ? "…" : ""}</pre></td>
 </tr>`;
       })
       .join("");
@@ -2445,7 +2453,7 @@ const server = http.createServer(async (req, res) => {
     th { background: #1e2732; }
     tr:nth-child(even) td { background: #192734; }
     .muted { color: #8b98a5; font-size: 0.8rem; }
-    pre.payload { margin: 0; max-height: 100px; overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
+    pre.payload { margin: 0; max-height: min(70vh, 720px); overflow: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-word; color: #c4cfda; }
   </style>
 </head>
 <body>
@@ -2454,7 +2462,7 @@ const server = http.createServer(async (req, res) => {
       WEBHOOK_PATH
     )}</code> que Mercado Libre (JSON con <code>event</code>, sin <code>topic</code>/<code>resource</code> ML) o por rutas dedicadas: <code>${escapeHtml(
       Array.from(getWasenderWebhookPostPaths()).join(", ")
-    )}</code>. Tabla <code>wasender_webhook_events</code>. NDJSON: <code>wasender-webhook.log</code>. Firma: env <code>WASENDER_WEBHOOK_SECRET</code> o <code>WASENDER_X_WEBHOOK_SIGNATURE</code> (mismo valor que el Webhook Secret del panel) → cabecera <code>X-Webhook-Signature</code>. Vista payload: <code>${payloadPreviewLimit}</code> chars (ajustable con <code>?payload_chars=5000</code>).</p>
+    )}</code>. Tabla <code>wasender_webhook_events</code>. NDJSON: <code>wasender-webhook.log</code>. Firma: env <code>WASENDER_WEBHOOK_SECRET</code> o <code>WASENDER_X_WEBHOOK_SIGNATURE</code> (mismo valor que el Webhook Secret del panel) → cabecera <code>X-Webhook-Signature</code>. <strong>Payload:</strong> por defecto se muestra el JSON completo formateado (columna con scroll). Para truncar: <code>?payload_chars=8000</code> (máx. 2M). JSON crudo: <code>?format=json</code>.</p>
   <p class="lead"><strong>Qué permite tener los hooks (según documentación Wasender):</strong></p>
   <ul class="potential">
     <li><strong>Mensajes</strong> — entrantes/salientes (<code>messages.received</code>, <code>messages.upsert</code>), <strong>estados</strong> entregado/leído (<code>messages.update</code>), borrados, reacciones; enlazar con <code>msgId</code> de envíos API.</li>
@@ -2463,7 +2471,7 @@ const server = http.createServer(async (req, res) => {
     <li><strong>Uso práctico</strong> — confirmar entrega de tipo E/F, automatizar respuestas a texto entrante, métricas, evitar doble envío cuando el usuario ya respondió por WhatsApp.</li>
   </ul>
   <table>
-    <thead><tr><th>id</th><th>Recibido</th><th>event</th><th>firma OK</th><th>has_media</th><th>media_type</th><th>Firebase URL</th><th>pipeline_status</th><th>pipeline_detail</th><th>payload (vista)</th></tr></thead>
+    <thead><tr><th>id</th><th>Recibido</th><th>event</th><th>firma OK</th><th>has_media</th><th>media_type</th><th>Firebase URL</th><th>pipeline_status</th><th>pipeline_detail</th><th>payload (completo)</th></tr></thead>
     <tbody>${hookRows || '<tr><td colspan="10">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>

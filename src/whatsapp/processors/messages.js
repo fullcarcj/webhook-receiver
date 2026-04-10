@@ -182,6 +182,16 @@ async function saveMessageAndUpdateChat(client, { chatId, customerId, normalized
     );
     return;
   }
+  // Inbound image/audio/video/document/sticker: la fila en crm_messages la crea
+  // `processors/media.js` + mediaSaver (URL Firebase, transcripción, etc.).
+  // Si insertáramos aquí un stub con el mismo external_message_id, el media processor
+  // haría already_saved_dedup y no descargaría ni transcribiría (2.º, 3.er mensaje, …).
+  if (eventType === "messages.received") {
+    const t = String(normalized.type || "text").toLowerCase();
+    if (["image", "audio", "video", "document", "sticker"].includes(t)) {
+      return;
+    }
+  }
   const pri = isPriority(normalized);
   const ins = await client.query(
     `INSERT INTO crm_messages

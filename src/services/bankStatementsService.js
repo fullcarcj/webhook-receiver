@@ -91,10 +91,18 @@ async function listBankStatements(p) {
             bs.balance_after::text AS balance_after,
             bs.payment_type,
             bs.reconciliation_status::text AS reconciliation_status,
+            rl.order_id AS sales_order_id,
             bs.row_hash,
             bs.created_at
      FROM bank_statements bs
      INNER JOIN bank_accounts ba ON ba.id = bs.bank_account_id
+     LEFT JOIN LATERAL (
+       SELECT r.order_id
+       FROM reconciliation_log r
+       WHERE r.bank_statement_id = bs.id
+       ORDER BY r.created_at DESC, r.id DESC
+       LIMIT 1
+     ) rl ON TRUE
      WHERE ${whereSql}
      ORDER BY bs.tx_date DESC, bs.id DESC
      LIMIT $${n++} OFFSET $${n++}`,

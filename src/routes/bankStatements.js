@@ -99,6 +99,16 @@ function formatTxDate(row) {
   }
 }
 
+function formatAmountEs(value) {
+  if (value == null || String(value).trim() === "") return "";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  return n.toLocaleString("es-VE", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 /**
  * GET /statements?k=ADMIN_SECRET — tabla HTML (mismos filtros que la API).
  */
@@ -188,8 +198,9 @@ async function handleStatementsHtmlPage(req, res, url) {
   <td>${escapeHtml(r.reference_number || "")}</td>
   <td class="desc">${escapeHtml(r.description || "")}</td>
   <td>${escapeHtml(r.tx_type || "")}</td>
-  <td class="num">${escapeHtml(r.amount != null ? String(r.amount) : "")}</td>
+  <td class="num">${escapeHtml(formatAmountEs(r.amount))}</td>
   <td>${escapeHtml(r.reconciliation_status || "")}</td>
+  <td>${escapeHtml(r.sales_order_id != null ? String(r.sales_order_id) : "")}</td>
 </tr>`
     )
     .join("\n");
@@ -247,7 +258,7 @@ async function handleStatementsHtmlPage(req, res, url) {
     .map((b) => {
       const amt =
         b.balance_after != null && String(b.balance_after).trim() !== ""
-          ? escapeHtml(String(b.balance_after))
+          ? escapeHtml(formatAmountEs(b.balance_after))
           : "—";
       const cur = escapeHtml((b.account_currency || "VES").trim());
       const acct = escapeHtml(b.account_number || "");
@@ -270,11 +281,11 @@ async function handleStatementsHtmlPage(req, res, url) {
   <table>
     <thead>
       <tr>
-        <th>Fecha</th><th>Cuenta</th><th>Ref.</th><th>Descripción</th><th>Tipo</th><th>Monto</th><th>Conciliación</th>
+        <th>Fecha</th><th>Cuenta</th><th>Ref.</th><th>Descripción</th><th>Tipo</th><th>Monto</th><th>Conciliación</th><th>Sales ID</th>
       </tr>
     </thead>
     <tbody>
-      ${rows.length ? rowsHtml : '<tr><td colspan="7">Sin filas</td></tr>'}
+      ${rows.length ? rowsHtml : '<tr><td colspan="8">Sin filas</td></tr>'}
     </tbody>
   </table>
   <p class="muted">JSON: misma URL con <code>?format=json</code>. API: <code>GET /api/bank/statements?k=…</code> (o cabecera <code>X-Admin-Secret</code>).</p>

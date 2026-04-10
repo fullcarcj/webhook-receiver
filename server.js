@@ -2219,10 +2219,19 @@ const server = http.createServer(async (req, res) => {
       const extractionBadge = hasExtracted
         ? `<span style="display:inline-block;padding:0.1rem 0.45rem;border-radius:4px;font-size:0.75rem;font-weight:600;background:#003920;color:#00d395">OK</span>`
         : `<span style="display:inline-block;padding:0.1rem 0.45rem;border-radius:4px;font-size:0.75rem;font-weight:600;background:#3b1219;color:#f4212e" title="Gemini no extrajo datos — API key, límite, o imagen ilegible">FALLÓ</span>`;
+      const st = String(r.statement_status || "").toUpperCase();
+      let stmtStatusStyle;
+      if (st === "MATCHED") {
+        stmtStatusStyle = "background:#003920;color:#00d395;border:1px solid #00d395";
+      } else if (st === "UNMATCHED") {
+        stmtStatusStyle = "background:#3d0000;color:#ff1744;border:1px solid #ff1744;font-weight:800";
+      } else {
+        stmtStatusStyle = "background:#2a1f00;color:#f5a623;border:1px solid #f5a623";
+      }
       const stmtCell = r.statement_id != null
-        ? `<span style="display:inline-flex;align-items:center;gap:.3rem">
+        ? `<span style="display:inline-flex;align-items:center;gap:.35rem;flex-wrap:wrap">
              <span style="display:inline-block;padding:0.1rem 0.4rem;border-radius:4px;font-size:0.72rem;font-weight:700;background:#0c2a3a;color:#1d9bf0">#${escapeHtml(String(r.statement_id))}</span>
-             <span style="font-size:0.7rem;color:${r.statement_status === "MATCHED" ? "#00d395" : "#f5a623"}">${escapeHtml(String(r.statement_status || ""))}</span>
+             <span style="display:inline-block;padding:0.12rem 0.45rem;border-radius:4px;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;${stmtStatusStyle}">${escapeHtml(String(r.statement_status || "—"))}</span>
            </span>`
         : '<span style="color:#38444d;font-size:0.72rem">—</span>';
       return `<tr>

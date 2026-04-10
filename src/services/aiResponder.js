@@ -430,6 +430,15 @@ async function processOneMessage(message) {
     return;
   }
 
+  const { rows: alreadySent } = await pool.query(
+    `SELECT id FROM crm_messages WHERE id = $1 AND ai_reply_status = 'ai_replied'`,
+    [messageId]
+  );
+  if (alreadySent.length) {
+    log.warn({ messageId }, "ai_responder: mensaje ya enviado — skip anti-spam");
+    return;
+  }
+
   const sendRes = await sendAiReplyToCustomer({
     phoneDigits: phone,
     text: result.replyText,

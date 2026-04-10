@@ -1656,6 +1656,199 @@ const server = http.createServer(async (req, res) => {
   if (await handleSseApiRequest(req, res, url)) return;
   if (await handleSseStatsRequest(req, res, url)) return;
 
+  /** Monitor de eventos en tiempo real — tabla HTML con SSE integrado */
+  if (req.method === "GET" && (url.pathname === "/monitor" || url.pathname === "/monitor/")) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><meta charset=\"utf-8\"><p>Define <code>ADMIN_SECRET</code> y reinicia.</p>");
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><meta charset=\"utf-8\"><p>Acceso denegado. Usa <code>/monitor?k=TU_CLAVE</code>.</p>");
+      return;
+    }
+    const monitorHtml = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Monitor · Solomotor3k</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:system-ui,Segoe UI,sans-serif;background:#0f1419;color:#e7e9ea;min-height:100vh}
+    header{display:flex;align-items:center;gap:1rem;padding:1rem 1.5rem;border-bottom:1px solid #38444d;background:#15202b}
+    header h1{font-size:1rem;font-weight:700;letter-spacing:.02em}
+    #dot{width:10px;height:10px;border-radius:50%;background:#f4212e;flex-shrink:0;transition:background .3s}
+    #dot.ok{background:#00d395}
+    #status{font-size:.8rem;color:#71767b}
+    #counter{margin-left:auto;font-size:.8rem;color:#71767b}
+    main{padding:1rem 1.5rem;max-width:900px}
+    #empty{text-align:center;padding:4rem;color:#38444d;font-size:.9rem}
+    .card{border-radius:8px;padding:.75rem 1rem;margin-bottom:.6rem;border-left:4px solid #38444d;background:#15202b;animation:slide-in .25s ease}
+    @keyframes slide-in{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+    .card.receipt_detected   {border-color:#1d9bf0}
+    .card.payment_confirmed  {border-color:#00d395}
+    .card.payment_manual_review{border-color:#f5a623}
+    .card.payment_overdue    {border-color:#f4212e}
+    .card.wa_session_status  {border-color:#9b59b6}
+    .card.connected          {border-color:#38444d}
+    .card-header{display:flex;align-items:center;gap:.6rem;margin-bottom:.35rem}
+    .badge{display:inline-block;padding:.1rem .45rem;border-radius:4px;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+    .badge.receipt_detected  {background:#0c2a3a;color:#1d9bf0}
+    .badge.payment_confirmed {background:#003920;color:#00d395}
+    .badge.payment_manual_review{background:#2a1f00;color:#f5a623}
+    .badge.payment_overdue   {background:#3b1219;color:#f4212e}
+    .badge.wa_session_status {background:#1e0a2e;color:#9b59b6}
+    .badge.connected         {background:#1e2732;color:#71767b}
+    .ts{font-size:.72rem;color:#71767b;margin-left:auto}
+    .fields{display:flex;flex-wrap:wrap;gap:.4rem .8rem;font-size:.78rem}
+    .field label{color:#71767b;font-size:.7rem;display:block;margin-bottom:.05rem}
+    .field span{color:#e7e9ea;font-weight:600}
+    .msg{font-size:.78rem;color:#8b98a5;margin-top:.25rem}
+    #feed{list-style:none}
+    .tools{display:flex;gap:.6rem;align-items:center;margin-bottom:.75rem;flex-wrap:wrap}
+    .tools button{padding:.3rem .7rem;border-radius:5px;border:1px solid #38444d;background:#1e2732;color:#e7e9ea;cursor:pointer;font-size:.78rem}
+    .tools button:hover{background:#2d3c47}
+    .filter-btn.active{border-color:#1d9bf0;color:#1d9bf0}
+  </style>
+</head>
+<body>
+<header>
+  <div id="dot"></div>
+  <h1>Monitor en tiempo real</h1>
+  <span id="status">Conectando…</span>
+  <span id="counter">0 eventos</span>
+</header>
+<main>
+  <div class="tools">
+    <button class="filter-btn active" data-filter="all">Todos</button>
+    <button class="filter-btn" data-filter="receipt_detected">Comprobantes</button>
+    <button class="filter-btn" data-filter="payment_confirmed">Confirmados</button>
+    <button class="filter-btn" data-filter="payment_manual_review">Manual</button>
+    <button class="filter-btn" data-filter="payment_overdue">Vencidos</button>
+    <button id="clearBtn">🗑 Limpiar</button>
+  </div>
+  <ul id="feed"></ul>
+  <p id="empty">Esperando eventos…</p>
+</main>
+<script>
+  const TOKEN   = ${JSON.stringify(k)};
+  const feed    = document.getElementById("feed");
+  const dot     = document.getElementById("dot");
+  const status  = document.getElementById("status");
+  const counter = document.getElementById("counter");
+  const empty   = document.getElementById("empty");
+  let   total   = 0;
+  let   filter  = "all";
+
+  const LABELS = {
+    receipt_detected:    "📄 Comprobante detectado",
+    payment_confirmed:   "✅ Pago confirmado",
+    payment_manual_review: "⚠️ Revisión manual",
+    payment_overdue:     "🔴 Pago vencido",
+    wa_session_status:   "📡 Sesión WA",
+    connected:           "🔗 Conectado",
+  };
+
+  const FIELDS = {
+    receipt_detected:    ["amount_bs","reference","bank","confidence","customer_id"],
+    payment_confirmed:   ["amount_bs","order_id","match_level","matched_via","customer_phone"],
+    payment_manual_review:["amount_bs","order_id","matched_via"],
+    payment_overdue:     ["amount_bs","order_id","hours_old"],
+    wa_session_status:   ["status","is_critical"],
+  };
+
+  function fmt(key, val) {
+    if (val == null || val === "") return null;
+    if (key === "amount_bs") return "Bs " + Number(val).toLocaleString("es-VE");
+    if (key === "confidence") return Math.round(Number(val)*100) + "%";
+    return String(val);
+  }
+
+  function addCard(eventType, data) {
+    total++;
+    counter.textContent = total + " evento" + (total !== 1 ? "s" : "");
+    empty.style.display = "none";
+
+    const ts  = data.timestamp ? new Date(data.timestamp).toLocaleTimeString("es-VE") : "";
+    const keys = FIELDS[eventType] || Object.keys(data).filter(k => k !== "timestamp" && k !== "message");
+    const fieldsHtml = keys.map(k => {
+      const v = fmt(k, data[k]);
+      if (!v) return "";
+      return \`<div class="field"><label>\${k.replace(/_/g," ")}</label><span>\${v}</span></div>\`;
+    }).join("");
+
+    const li = document.createElement("li");
+    li.className = "card " + eventType;
+    li.dataset.type = eventType;
+    li.innerHTML = \`
+      <div class="card-header">
+        <span class="badge \${eventType}">\${LABELS[eventType] || eventType}</span>
+        <span class="ts">\${ts}</span>
+      </div>
+      <div class="fields">\${fieldsHtml}</div>
+      \${data.message ? \`<p class="msg">\${data.message}</p>\` : ""}
+    \`;
+
+    if (filter !== "all" && filter !== eventType) li.style.display = "none";
+    feed.prepend(li);
+    // Mantener máximo 150 tarjetas
+    while (feed.children.length > 150) feed.removeChild(feed.lastChild);
+  }
+
+  // EventSource
+  const src = new EventSource("/api/events?token=" + encodeURIComponent(TOKEN) + "&user=monitor");
+
+  src.onopen = () => {
+    dot.className = "ok";
+    status.textContent = "Conectado";
+  };
+
+  src.onerror = () => {
+    dot.className = "";
+    status.textContent = "Reconectando…";
+  };
+
+  const ALL_EVENTS = ["connected","receipt_detected","payment_confirmed",
+    "payment_manual_review","payment_overdue","wa_session_status",
+    "order_status_changed","cash_payment_submitted","cash_payment_approved",
+    "cash_payment_rejected","cash_loss_alert"];
+
+  ALL_EVENTS.forEach(ev => {
+    src.addEventListener(ev, e => {
+      try { addCard(ev, JSON.parse(e.data)); } catch(_) {}
+    });
+  });
+
+  // Filtros
+  document.querySelectorAll(".filter-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      filter = btn.dataset.filter;
+      document.querySelectorAll("#feed li").forEach(li => {
+        li.style.display = (filter === "all" || li.dataset.type === filter) ? "" : "none";
+      });
+    });
+  });
+
+  document.getElementById("clearBtn").addEventListener("click", () => {
+    feed.innerHTML = "";
+    total = 0;
+    counter.textContent = "0 eventos";
+    empty.style.display = "";
+  });
+</script>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(monitorHtml);
+    return;
+  }
+
   if (handleCrmApiPreflight(req, res, url)) {
     return;
   }
@@ -6389,6 +6582,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Banesco JSON conexión: http://localhost:${PORT}/banesco-connection?k=TU_ADMIN_SECRET`);
     console.log(`Extractos bank_statements: http://localhost:${PORT}/statements?k=TU_ADMIN_SECRET`);
     console.log(`Comprobantes pago (tabla): http://localhost:${PORT}/payment-attempts?k=TU_ADMIN_SECRET&today=1`);
+    console.log(`Monitor tiempo real (SSE): http://localhost:${PORT}/monitor?k=TU_ADMIN_SECRET`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
     console.log(`Órdenes ML (sync-orders): http://localhost:${PORT}/ordenes-ml?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes pack órdenes (BD): http://localhost:${PORT}/mensajes-pack-orden?k=TU_ADMIN_SECRET`);

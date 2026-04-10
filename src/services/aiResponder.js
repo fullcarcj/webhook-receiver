@@ -3,14 +3,22 @@
 /**
  * Piloto: respuesta automática vía GROQ_LLAMA (callChatBasic).
  * Cola: crm_messages.ai_reply_status — procesada por aiResponderWorker (SKIP LOCKED).
+ * Convención negocio: **Tipo M** — mensajes automáticos CRM bajo prompt interno
+ * `prompt_ai_responder_pilot` (SYSTEM_PROMPT en este archivo). Ver `MESSAGE_TYPE_M` en ml-message-types.js.
  */
 
 const pino = require("pino");
 const { pool } = require("../../db");
 const { callChatBasic } = require("./aiGateway");
 const { emit } = require("./sseService");
+const { MESSAGE_TYPE_M } = require("../../ml-message-types");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder" });
+
+/** Prefijo en `ai_response_log.provider_used` para filtrar auditoría Tipo M. */
+function providerAuditTipoM(gatewayId) {
+  return `${MESSAGE_TYPE_M}|${gatewayId != null && String(gatewayId).trim() ? String(gatewayId).trim() : "n/a"}`;
+}
 
 function isEnabled() {
   return String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
@@ -326,7 +334,7 @@ async function processOneMessage(message) {
       reply_text: null,
       confidence: null,
       reasoning: "Sin teléfono en customers",
-      provider_used: null,
+      provider_used: providerAuditTipoM("sin_gateway"),
       tokens_used: 0,
       action_taken: "skipped_inbound",
       error_message: null,
@@ -375,7 +383,7 @@ async function processOneMessage(message) {
       reply_text: null,
       confidence: result.confidence,
       reasoning: result.reasoning,
-      provider_used: result.provider,
+      provider_used: providerAuditTipoM(result.provider),
       tokens_used: 0,
       action_taken: "queued_review",
       error_message: null,
@@ -413,7 +421,7 @@ async function processOneMessage(message) {
       reply_text: result.replyText,
       confidence: result.confidence,
       reasoning: result.reasoning,
-      provider_used: result.provider,
+      provider_used: providerAuditTipoM(result.provider),
       tokens_used: 0,
       action_taken: "queued_review",
       error_message: null,
@@ -466,12 +474,15 @@ async function processOneMessage(message) {
       reply_text: result.replyText,
       confidence: result.confidence,
       reasoning: result.reasoning,
-      provider_used: result.provider,
+      provider_used: providerAuditTipoM(result.provider),
       tokens_used: 0,
       action_taken: "sent",
       error_message: null,
     });
-    log.info({ messageId, confidence: result.confidence }, "ai_responder: mensaje procesado");
+    log.info(
+      { messageId, confidence: result.confidence, message_kind: "M", prompt: "prompt_ai_responder_pilot" },
+      "ai_responder: mensaje procesado tipo M"
+    );
     return;
   }
 
@@ -508,7 +519,7 @@ async function processOneMessage(message) {
     reply_text: result.replyText,
     confidence: result.confidence,
     reasoning: result.reasoning,
-    provider_used: result.provider,
+    provider_used: providerAuditTipoM(result.provider),
     tokens_used: 0,
     action_taken: "error",
     error_message: errDetail,
@@ -533,4 +544,5 @@ module.exports = {
   sendAiReplyToCustomer,
   extractInboundText,
   logAiResponse,
+  providerAuditTipoM,
 };

@@ -3,7 +3,7 @@
 const pino = require("pino");
 const { pool } = require("../../db");
 const { ensureAdmin } = require("../middleware/adminAuth");
-const { sendAiReplyToCustomer, logAiResponse } = require("../services/aiResponder");
+const { sendAiReplyToCustomer, logAiResponse, providerAuditTipoM } = require("../services/aiResponder");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder_api" });
 
@@ -116,7 +116,7 @@ async function handleApprove(req, res, id) {
     reply_text: text,
     confidence: null,
     reasoning: "approved_by_human",
-    provider_used: "manual_approve",
+    provider_used: providerAuditTipoM("manual_approve"),
     tokens_used: 0,
     action_taken: "approved_by_human",
     error_message: null,
@@ -173,7 +173,7 @@ async function handleOverride(req, res, id, body) {
     reply_text: replyText,
     confidence: null,
     reasoning: body.sent_by ? `override por ${body.sent_by}` : "override",
-    provider_used: "human_override",
+    provider_used: providerAuditTipoM("human_override"),
     tokens_used: 0,
     action_taken: "overridden",
     error_message: null,
@@ -208,7 +208,9 @@ async function handleAiResponderRequest(req, res, url) {
       stats = await getStats();
       const p = await pool.query(
         `SELECT id, chat_id, customer_id, ai_reply_status, ai_confidence,
-                LEFT(COALESCE(ai_reply_text, content::text), 120) AS preview,
+                LEFT(COALESCE(ai_reply_text, content::text), 100) AS preview,
+                LEFT(COALESCE(ai_reasoning, ''), 220) AS evidencia_proceso,
+                COALESCE(ai_provider, '') AS modelo_gateway,
                 created_at
          FROM crm_messages
          WHERE ai_reply_status = 'needs_human_review'
@@ -217,7 +219,13 @@ async function handleAiResponderRequest(req, res, url) {
       );
       pending = p.rows;
       const lg = await pool.query(
-        `SELECT id, crm_message_id, action_taken, confidence, LEFT(reply_text, 80) AS reply_preview, created_at
+        `SELECT id, crm_message_id, action_taken, confidence,
+                COALESCE(provider_used, '') AS provider_used,
+                LEFT(COALESCE(reasoning, ''), 160) AS evidencia_razon,
+                LEFT(COALESCE(error_message, ''), 140) AS evidencia_error,
+                LEFT(COALESCE(input_text, ''), 72) AS input_prev,
+                LEFT(COALESCE(reply_text, ''), 72) AS reply_preview,
+                created_at
          FROM ai_response_log
          ORDER BY created_at DESC
          LIMIT 40`
@@ -229,35 +237,62 @@ async function handleAiResponderRequest(req, res, url) {
       return true;
     }
     const base = `/ai-responder?k=${encodeURIComponent(k)}`;
+    const kEnc = encodeURIComponent(k);
+    const monitoresHtml = [
+      ["/monitor", "Monitor tiempo real (SSE)"],
+      ["/hooks", "Webhook events (ML + mixto)"],
+      ["/wasender-webhooks", "Eventos Wasender crudos"],
+      ["/envios-whatsapp-tipo-e", "Log envíos WA Mercado (E/F)"],
+      ["/envios-tipos-abc", "Log tipos A/B/C (ML)"],
+      ["/media-logs", "Media CRM / transcripciones"],
+      ["/payment-attempts", "Comprobantes de pago"],
+      ["/preguntas-ia-auto-log", "IA auto preguntas ML (tipo D)"],
+      ["/banesco", "Banesco estado / movimientos"],
+      ["/statements", "Extractos banco"],
+    ]
+      .map(
+        ([path, label]) =>
+          `<li><a href="${path}?k=${kEnc}">${escapeHtml(label)}</a> <span class="muted"><code>${path}?k=…</code></span></li>`
+      )
+      .join("\n");
     const html = `<!DOCTYPE html>
 <html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>AI Responder — piloto</title>
+<title>AI Responder — Tipo M (piloto)</title>
 <style>
-body{font-family:system-ui,sans-serif;background:#0f1419;color:#e7e9ea;margin:2rem;max-width:1100px}
+body{font-family:system-ui,sans-serif;background:#0f1419;color:#e7e9ea;margin:2rem;max-width:1200px}
 h1{font-size:1.1rem}a{color:#1d9bf0}.card{background:#15202b;border:1px solid #38444d;border-radius:8px;padding:1rem;margin:1rem 0}
-.muted{color:#71767b;font-size:.85rem} table{border-collapse:collapse;width:100%;font-size:.78rem}
-th,td{border:1px solid #38444d;padding:.35rem;text-align:left}
+.muted{color:#71767b;font-size:.85rem} table{border-collapse:collapse;width:100%;font-size:.72rem}
+th,td{border:1px solid #38444d;padding:.35rem;text-align:left;vertical-align:top}
 th{background:#1e2732}.badge{padding:.1rem .35rem;border-radius:4px;font-size:.72rem}
 .badge.on{background:#003920;color:#00d395}.badge.off{background:#3b1219;color:#f4212e}
+.badge.m{background:#1a237e;color:#c5cae9}
+tr.row-fail{background:#2a1515}
+td.evid{font-size:.68rem;max-width:14rem;word-break:break-word}
 </style></head><body>
-<h1>🤖 AI Responder (piloto)</h1>
-<p class="muted">Activar worker: <code>AI_RESPONDER_ENABLED=1</code> · umbral <code>AI_RESPONDER_CONFIDENCE_MIN</code> (default 85)</p>
+<h1>🤖 AI Responder — <span class="badge m">Tipo M</span></h1>
+<p class="muted">Mensajes automáticos CRM del piloto IA (convención interna <code>prompt_ai_responder_pilot</code> en código). Worker: <code>AI_RESPONDER_ENABLED=1</code> · umbral <code>AI_RESPONDER_CONFIDENCE_MIN</code> (default 85).</p>
 <p><span class="badge ${stats.ai_responder_enabled ? "on" : "off"}">${stats.ai_responder_enabled ? "WORKER HABILITADO" : "WORKER OFF"}</span>
- · Migración: <code>npm run db:ai-responder</code></p>
+ · Migración: <code>npm run db:ai-responder</code> · En Render, buscar log: <code>ai_responder: mensaje procesado tipo M</code></p>
 <div class="card">
   <strong>Hoy (crm_messages con estado IA)</strong>
   <pre class="muted">${escapeHtml(JSON.stringify(stats.today_messages, null, 2))}</pre>
-  <strong>Log acciones hoy</strong>
+  <strong>Log acciones hoy (ai_response_log)</strong>
   <pre class="muted">${escapeHtml(JSON.stringify(stats.today_log_by_action, null, 2))}</pre>
+  <p class="muted">Filas Tipo M llevan <code>provider_used</code> con prefijo <code>tipo_m_ai_responder_pilot|</code> (auditoría / SQL).</p>
 </div>
-<h2>API JSON</h2>
+<div class="card">
+  <strong>Otros monitores HTML</strong> (misma clave <code>?k=</code> / <code>ADMIN_SECRET</code>)
+  <ul class="muted" style="margin:0.5rem 0 0 1rem;line-height:1.5">${monitoresHtml}</ul>
+</div>
+<h2>API JSON (este módulo)</h2>
 <ul>
-  <li><a href="/api/ai-responder/stats?k=${encodeURIComponent(k)}">GET /api/ai-responder/stats</a></li>
-  <li><a href="/api/ai-responder/pending?k=${encodeURIComponent(k)}">GET /api/ai-responder/pending</a></li>
-  <li><a href="/api/ai-responder/log?k=${encodeURIComponent(k)}">GET /api/ai-responder/log</a></li>
+  <li><a href="/api/ai-responder/stats?k=${kEnc}">GET /api/ai-responder/stats</a></li>
+  <li><a href="/api/ai-responder/pending?k=${kEnc}">GET /api/ai-responder/pending</a></li>
+  <li><a href="/api/ai-responder/log?k=${kEnc}">GET /api/ai-responder/log</a></li>
 </ul>
 <h2>Revisión humana pendiente</h2>
-<table><thead><tr><th>id</th><th>chat</th><th>estado</th><th>conf</th><th>vista</th><th>creado</th><th>aprobar</th></tr></thead><tbody>
+<p class="muted">Columnas <strong>evidencia</strong> y <strong>modelo</strong> ayudan a ver por qué quedó en revisión o falló el envío previo.</p>
+<table><thead><tr><th>id</th><th>chat</th><th>estado</th><th>conf</th><th>vista</th><th class="evid">evidencia / fallo</th><th>modelo</th><th>creado</th><th>aprobar</th></tr></thead><tbody>
 ${pending
   .map(
     (r) => `<tr>
@@ -265,26 +300,36 @@ ${pending
   <td>${escapeHtml(String(r.chat_id))}</td>
   <td>${escapeHtml(String(r.ai_reply_status))}</td>
   <td>${r.ai_confidence ?? "—"}</td>
-  <td>${escapeHtml(r.preview)}</td>
+  <td>${escapeHtml(r.preview || "")}</td>
+  <td class="evid">${escapeHtml(r.evidencia_proceso || "—")}</td>
+  <td>${escapeHtml(r.modelo_gateway || "—")}</td>
   <td>${escapeHtml(String(r.created_at))}</td>
   <td><button type="button" onclick="approve(${r.id})">Enviar sugerencia IA</button></td>
 </tr>`
   )
   .join("")}
 </tbody></table>
-<h2>Último log IA</h2>
-<table><thead><tr><th>id</th><th>msg</th><th>acción</th><th>conf</th><th>respuesta</th><th>hora</th></tr></thead><tbody>
+<h2>Último log IA (Tipo M y acciones)</h2>
+<p class="muted">Filas con error API / envío resaltadas. Columnas de evidencia para depuración.</p>
+<table><thead><tr><th>id</th><th>msg</th><th>acción</th><th>conf</th><th>provider</th><th>entrada</th><th>respuesta</th><th class="evid">razón IA</th><th class="evid">error / API</th><th>hora</th></tr></thead><tbody>
 ${recentLog
-  .map(
-    (r) => `<tr>
+  .map((r) => {
+    const fail =
+      String(r.action_taken || "") === "error" ||
+      (r.evidencia_error && String(r.evidencia_error).trim() !== "");
+    return `<tr class="${fail ? "row-fail" : ""}">
   <td>${r.id}</td>
   <td>${r.crm_message_id ?? "—"}</td>
   <td>${escapeHtml(String(r.action_taken))}</td>
   <td>${r.confidence ?? "—"}</td>
-  <td>${escapeHtml(r.reply_preview)}</td>
+  <td class="evid">${escapeHtml(r.provider_used || "—")}</td>
+  <td class="evid">${escapeHtml(r.input_prev || "—")}</td>
+  <td class="evid">${escapeHtml(r.reply_preview || "—")}</td>
+  <td class="evid">${escapeHtml(r.evidencia_razon || "—")}</td>
+  <td class="evid">${escapeHtml(r.evidencia_error || "—")}</td>
   <td>${escapeHtml(String(r.created_at))}</td>
-</tr>`
-  )
+</tr>`;
+  })
   .join("")}
 </tbody></table>
 <script>
@@ -297,7 +342,7 @@ async function approve(mid) {
   if (j.ok) location.reload();
 }
 </script>
-<p class="muted"><a href="${base}">Recargar</a> · Monitor SSE: <a href="/monitor?k=${encodeURIComponent(k)}">/monitor</a></p>
+<p class="muted"><a href="${base}">Recargar</a> · <a href="/monitor?k=${kEnc}">/monitor</a> (SSE)</p>
 </body></html>`;
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(html);

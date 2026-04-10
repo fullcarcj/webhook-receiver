@@ -29,6 +29,11 @@ function confidenceMin() {
   return Number.isFinite(n) ? n : 85;
 }
 
+/** Si AI_RESPONDER_FORCE_SEND=1 se ignora needs_human y el umbral de confianza. */
+function isForceSend() {
+  return String(process.env.AI_RESPONDER_FORCE_SEND || "").trim() === "1";
+}
+
 const SYSTEM_PROMPT = `Eres el asistente de Solomotor3k, empresa venezolana de repuestos automotrices en Valencia.
 Tono: directo, amable, profesional. Español latinoamericano neutro (sin voseo).
 
@@ -158,7 +163,8 @@ async function generateResponse({ messageId, customerId, chatId, inputText, rece
     const confidence = parseInt(String(parsed.confidence ?? 0), 10);
     const minC = confidenceMin();
     const needsHuman =
-      parsed.needs_human === true || !Number.isFinite(confidence) || confidence < minC;
+      !isForceSend() &&
+      (parsed.needs_human === true || !Number.isFinite(confidence) || confidence < minC);
 
     return {
       replyText: String(parsed.reply_text || "").trim() || null,
@@ -401,6 +407,7 @@ async function processOneMessage(message) {
   }
 
   if (result.needsHuman) {
+    const forceNote = isForceSend() ? " [force_send ignoró needs_human]" : "";
     await pool.query(
       `UPDATE crm_messages
        SET ai_reply_status = 'needs_human_review',
@@ -410,7 +417,7 @@ async function processOneMessage(message) {
            ai_provider = $4,
            ai_processed_at = NOW()
        WHERE id = $5`,
-      [result.replyText, result.confidence, result.reasoning, result.provider, messageId]
+      [result.replyText, result.confidence, result.reasoning + forceNote, result.provider, messageId]
     );
     await logAiResponse(pool, {
       crm_message_id: messageId,
@@ -436,6 +443,13 @@ async function processOneMessage(message) {
       reasoning: result.reasoning,
     });
     return;
+  }
+
+  if (isForceSend()) {
+    log.warn(
+      { messageId, confidence: result.confidence },
+      "ai_responder: AI_RESPONDER_FORCE_SEND=1 — enviando sin revisión humana"
+    );
   }
 
   const { rows: alreadySent } = await pool.query(
@@ -538,6 +552,7 @@ async function processOneMessage(message) {
 module.exports = {
   isEnabled,
   confidenceMin,
+  isForceSend,
   maybeQueueInboundText,
   generateResponse,
   processOneMessage,

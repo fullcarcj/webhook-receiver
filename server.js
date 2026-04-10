@@ -181,7 +181,10 @@ const { handleVehicleApiRequest } = require("./src/handlers/vehicleApiHandler");
 const { handlePurchaseApiRequest } = require("./src/handlers/purchaseApiHandler");
 const { handleSalesApiRequest } = require("./src/handlers/salesApiHandler");
 const { handleDeliveryApiRequest } = require("./src/handlers/deliveryApiHandler");
+const { handlePriceApiRequest } = require("./src/handlers/priceEngineApiHandler");
 const salesService = require("./src/services/salesService");
+const { refreshSettings } = require("./src/services/priceEngineService");
+const { expirePendingRequests } = require("./src/services/priceApprovalService");
 const { handleMediaApiRequest } = require("./src/handlers/mediaApiHandler");
 const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory");
 const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./src/handlers/customerLoyalty");
@@ -1924,6 +1927,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (await handleDeliveryApiRequest(req, res, url)) {
+    return;
+  }
+  if (await handlePriceApiRequest(req, res, url)) {
     return;
   }
 
@@ -6095,6 +6101,14 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   startReconciliationWorker();
   startInventoryWorker();
+  refreshSettings().catch((e) =>
+    console.error("[price_engine] refreshSettings init:", e.message || e)
+  );
+  setInterval(() => {
+    expirePendingRequests().catch((e) =>
+      console.error("[price_approval] expirePendingRequests:", e.message || e)
+    );
+  }, 60_000);
   console.log(`[db] PostgreSQL: ${dbPath}`);
   const forwards = getForwardPostUrls();
   console.log(`Escuchando en http://localhost:${PORT} (0.0.0.0 — todas las interfaces)`);

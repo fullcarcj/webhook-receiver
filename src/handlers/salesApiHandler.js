@@ -61,6 +61,21 @@ const createBodySchema = z.object({
   zone_id: z.number().int().positive().optional(),
 });
 
+const quoteCreateSchema = z.object({
+  source: z.enum(["mostrador", "social_media", "mercadolibre", "ecommerce"]),
+  customer_id: z.number().int().positive().optional(),
+  currency: z.enum(["BS", "USD"]).default("BS").optional(),
+  items: z
+    .array(
+      z.object({
+        sku: z.string().min(1),
+        quantity: z.number().int().positive(),
+        unit_price_usd: z.number().positive(),
+      })
+    )
+    .min(1),
+});
+
 const patchBodySchema = z.object({
   status: z.enum(["paid", "cancelled", "shipped"]),
 });
@@ -225,6 +240,20 @@ async function handleSalesApiRequest(req, res, url) {
         return true;
       }
       const d = parsed.data;
+      try {
+        const { calculatePrice } = require("../services/priceEngineService");
+        const quoteCurrency = "BS";
+        for (const it of d.items || []) {
+          const calc = await calculatePrice({
+            baseUsd: Number(it.unit_price_usd),
+            channel: d.source,
+            customerId: d.customer_id,
+          });
+          it.price_engine = quoteCurrency === "BS" ? calc.prices.price_bs_bcv : calc.prices.price_usd;
+        }
+      } catch (_) {
+        // Motor de precios no bloqueante para createOrder mientras despliegues migraciones.
+      }
       const created = await salesService.createOrder({
         source: d.source,
         customerId: d.customer_id,
@@ -241,6 +270,62 @@ async function handleSalesApiRequest(req, res, url) {
       const code = created.idempotent ? 200 : 201;
       writeJson(res, code, {
         data: created,
+        meta: { timestamp: new Date().toISOString() },
+      });
+      return true;
+    }
+
+    if (req.method === "POST" && pathname === "/api/quotes/create") {
+      if (!ensureAdmin(req, res, url)) return true;
+      let body = {};
+      try {
+        body = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const parsed = safeParse(quoteCreateSchema, body);
+      if (!parsed.ok) {
+        writeJson(res, 422, { error: "validation_error", details: parsed.error.issues });
+        return true;
+      }
+      const d = parsed.data;
+      const { calculatePrice } = require("../services/priceEngineService");
+      const items = [];
+      let total_bs = 0;
+      let total_usd = 0;
+      for (const it of d.items) {
+        const calc = await calculatePrice({
+          baseUsd: Number(it.unit_price_usd),
+          channel: d.source,
+          customerId: d.customer_id,
+        });
+        const unit_bs = Number(calc.prices.price_bs_bcv || calc.prices.price_bs_binance || 0);
+        const unit_usd = Number(calc.prices.price_usd || 0);
+        const line_bs = Number((unit_bs * Number(it.quantity)).toFixed(2));
+        const line_usd = Number((unit_usd * Number(it.quantity)).toFixed(2));
+        total_bs += line_bs;
+        total_usd += line_usd;
+        items.push({
+          sku: it.sku,
+          quantity: it.quantity,
+          base_usd: it.unit_price_usd,
+          unit_price_usd: unit_usd,
+          unit_price_bs: unit_bs,
+          line_total_usd: line_usd,
+          line_total_bs: line_bs,
+          pricing: calc,
+        });
+      }
+      writeJson(res, 201, {
+        data: {
+          source: d.source,
+          customer_id: d.customer_id || null,
+          currency: d.currency || "BS",
+          total_usd: Number(total_usd.toFixed(2)),
+          total_bs: Number(total_bs.toFixed(2)),
+          items,
+        },
         meta: { timestamp: new Date().toISOString() },
       });
       return true;

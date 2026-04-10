@@ -40,9 +40,10 @@ const MESSAGE_TYPE_G = "tipo_g_filemaker_retiro";
 const MESSAGE_TYPE_H = "tipo_h_whatsapp_bienvenida_crm";
 
 /**
- * WhatsApp (CRM): respuesta automática piloto por IA (`src/services/aiResponder.js`).
- * Prompt de sistema en código (convención interna: `prompt_ai_responder_pilot`); envío Wasender
- * desde `sendAiReplyToCustomer`; auditoría principal en `ai_response_log` y estados en `crm_messages`.
+ * WhatsApp (CRM): respuesta automática piloto Tipo M (`src/services/aiResponder.js`).
+ * Mensaje final = plantilla configurable (`AI_RESPONDER_GENERIC_TEMPLATE`) + fragmento contextual
+ * generado por IA (`context_line`); la IA no elige flujo de negocio. Envío Wasender desde
+ * `sendAiReplyToCustomer`. Auditoría: `ai_response_log` + `crm_messages`.
  */
 const MESSAGE_TYPE_M = "tipo_m_ai_responder_pilot";
 

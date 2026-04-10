@@ -1,10 +1,10 @@
 "use strict";
 
 /**
- * Piloto: respuesta automática vía GROQ_LLAMA (callChatBasic).
- * Cola: crm_messages.ai_reply_status — procesada por aiResponderWorker (SKIP LOCKED).
- * Convención negocio: **Tipo M** — mensajes automáticos CRM bajo prompt interno
- * `prompt_ai_responder_pilot` (SYSTEM_PROMPT en este archivo). Ver `MESSAGE_TYPE_M` en ml-message-types.js.
+ * Piloto Tipo M: respuesta **siempre** desde plantilla (`AI_RESPONDER_GENERIC_TEMPLATE`) +
+ * un solo fragmento contextual generado por IA (`context_line`). La IA **no elige flujo**
+ * (no hay needs_human / confianza para ramificar); si falla el modelo, se usa un fallback de contexto.
+ * Cola: crm_messages.ai_reply_status — worker (SKIP LOCKED). Ver `MESSAGE_TYPE_M` en ml-message-types.js.
  */
 
 const pino = require("pino");
@@ -29,33 +29,60 @@ function confidenceMin() {
   return Number.isFinite(n) ? n : 85;
 }
 
-/** Si AI_RESPONDER_FORCE_SEND=1 se ignora needs_human y el umbral de confianza. */
-function isForceSend() {
-  return String(process.env.AI_RESPONDER_FORCE_SEND || "").trim() === "1";
+/** Respuesta fija negocio; placeholders: {{CONTEXTO_IA}}, {{NOMBRE}} (opcional). */
+function defaultGenericTemplate() {
+  const env = process.env.AI_RESPONDER_GENERIC_TEMPLATE;
+  if (env != null && String(env).trim() !== "") return String(env).trim();
+  return (
+    "Hola{{NOMBRE_SALUDO}}. Recibimos tu mensaje sobre {{CONTEXTO_IA}}. " +
+    "Mañana en horario comercial un asesor te atenderá con gusto. Gracias por escribirnos."
+  );
 }
 
-const SYSTEM_PROMPT = `Eres el asistente de Solomotor3k, empresa venezolana de repuestos automotrices en Valencia.
-Tono: directo, amable, profesional. Español latinoamericano neutro (sin voseo).
+/** Solo genera una línea breve que resume o reconoce la consulta; no decide envíos ni ramas. */
+const PROMPT_CONTEXT_LINE = `Eres un asistente de redacción para Solomotor3k (repuestos automotrices, Valencia).
+Tu única tarea: escribir UNA frase corta (máximo 120 caracteres) en español latinoamericano neutro, sin voseo,
+que reconozca de forma genérica el tema de la consulta del cliente (sin inventar precios, stock, fechas ni datos bancarios).
 
-REGLAS FASE 1:
-1. Precios: indica que un asesor confirmará el precio pronto.
-2. Compatibilidad técnica: indica que un técnico ayudará.
-3. Comprobantes de pago: confirma recepción con los datos exactos dados.
-4. NUNCA inventes precios, stock ni fechas de entrega.
-5. Saludos simples: responde breve y cordial.
-6. Si no estás seguro: needs_human true.
+No hagas preguntas de seguimiento. No ofrezcas resolver el caso ahora.
 
-CONTEXTO CLIENTE:
+CONTEXTO CLIENTE (referencia):
 {CUSTOMER_CONTEXT}
 
-COMPROBANTE (si aplica):
-{RECEIPT_CONTEXT}
-
-HISTORIAL RECIENTE:
+HISTORIAL RECIENTE (referencia):
 {CHAT_HISTORY}
 
+MENSAJE O TEMA DEL CLIENTE (principal):
+---
+{USER_MESSAGE}
+---
+
 Responde SOLO JSON válido sin markdown:
-{"reply_text":"...","confidence":90,"reasoning":"...","needs_human":false}`;
+{"context_line":"..."}`;
+
+function applyTipoMTemplate(template, { contextLine, nombre }) {
+  const nom = String(nombre || "").trim().slice(0, 80);
+  const cl = String(contextLine || "tu consulta").trim().slice(0, 200);
+  let t = String(template || defaultGenericTemplate());
+  const nombreSaludo = nom ? `, ${nom.split(/\s+/)[0]}` : "";
+  t = t.replace(/\{\{NOMBRE_SALUDO\}\}/g, nombreSaludo);
+  t = t.replace(/\{\{NOMBRE\}\}/g, nom || "Cliente");
+  t = t.replace(/\{\{CONTEXTO_IA\}\}/g, cl);
+  return t.trim().slice(0, 4000);
+}
+
+async function getCustomerFirstName(customerId) {
+  if (!customerId) return "";
+  try {
+    const { rows } = await pool.query(
+      `SELECT NULLIF(TRIM(SPLIT_PART(COALESCE(full_name, ''), ' ', 1)), '') AS n FROM customers WHERE id = $1`,
+      [customerId]
+    );
+    return rows[0]?.n ? String(rows[0].n) : "";
+  } catch (_) {
+    return "";
+  }
+}
 
 function extractInboundText(row) {
   const c = row.content;
@@ -122,68 +149,67 @@ async function buildChatHistory(chatId) {
   }
 }
 
-function buildReceiptContext(receiptData) {
-  if (!receiptData || typeof receiptData !== "object") return "Sin comprobante en este turno.";
-  const r = receiptData;
-  return [
-    `Banco: ${r.bank_name ?? "—"}`,
-    `Monto Bs: ${r.amount_bs ?? r.amount ?? "—"}`,
-    `Referencia: ${r.reference_number ?? "—"}`,
-    `Fecha: ${r.tx_date ?? "—"}`,
-  ].join("\n");
-}
-
 async function generateResponse({ messageId, customerId, chatId, inputText, receiptData, status }) {
   const t0 = Date.now();
-  const [customerCtx, chatHistory] = await Promise.all([
+  const [customerCtx, chatHistory, nombre] = await Promise.all([
     buildCustomerContext(customerId),
     buildChatHistory(chatId),
+    getCustomerFirstName(customerId),
   ]);
 
-  let userMessage = inputText;
-  if (status === "pending_receipt_confirm" && receiptData) {
+  let userMessage = String(inputText || "").trim();
+  if (status === "pending_receipt_confirm" && receiptData && typeof receiptData === "object") {
     userMessage =
-      "El cliente envió un comprobante de pago. Confirma recepción con estos datos exactos: " +
-      JSON.stringify(receiptData);
+      "Comprobante de pago (solo referencia, sin inventar datos): " +
+      JSON.stringify({
+        reference_number: receiptData.reference_number,
+        amount_bs: receiptData.amount_bs,
+        tx_date: receiptData.tx_date,
+        bank_name: receiptData.bank_name,
+      });
   }
 
-  const prompt = SYSTEM_PROMPT.replace("{CUSTOMER_CONTEXT}", customerCtx)
-    .replace("{RECEIPT_CONTEXT}", buildReceiptContext(receiptData))
-    .replace("{CHAT_HISTORY}", chatHistory);
+  const sys = PROMPT_CONTEXT_LINE.replace("{CUSTOMER_CONTEXT}", customerCtx)
+    .replace("{CHAT_HISTORY}", chatHistory)
+    .replace("{USER_MESSAGE}", userMessage || "(vacío)");
 
+  let contextLine = "";
   try {
-    const raw = await callChatBasic({ systemPrompt: prompt, userMessage });
-    if (!raw) throw new Error("Gateway vacío");
-
-    let jsonText = raw.trim();
-    const fence = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    if (fence && fence[1]) jsonText = fence[1].trim();
-
-    const parsed = JSON.parse(jsonText);
-    const confidence = parseInt(String(parsed.confidence ?? 0), 10);
-    const minC = confidenceMin();
-    const needsHuman =
-      parsed.needs_human === true || !Number.isFinite(confidence) || confidence < minC;
-
-    return {
-      replyText: String(parsed.reply_text || "").trim() || null,
-      confidence: Number.isFinite(confidence) ? confidence : 0,
-      reasoning: String(parsed.reasoning || "").slice(0, 2000),
-      needsHuman,
-      provider: "GROQ_LLAMA",
-      latencyMs: Date.now() - t0,
-    };
+    const raw = await callChatBasic({
+      systemPrompt: sys,
+      userMessage: "Genera solo el JSON con context_line.",
+    });
+    if (raw) {
+      let jsonText = raw.trim();
+      const fence = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/i);
+      if (fence && fence[1]) jsonText = fence[1].trim();
+      const parsed = JSON.parse(jsonText);
+      contextLine = String(parsed.context_line || "").trim();
+    }
   } catch (e) {
-    log.error({ err: e.message, messageId }, "generateResponse falló");
-    return {
-      replyText: null,
-      confidence: 0,
-      reasoning: e.message || String(e),
-      needsHuman: true,
-      provider: "GROQ_LLAMA",
-      latencyMs: Date.now() - t0,
-    };
+    log.warn({ err: e.message, messageId }, "tipo_m: context_line falló, usando fallback");
   }
+
+  if (!contextLine) {
+    contextLine =
+      String(userMessage || "")
+        .replace(/^\s*Comprobante de pago[^\n]*\n?/i, "")
+        .slice(0, 120)
+        .replace(/\s+/g, " ")
+        .trim() || "tu consulta";
+  }
+
+  const template = defaultGenericTemplate();
+  const replyText = applyTipoMTemplate(template, { contextLine, nombre });
+
+  return {
+    replyText: replyText || null,
+    confidence: 100,
+    reasoning: `tipo_m_plantilla prompt_ai_responder_pilot ctx=${contextLine.slice(0, 100)}`,
+    needsHuman: false,
+    provider: "GROQ_LLAMA",
+    latencyMs: Date.now() - t0,
+  };
 }
 
 /**
@@ -267,7 +293,6 @@ async function processOneMessage(message) {
     content,
     transcription,
     receipt_data: receiptDataRaw,
-    ai_reply_status: aiStatus,
   } = message;
 
   const rowContent = content;
@@ -315,7 +340,7 @@ async function processOneMessage(message) {
       reply_text: null,
       confidence: null,
       reasoning: "Sin texto ni transcripción",
-      provider_used: null,
+      provider_used: providerAuditTipoM("sin_gateway"),
       tokens_used: 0,
       action_taken: "skipped_empty",
       error_message: null,
@@ -403,51 +428,6 @@ async function processOneMessage(message) {
       reasoning: result.reasoning,
     });
     return;
-  }
-
-  if (result.needsHuman && !isForceSend()) {
-    await pool.query(
-      `UPDATE crm_messages
-       SET ai_reply_status = 'needs_human_review',
-           ai_reply_text = $1,
-           ai_confidence = $2,
-           ai_reasoning = $3,
-           ai_provider = $4,
-           ai_processed_at = NOW()
-       WHERE id = $5`,
-      [result.replyText, result.confidence, result.reasoning, result.provider, messageId]
-    );
-    await logAiResponse(pool, {
-      crm_message_id: messageId,
-      customer_id: customerId,
-      chat_id: chatId,
-      input_text: inputText,
-      receipt_data: rdForLog,
-      reply_text: result.replyText,
-      confidence: result.confidence,
-      reasoning: result.reasoning,
-      provider_used: providerAuditTipoM(result.provider),
-      tokens_used: 0,
-      action_taken: "queued_review",
-      error_message: null,
-    });
-    notifyHumanReview({
-      message_id: messageId,
-      customer_id: customerId,
-      chat_id: chatId,
-      input_preview: inputText.slice(0, 160),
-      suggested_reply: result.replyText,
-      confidence: result.confidence,
-      reasoning: result.reasoning,
-    });
-    return;
-  }
-
-  if (result.needsHuman && isForceSend()) {
-    log.warn(
-      { messageId, confidence: result.confidence },
-      "ai_responder: AI_RESPONDER_FORCE_SEND=1 — omite cola revisión humana, envío directo"
-    );
   }
 
   const { rows: alreadySent } = await pool.query(
@@ -550,7 +530,6 @@ async function processOneMessage(message) {
 module.exports = {
   isEnabled,
   confidenceMin,
-  isForceSend,
   maybeQueueInboundText,
   generateResponse,
   processOneMessage,

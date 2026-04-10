@@ -2247,6 +2247,7 @@ async function insertMovements(bankAccountId, movements) {
   let inserted = 0;
   let duplicates = 0;
   let errors = 0;
+  const newStatementIds = [];
 
   for (const mov of movements) {
     if (!mov.row_hash) {
@@ -2261,7 +2262,8 @@ async function insertMovements(bankAccountId, movements) {
             reference_number, tx_type, amount,
             balance_after, payment_type, row_hash)
          VALUES ($1,$2,$3,$4,$5::statement_tx_type,$6,$7,$8,$9)
-         ON CONFLICT (row_hash) DO NOTHING`,
+         ON CONFLICT (row_hash) DO NOTHING
+         RETURNING id`,
         [
           Number(bankAccountId),
           mov.tx_date,
@@ -2275,8 +2277,12 @@ async function insertMovements(bankAccountId, movements) {
         ]
       );
 
-      if (r.rowCount > 0) inserted++;
-      else duplicates++;
+      if (r.rowCount > 0) {
+        inserted++;
+        newStatementIds.push(r.rows[0].id);
+      } else {
+        duplicates++;
+      }
     } catch (err) {
       console.error(`[banesco] Error INSERT:`, {
         message: err.message,
@@ -2289,7 +2295,7 @@ async function insertMovements(bankAccountId, movements) {
     }
   }
 
-  return { inserted, duplicates, errors };
+  return { inserted, duplicates, errors, newStatementIds };
 }
 
 /** "HH:mm" → minutos desde medianoche. */
@@ -2474,10 +2480,11 @@ async function runCycle(bankAccountId) {
     const result = await insertMovements(bankAccountId, movements);
 
     let reconciliationRan = false;
-    if (result.inserted > 0) {
-      await queryRetry(
-        `SELECT * FROM run_reconciliation($1::bigint, CURRENT_DATE - 7, CURRENT_DATE)`,
-        [bankAccountId]
+    if (result.newStatementIds && result.newStatementIds.length > 0) {
+      // Event-driven: conciliar solo los statements recién insertados, sin barrer toda la tabla.
+      const { reconcileStatements } = require("../services/reconciliationService");
+      reconcileStatements(result.newStatementIds).catch((err) =>
+        console.error("[banesco] reconcileStatements post-insert falló:", err.message || err)
       );
       reconciliationRan = true;
     }

@@ -400,4 +400,131 @@ async function handleNoMatch(order) {
   }
 }
 
-module.exports = { runReconciliation, TOLERANCE };
+// ─────────────────────────────────────────────────────────────────────────────
+// Trigger 1 — event-driven: conciliar solo statements bancarios recién insertados
+// Llamado por banescoService.runCycle() con los IDs del lote actual.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function reconcileStatements(bankStatementIds) {
+  if (!Array.isArray(bankStatementIds) || bankStatementIds.length === 0) return;
+
+  // Solo statements CREDIT sin conciliar del lote recién insertado
+  const { rows: statements } = await pool.query(
+    `SELECT id, tx_date, reference_number, description, amount, payment_type
+     FROM bank_statements
+     WHERE id = ANY($1::bigint[])
+       AND tx_type = 'CREDIT'
+       AND reconciliation_status = 'UNMATCHED'`,
+    [bankStatementIds]
+  );
+
+  if (!statements.length) return;
+
+  // Órdenes pendientes activas para cruzar
+  const { rows: orders } = await pool.query(`
+    SELECT so.id, so.source, so.external_order_id,
+           so.customer_id, so.order_total_amount AS total_orden, so.notes,
+           so.created_at, so.payment_method, so.wa_payment_reminder_at,
+           c.phone AS customer_phone
+    FROM sales_orders so
+    LEFT JOIN customers c ON c.id = so.customer_id
+    WHERE so.status = 'pending'
+      AND so.order_total_amount IS NOT NULL
+      AND so.order_total_amount > 0
+    ORDER BY so.created_at ASC
+  `);
+
+  if (!orders.length) return;
+
+  // Pool mutable en memoria: evita conciliar la misma orden o el mismo statement dos veces en el lote
+  const stmtPool  = [...statements];
+  const orderPool = [...orders];
+
+  for (const order of orderPool) {
+    if (!stmtPool.length) break;
+    try {
+      // findBestMatch(order, rows, tolerance, sourceType) — busca en rows el mejor match para order
+      const match = findBestMatch(order, stmtPool, TOLERANCE.BANK_STATEMENT, "bank");
+      if (!match) continue;
+
+      if (match.level === 1 || match.level === 2) {
+        await applyMatch(order, match);
+        // Evitar reusar el mismo statement para otra orden
+        const idx = stmtPool.findIndex((s) => s.id === match.row.id);
+        if (idx !== -1) stmtPool.splice(idx, 1);
+        log.info({ orderId: order.id, statementId: match.row.id, level: match.level },
+          "reconcileStatements: MATCH aplicado");
+      } else {
+        await applyManualReview(order, match);
+        log.warn({ orderId: order.id, statementId: match.row.id },
+          "reconcileStatements: enviado a revisión manual");
+      }
+    } catch (err) {
+      log.error({ err: err.message, orderId: order.id },
+        "reconcileStatements: error procesando orden");
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trigger 2 — event-driven: conciliar un payment_attempt recién insertado
+// Llamado por media.js inmediatamente después de INSERT INTO payment_attempts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function reconcileAttempt(paymentAttemptId) {
+  if (!paymentAttemptId) return;
+
+  const { rows: attempts } = await pool.query(
+    `SELECT id, customer_id, extracted_reference,
+            extracted_amount_bs, extracted_date, extraction_confidence
+     FROM payment_attempts
+     WHERE id = $1
+       AND reconciliation_status = 'pending'
+       AND extracted_amount_bs IS NOT NULL`,
+    [paymentAttemptId]
+  );
+
+  if (!attempts.length) return;
+  const attempt = attempts[0];
+
+  const { rows: orders } = await pool.query(`
+    SELECT so.id, so.source, so.external_order_id,
+           so.customer_id, so.order_total_amount AS total_orden, so.notes,
+           so.created_at, so.payment_method, so.wa_payment_reminder_at,
+           c.phone AS customer_phone
+    FROM sales_orders so
+    LEFT JOIN customers c ON c.id = so.customer_id
+    WHERE so.status = 'pending'
+      AND so.order_total_amount IS NOT NULL
+      AND so.order_total_amount > 0
+    ORDER BY so.created_at ASC
+  `);
+
+  if (!orders.length) return;
+
+  // findBestMatch espera (order, rows[], tolerance, sourceType).
+  // Para un solo attempt: pasar [attempt] como pool y buscar para cada orden cuál es mejor match.
+  try {
+    for (const order of orders) {
+      const match = findBestMatch(order, [attempt], TOLERANCE.PAYMENT_ATTEMPT, "attempt");
+      if (!match) continue;
+
+      if (match.level === 1 || match.level === 2) {
+        await applyMatch(order, match);
+        log.info({ attemptId: attempt.id, orderId: order.id, level: match.level },
+          "reconcileAttempt: MATCH aplicado");
+      } else {
+        await applyManualReview(order, match);
+        log.warn({ attemptId: attempt.id, orderId: order.id },
+          "reconcileAttempt: enviado a revisión manual");
+      }
+      // Solo una orden puede conciliarse con este attempt
+      break;
+    }
+  } catch (err) {
+    log.error({ err: err.message, attemptId: attempt.id },
+      "reconcileAttempt: error procesando attempt");
+  }
+}
+
+module.exports = { runReconciliation, reconcileStatements, reconcileAttempt, TOLERANCE };

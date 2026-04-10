@@ -55,29 +55,29 @@ const {
 
 /** Mañana: ya puede retirar el producto ofertado. */
 const RETIRO_MORNING_BODIES = Object.freeze([
-  "¡Hola! Tu compra ya está lista: podés pasar a retirar el producto ofertado cuando te quede cómodo. ¡Gracias por elegirnos!",
-  "Buen día: ya podés retirar tu producto. Te esperamos; avísanos si venís para tenerlo listo.",
-  "Hola, buenos días. Tu pedido está disponible para retiro. Pasá cuando puedas por el punto acordado.",
-  "Buen día. El producto de tu compra ya está para retirar. Cualquier duda, escribinos por acá.",
-  "¡Hola! Ya podés pasar a buscar tu producto ofertado. Gracias por la compra.",
+  "¡Hola! Tu compra ya está lista: puedes pasar a retirar el producto ofertado cuando te quede cómodo. ¡Gracias por elegirnos!",
+  "Buen día: ya puedes retirar tu producto. Te esperamos; avísanos si vienes para tenerlo listo.",
+  "Hola, buenos días. Tu pedido está disponible para retiro. Pasa cuando puedas por el punto acordado.",
+  "Buen día. El producto de tu compra ya está para retirar. Cualquier duda, escríbenos por aquí.",
+  "¡Hola! Ya puedes pasar a buscar tu producto ofertado. Gracias por la compra.",
   "Buenos días: tu orden está lista para retiro. Te esperamos en el horario habitual.",
-  "Hola. Ya está listo tu producto para retiro. Avisanos cuando vengas y te lo entregamos.",
-  "Buen día, gracias por tu compra. Podés retirar el producto ofertado; coordinamos si lo necesitás.",
-  "¡Hola! Tu compra está disponible para retiro. Pasá cuando te quede bien.",
-  "Buenos días: recordá que ya podés retirar tu producto. ¡Gracias por confiar en nosotros!",
+  "Hola. Ya está listo tu producto para retiro. Avísanos cuando vengas y te lo entregamos.",
+  "Buen día, gracias por tu compra. Puedes retirar el producto ofertado; coordinamos si lo necesitas.",
+  "¡Hola! Tu compra está disponible para retiro. Pasa cuando te quede bien.",
+  "Buenos días: recuerda que ya puedes retirar tu producto. ¡Gracias por confiar en nosotros!",
 ]);
 
 /** Tarde: seguimos despachando; retiro hasta 17:00; delivery y pago a tasa BCV. */
 const RETIRO_AFTERNOON_BODIES = Object.freeze([
-  "Buenas tardes: seguimos despachando. Podés retirar hasta las 5:00 p. m. Tenemos delivery y podés pagar a tasa BCV.",
-  "Hola, buenas tardes. Aún estamos despachando; podés retirar hasta las 17:00. Delivery disponible y pago a tasa BCV.",
-  "Buenas tardes. Seguimos en despacho: retiros hasta las 5 p. m. Recordá que tenemos delivery y aceptamos pago a tasa BCV.",
+  "Buenas tardes: seguimos despachando. Puedes retirar hasta las 5:00 p. m. Tenemos delivery y puedes pagar a tasa BCV.",
+  "Hola, buenas tardes. Aún estamos despachando; puedes retirar hasta las 17:00. Delivery disponible y pago a tasa BCV.",
+  "Buenas tardes. Seguimos en despacho: retiros hasta las 5 p. m. Recuerda que tenemos delivery y aceptamos pago a tasa BCV.",
   "Hola: por la tarde seguimos despachando. Retiro en local hasta las 17:00. Delivery y pago BCV disponibles.",
   "Buenas tardes. Te recordamos que despachamos hasta las 5 p. m.; también delivery. Pagos a tasa BCV.",
-  "Buenas: aún despachando. Podés pasar a retirar hasta las 17:00 o pedir delivery. Pago a tasa BCV.",
+  "Buenas: aún despachando. Puedes pasar a retirar hasta las 17:00 o pedir delivery. Pago a tasa BCV.",
   "Hola, buenas tardes. Seguimos operando: retiro hasta las 5 p. m., delivery y opción de pago a tasa BCV.",
-  "Buenas tardes. Seguimos con despachos; retiros hasta las 17:00. Consultá por delivery y tasa BCV.",
-  "Hola. Por la tarde seguimos despachando hasta las 5 p. m. Delivery disponible; podés pagar a tasa BCV.",
+  "Buenas tardes. Seguimos con despachos; retiros hasta las 17:00. Consulta por delivery y tasa BCV.",
+  "Hola. Por la tarde seguimos despachando hasta las 5 p. m. Delivery disponible; puedes pagar a tasa BCV.",
   "Buenas tardes: aún despachamos. Retiro hasta las 17:00. Tenemos delivery y pago a tasa BCV cuando lo necesites.",
 ]);
 

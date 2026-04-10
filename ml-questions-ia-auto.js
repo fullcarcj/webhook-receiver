@@ -93,16 +93,16 @@ function resolveQuestionsIaAutoPollMs() {
 }
 
 const QUESTION_IA_BODIES = Object.freeze([
-  "Hola. Si el producto que buscás es el de la publicación, lo más probable es que esté disponible y el precio sea el publicado. Aceptamos tasa BCV. Somos tienda física; mañana abrimos de 9:00 a 16:00. Este mensaje fue generado por una IA; mañana habrá una persona para ayudarte.",
-  "Buenas. Si la publicación coincide con lo que necesitás, en general el artículo está y el precio es el que ves publicado. Trabajamos a tasa BCV. Tienda física. Mañana atendemos de 9 a 16 h. Respuesta automática por IA; mañana te atiende un humano.",
-  "Hola, gracias por escribir. Si buscás exactamente lo publicado, lo más probable es que haya stock y el monto sea el del aviso. Aceptamos tasa BCV. Somos tienda física; mañana de 9:00 a 16:00. Aviso: mensaje automático (IA); mañana podés hablar con alguien del equipo.",
+  "Hola. Si el producto que buscas es el de la publicación, lo más probable es que esté disponible y el precio sea el publicado. Aceptamos tasa BCV. Somos tienda física; mañana abrimos de 9:00 a 16:00. Este mensaje fue generado por una IA; mañana habrá una persona para ayudarte.",
+  "Buenas. Si la publicación coincide con lo que necesitas, en general el artículo está y el precio es el que ves publicado. Trabajamos a tasa BCV. Tienda física. Mañana atendemos de 9 a 16 h. Respuesta automática por IA; mañana te atiende un humano.",
+  "Hola, gracias por escribir. Si buscas exactamente lo publicado, lo más probable es que haya stock y el monto sea el del aviso. Aceptamos tasa BCV. Somos tienda física; mañana de 9:00 a 16:00. Aviso: mensaje automático (IA); mañana puedes hablar con alguien del equipo.",
   "Buen día. Si tu consulta es sobre la publicación que estás viendo, lo habitual es que el producto esté y el precio sea el publicado. Cobramos a tasa BCV. Tienda física; mañana abrimos 9–16 h. Generado por IA; mañana hay atención humana.",
-  "Hola. Para la publicación que mirás: lo más probable es disponibilidad y precio según lo publicado. Aceptamos tasa BCV. Somos tienda física; mañana de 9 a 16. Este texto es automático (IA); mañana te ayuda una persona.",
+  "Hola. Para la publicación que miras: lo más probable es disponibilidad y precio según lo publicado. Aceptamos tasa BCV. Somos tienda física; mañana de 9 a 16. Este texto es automático (IA); mañana te ayuda una persona.",
   "Buenas tardes/noches. Si coincide con el aviso, el precio suele ser el publicado y el producto suele estar. Tasa BCV. Local físico; mañana 9:00–16:00. Mensaje de sistema (IA); mañana atención humana.",
-  "Hola. Si es el ítem de la publicación, lo más probable es que esté y el valor sea el publicado. Trabajamos con tasa BCV. Tienda física; mañana abrimos de 9 a 16 h. Respuesta automática por IA; mañana podés consultar con el local.",
+  "Hola. Si es el ítem de la publicación, lo más probable es que esté y el valor sea el publicado. Trabajamos con tasa BCV. Tienda física; mañana abrimos de 9 a 16 h. Respuesta automática por IA; mañana puedes consultar con el local.",
   "Gracias por tu pregunta. Si te referís a lo publicado, lo normal es que el precio sea el del aviso y que haya unidad. Aceptamos BCV. Somos tienda física; mañana 9:00 a 16:00. Generado por IA; mañana hay personal disponible.",
   "Hola. Publicación = precio publicado en lo posible y disponibilidad habitual. Cobro a tasa BCV. Tienda física; mañana de 9 a 16. Aviso: IA; mañana te responde un humano.",
-  "Buenas. Si buscás el producto del aviso, lo más probable es que el precio sea el publicado y que podamos atenderte. Tasa BCV. Local físico; mañana 9–16 h. Mensaje automático (IA); mañana atención personal.",
+  "Buenas. Si buscas el producto del aviso, lo más probable es que el precio sea el publicado y que podamos atenderte. Tasa BCV. Local físico; mañana 9–16 h. Mensaje automático (IA); mañana atención personal.",
 ]);
 
 function getQuestionsIaMaxChars() {

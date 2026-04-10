@@ -38,6 +38,10 @@ Definida en `ml-message-types.js` (tags lógicos, no campos de ML):
 - **E/F:** WhatsApp Wasender — `ml-whatsapp-tipo-ef.js`; **F** ligado a `ml_question_id`, **E** a orden o seguimiento.
 - **G:** FileMaker → buyer + intento tipo E — `ml-filemaker-tipo-g.js`.
 
+Convención de redacción vigente:
+- Mantener mensajes automáticos en **español latinoamericano neutral** (evitar voseo/rioplatense: “podés”, “buscás”, “pasá”, etc.).
+- Aplicación prioritaria: plantillas de **tipo B** (`ml-retiro-broadcast.js`) y respuestas automáticas de preguntas **tipo D** (`ml-questions-ia-auto.js`).
+
 ## Flujos críticos (resumen)
 
 ### Webhook ML → preguntas
@@ -175,4 +179,4 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 
 ---
 
-*Última revisión: 2026-04 — Ventas globales (import ML, `ml_feedback_filter`, scripts HTTP), Render (`render.yaml`, Playwright), Banesco (ventana horaria, `/banesco-connection`, `/statements`, `bank_statements`), alineado con `package.json` y workflows.*
+*Última revisión: 2026-04 — Ventas globales (import ML, `ml_feedback_filter`, scripts HTTP), Render (`render.yaml`, Playwright), Banesco (ventana horaria, `/banesco-connection`, `/statements`, `bank_statements`), convención de redacción LATAM para tipos B/D, alineado con `package.json` y workflows.*

@@ -543,11 +543,13 @@ async function reconcileAttempt(paymentAttemptId) {
 
   // findBestMatch espera (order, rows[], tolerance, sourceType).
   // Para un solo attempt: pasar [attempt] como pool y buscar para cada orden cuál es mejor match.
+  let matched = false;
   try {
     for (const order of orders) {
       const match = findBestMatch(order, [attempt], TOLERANCE.PAYMENT_ATTEMPT, "attempt");
       if (!match) continue;
 
+      matched = true;
       if (match.level === 1 || match.level === 2) {
         await applyMatch(order, match);
         log.info({ attemptId: attempt.id, orderId: order.id, level: match.level },
@@ -559,6 +561,24 @@ async function reconcileAttempt(paymentAttemptId) {
       }
       // Solo una orden puede conciliarse con este attempt
       break;
+    }
+
+    // Ninguna orden tuvo monto dentro de la tolerancia ±0.01 Bs
+    if (!matched) {
+      await pool.query(
+        `UPDATE payment_attempts
+         SET reconciliation_status = 'no_match', reconciled_at = NOW()
+         WHERE id = $1`,
+        [attempt.id]
+      );
+      log.warn({
+        attemptId:     attempt.id,
+        amount_bs:     attempt.extracted_amount_bs,
+        reference:     attempt.extracted_reference,
+        bank:          attempt.extracted_bank,
+        ordersChecked: orders.length,
+        tolerance_bs:  TOLERANCE.PAYMENT_ATTEMPT,
+      }, "reconcileAttempt: sin match de monto — attempt marcado no_match");
     }
   } catch (err) {
     log.error({ err: err.message, attemptId: attempt.id },

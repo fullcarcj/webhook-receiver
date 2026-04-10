@@ -25,7 +25,7 @@ const pino = require("pino");
 const { pool } = require("../../../db");
 const { normalizePhone } = require("../../utils/phoneNormalizer");
 const { resolveCustomerId, upsertChat } = require("./_shared");
-const { pickWaFullNameCandidate, sanitizeWaPersonName, isLikelyChatNotName } = require("../waNameCandidate");
+const { pickWaFullNameCandidate, sanitizeWaPersonName, isLikelyChatNotName, isValidFullName } = require("../waNameCandidate");
 const { runWaMlBuyerMatchTipoE } = require("../../services/waMlBuyerMatchTipoE");
 const {
   trySendCrmWaWelcome,
@@ -127,6 +127,16 @@ const NON_NAME_WORDS = new Set([
   "carro","moto","repuesto","precio","envío","envio","mano","cosa","parte",
   "nombre","apellido","numero","número","cliente","persona","trabajo","prueba",
   "test","testing","celular","teléfono","telefono","whatsapp",
+  // Operación / logística (no son nombre y apellido)
+  "debemos","debe","deben","esperar","esperamos","espera","esperan","esperando",
+  "verificar","verifiquen","verifique","verifican","verificamos","inventario","inventarios",
+  "verificación","verificacion",
+  "estamos","están","estan","estoy",
+  "descargar","descarga","descargando","descargamos",
+  "podemos","pudieron",
+  "quedar","quedará","quedara","quedo","queda","quedan",
+  "lunes","martes","miércoles","miercoles","jueves","viernes","sábado","sabado","domingo",
+  "sorry","disculpa","disculpen","favor",
 ]);
 
 /**
@@ -162,6 +172,12 @@ function normalizeOnboardingNameUpper(rawText) {
   // Ninguna palabra termina con sufijo verbal claro
   const verbalSuffix = /(?:ando|iendo|ado|ido|ción|cion|ando|ente|mente|able|ible)$/i;
   if (lower.some((w) => verbalSuffix.test(w))) return null;
+
+  // 1ª persona plural común ("debemos", "esperamos") sin bloquear "Morgan" (-gan).
+  const pluralVerbRe = /(?:amos|emos|imos|mos)$/i;
+  if (lower.some((w) => w.length >= 6 && pluralVerbRe.test(w) && !/gan$/i.test(w))) return null;
+  // Imperativo/plural tipo "verifiquen"
+  if (lower.some((w) => w.length >= 8 && /quen$/i.test(w))) return null;
 
   // Al menos 2 palabras tienen 3+ letras (descarta iniciales sueltas)
   if (lower.filter((w) => w.length >= 3).length < 2) return null;
@@ -263,7 +279,7 @@ async function handle(normalized) {
       // ════════════════════════════════════════════════════════════════
       // CASO 1: Cliente ya registrado → flujo normal
       // ════════════════════════════════════════════════════════════════
-      const nameExtra = pickWaFullNameCandidate(normalized);
+      const nameExtra = await pickWaFullNameCandidate(normalized);
       const extra = {};
       if (nameExtra.name) extra.name = nameExtra.name;
       if (cn) extra.contact_name = cn;
@@ -322,11 +338,23 @@ async function handle(normalized) {
       );
 
       const messageText = normalized.content?.text ? String(normalized.content.text).trim() : "";
-      const validatedOnboardingName = normalizeOnboardingNameUpper(messageText);
-      const isInboundText =
-        eventType === "messages.received" &&
-        (normalized.type || "text") !== "reaction" &&
-        Boolean(validatedOnboardingName);
+
+      // isValidFullName es async: valida con IA para 2-4 palabras; fallback estático si IA falla.
+      // Retorna: true | false | 'ASK_SURNAME'
+      let nameValidationResult = false;
+      if (eventType === "messages.received" && (normalized.type || "text") !== "reaction" && messageText.length > 0) {
+        nameValidationResult = await isValidFullName(messageText);
+      }
+      const isInboundText = nameValidationResult === true;
+      const isAskSurnameResult = nameValidationResult === "ASK_SURNAME";
+
+      // Pre-computar confirmedName con fallback para partículas (De La Cruz, Del Valle, etc.)
+      // que la IA acepta pero NON_NAME_WORDS rechaza en normalizeOnboardingNameUpper.
+      const confirmedName = isInboundText
+        ? (normalizeOnboardingNameUpper(messageText) || sanitizeWaPersonName(messageText)?.toUpperCase())?.slice(0, 200) || null
+        : null;
+      // Solo procesar registro si también tenemos el nombre normalizado
+      const isInboundTextFinal = isInboundText && Boolean(confirmedName);
 
       // Detecta si este messageId es el mismo que disparó la creación del estado
       // (webhook duplicado sobre el primer mensaje → no tratar como nombre).
@@ -335,11 +363,10 @@ async function handle(normalized) {
         chatState.trigger_message_id != null &&
         chatState.trigger_message_id === normalized.messageId;
 
-      if (chatState && chatState.status === "AWAITING_NAME" && !isTriggerReplay && isInboundText) {
+      if (chatState && chatState.status === "AWAITING_NAME" && !isTriggerReplay && isInboundTextFinal) {
         // ══════════════════════════════════════════════════════════════
         // CASO 2: AWAITING_NAME + texto recibido → registrar cliente
         // ══════════════════════════════════════════════════════════════
-        const confirmedName = String(validatedOnboardingName).slice(0, 200);
         postConfirmedName = confirmedName;
 
         // Crear cliente vía resolveCustomerId (maneja identities, ML buyer match, etc.)
@@ -430,15 +457,20 @@ async function handle(normalized) {
         eventType === "messages.received" &&
         (normalized.type || "text") === "text" &&
         messageText.length > 0 &&
-        !validatedOnboardingName
+        !isInboundTextFinal
       ) {
-        // Mantiene el estado pendiente pero NO repite el mensaje.
-        // Queda en stand by hasta que llegue un nombre válido o intervención manual.
-        postAction = null;
-        msgLog.info(
-          { fromPhone: normalized.fromPhone, messageText: messageText.slice(0, 120) },
-          "tipo_h_invalid_name_standby"
-        );
+        if (isAskSurnameResult) {
+          // 1 sola palabra (ej. "Javier", "Hola") → pedir nombre y apellido completos.
+          postAction = "ask_surname";
+          msgLog.info({ fromPhone: normalized.fromPhone, messageText: messageText.slice(0, 40) }, "tipo_h_ask_surname");
+        } else {
+          // Nombre inválido (frase, verbo, etc.) → mantener estado en espera sin responder.
+          postAction = null;
+          msgLog.info(
+            { fromPhone: normalized.fromPhone, messageText: messageText.slice(0, 120) },
+            "tipo_h_invalid_name_standby"
+          );
+        }
       } else if (!chatState || isTriggerReplay) {
         // ══════════════════════════════════════════════════════════════
         // CASO 3: Contacto completamente nuevo (o mismo trigger replay)
@@ -537,6 +569,18 @@ async function handle(normalized) {
             );
           })
           .catch((err) => msgLog.error({ err, phoneRaw: _askPhone }, "trySendCrmWaAskName"));
+      });
+    } else if (postAction === "ask_surname") {
+      // Usuario envió 1 sola palabra: reutilizamos el envío de ask_name (pide nombre + apellido).
+      const _askPhone = normalized.fromPhone;
+      msgLog.info({ phoneRaw: _askPhone }, "tipo_h_ask_surname_dispatch");
+      setImmediate(() => {
+        Promise.resolve()
+          .then(() => trySendCrmWaAskName({ phoneRaw: _askPhone }))
+          .then((r) => {
+            msgLog.info({ outcome: r?.outcome, ok: r?.ok, phoneRaw: _askPhone }, "tipo_h_ask_surname_result");
+          })
+          .catch((err) => msgLog.error({ err, phoneRaw: _askPhone }, "trySendCrmWaAskName_ask_surname"));
       });
     }
 

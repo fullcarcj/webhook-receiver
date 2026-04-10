@@ -24,15 +24,6 @@ function isTranscribable(mimetype) {
   return SUPPORTED_MIMETYPES.some((m) => m.split(";")[0].trim() === base);
 }
 
-function getExtFromMimetype(mimetype) {
-  if (mimetype.includes("ogg")) return "ogg";
-  if (mimetype.includes("mp4")) return "mp4";
-  if (mimetype.includes("webm")) return "webm";
-  if (mimetype.includes("mpeg")) return "mp3";
-  if (mimetype.includes("wav")) return "wav";
-  return "ogg";
-}
-
 const MAX_ERROR_LEN = 480;
 
 function trimErr(msg) {
@@ -43,13 +34,10 @@ function trimErr(msg) {
 
 /**
  * Transcribe audio/video con Groq Whisper.
- * Requiere GROQ_API_KEY; si no está configurada no rompe el flujo.
+ * Usa el AI Gateway (BD `provider_settings` o `GROQ_API_KEY`); errores devuelven `error` sin lanzar.
  * @returns {Promise<{ text: string|null, error: string|null }>}
  */
 async function transcribeWithGroq({ buffer, mimetype, messageId }) {
-  if (!process.env.GROQ_API_KEY) {
-    return { text: null, error: "GROQ_API_KEY no configurada" };
-  }
   if (!isTranscribable(mimetype)) {
     return { text: null, error: `MIME no soportado para transcripción: ${mimetype || "(vacío)"}` };
   }
@@ -60,31 +48,8 @@ async function transcribeWithGroq({ buffer, mimetype, messageId }) {
   }
 
   try {
-    const ext = getExtFromMimetype(mimetype);
-    const formData = new FormData();
-    const blob = new Blob([buffer], { type: mimetype });
-    formData.append("file", blob, `media.${ext}`);
-    formData.append("model", "whisper-large-v3");
-    formData.append("language", "es");
-    formData.append("response_format", "json");
-
-    const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-      body: formData,
-    });
-
-    if (!res.ok) {
-      const body = await res.text();
-      return { text: null, error: trimErr(`Groq HTTP ${res.status}: ${body}`) };
-    }
-
-    const data = await res.json();
-    const text = String(data?.text || "").trim();
-    if (!text) {
-      return { text: null, error: "Groq devolvió texto vacío" };
-    }
-
+    const { callAudio } = require("../../services/aiGateway");
+    const text = await callAudio({ buffer, mimetype, messageId });
     log.info(
       { messageId, chars: text.length, preview: text.substring(0, 60) },
       "Transcripción Groq exitosa"

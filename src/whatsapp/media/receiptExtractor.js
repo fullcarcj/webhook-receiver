@@ -2,7 +2,7 @@
 
 /**
  * Extractor de datos de comprobantes bancarios venezolanos vía Gemini Vision.
- * Solo se ejecuta si GEMINI_API_KEY está configurada.
+ * Usa el AI Gateway (Gemini vía `provider_settings` o `GEMINI_API_KEY`).
  */
 
 const pino = require("pino");
@@ -43,11 +43,6 @@ function normalizeVenezuelanAmount(raw) {
  * @returns {Promise<object|null>}
  */
 async function extractReceiptData(firebaseUrl) {
-  if (!process.env.GEMINI_API_KEY) {
-    log.warn("GEMINI_API_KEY no configurada — extracción de comprobante omitida");
-    return null;
-  }
-
   try {
     const imgRes = await fetch(firebaseUrl);
     if (!imgRes.ok) {
@@ -57,47 +52,19 @@ async function extractReceiptData(firebaseUrl) {
     const arr = await imgRes.arrayBuffer();
     const base64 = Buffer.from(arr).toString("base64");
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`,
-      {
-      method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          generationConfig: {
-            temperature: 0,
-            maxOutputTokens: 300,
+    const { callVision } = require("../../services/aiGateway");
+    const content = await callVision({
+      parts: [
+        { text: SYSTEM_PROMPT },
+        { text: "Extrae los datos de este comprobante bancario venezolano y responde SOLO JSON válido." },
+        {
+          inlineData: {
+            mimeType,
+            data: base64,
           },
-          contents: [
-            {
-              role: "user",
-              parts: [
-                { text: SYSTEM_PROMPT },
-                { text: "Extrae los datos de este comprobante bancario venezolano y responde SOLO JSON válido." },
-                {
-                  inlineData: {
-                    mimeType,
-                    data: base64,
-                  },
-                },
-              ],
-            },
-          ],
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`Gemini [${response.status}]: ${await response.text()}`);
-    }
-
-    const result = await response.json();
-    const content = result?.candidates?.[0]?.content?.parts
-      ?.map((p) => p?.text || "")
-      .join("\n")
-      .trim();
-    if (!content) throw new Error("Gemini sin contenido en respuesta");
+        },
+      ],
+    });
 
     let jsonText = content;
     const m = content.match(/```json\s*([\s\S]*?)```/i) || content.match(/```\s*([\s\S]*?)```/i);

@@ -1,5 +1,80 @@
 "use strict";
 
+const pino = require("pino");
+const log = pino({ level: process.env.LOG_LEVEL || "info", name: "wa_name_candidate" });
+
+// DECISIÓN: permite guion y apóstrofe para nombres compuestos (García-López, D'Costa)
+const _EMOJI_REGEX = /[\u{1F300}-\u{1FFFF}]|[\u{2600}-\u{27BF}]/u;
+const _SYMBOL_REGEX = /[^a-záéíóúüñA-ZÁÉÍÓÚÜÑ\s'-]/;
+
+const PRESENTATION_PATTERNS = [
+  /^(?:mi nombre es|me llamo|mi nombre[:\s]|nombre[:\s])\s*(.+)$/i,
+  /^(?:soy)\s+([A-ZÁÉÍÓÚÜÑ][a-záéíóúüña-zA-Z\s'-]{3,})$/i,
+  /^(?:apellido[:\s]|mi apellido es)\s*(.+)$/i,
+];
+
+function _extractNameFromPhrase(input) {
+  for (const pat of PRESENTATION_PATTERNS) {
+    const m = input.trim().match(pat);
+    if (m?.[1]?.trim()) {
+      log.debug({ input, extracted: m[1].trim() }, "nombre extraído de frase de presentación");
+      return m[1].trim();
+    }
+  }
+  return input.trim();
+}
+
+// Registra en ai_usage_log cuando la heurística evitó la llamada a IA
+async function _logSkippedAI(reason) {
+  try {
+    const { pool } = require("../../db");
+    await pool.query(
+      `INSERT INTO ai_usage_log
+         (provider_id, function_called, tokens_input, tokens_output, latency_ms, success, error_message)
+       VALUES ('GROQ_LLAMA', 'name_validation_skipped', 0, 0, 0, TRUE, $1)`,
+      [`heurística evitó IA: ${reason}`]
+    );
+  } catch (_) {}
+}
+
+const _NAME_VALIDATION_PROMPT = `Eres un validador de nombres de personas venezolanas.
+Tu única tarea: determinar si el texto es un nombre propio de persona.
+
+NOMBRES VÁLIDOS (2-4 palabras):
+  "Juan Pérez"           → {"is_name": true,  "reason": "nombre y apellido"}
+  "María González"       → {"is_name": true,  "reason": "nombre y apellido"}
+  "Carlos De La Cruz"    → {"is_name": true,  "reason": "nombre compuesto"}
+  "Ana María Rodríguez"  → {"is_name": true,  "reason": "nombre compuesto"}
+
+NO SON NOMBRES:
+  "Debemos esperar"       → {"is_name": false, "reason": "contiene verbos"}
+  "verifiquen inventario" → {"is_name": false, "reason": "verbo + sustantivo"}
+  "Hola buenos"           → {"is_name": false, "reason": "saludo"}
+  "Descargando sistema"   → {"is_name": false, "reason": "gerundio + sustantivo"}
+  "Ok perfecto"           → {"is_name": false, "reason": "expresión coloquial"}
+  "No puedo"              → {"is_name": false, "reason": "negación + verbo"}
+  "Sorry no"              → {"is_name": false, "reason": "disculpa + negación"}
+
+Responde SOLO con JSON válido sin texto adicional ni backticks.`;
+
+async function _validateWithAI(input) {
+  try {
+    const { callChatBasic } = require("../services/aiGateway");
+    const response = await callChatBasic({
+      systemPrompt: _NAME_VALIDATION_PROMPT,
+      userMessage: input,
+    });
+    if (!response) return null;
+    const clean = response.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean);
+    log.info({ input, is_name: parsed.is_name, reason: parsed.reason }, "nombre validado con IA");
+    return parsed.is_name === true;
+  } catch (err) {
+    log.warn({ err: err.message, input }, "AI name validation falló — usando fallback");
+    return null;
+  }
+}
+
 /**
  * Limpia nombre/apellido para CRM: quita palabras solo numéricas, trozos tipo teléfono/orden
  * y rechaza cadenas con secuencias largas de dígitos.
@@ -137,40 +212,92 @@ function isWaContactNameBlockedForFullName(raw) {
   return false;
 }
 
-function isValidFullName(text) {
-  if (isLikelyChatNotName(text)) return false;
-  const sanitized = sanitizeWaPersonName(text);
-  if (!sanitized) return false;
-  const clean = sanitized;
-  const words = clean.split(/\s+/).filter((w) => w.length > 0);
-  if (words.length < 2) return false;
-  if (clean.length < 5) return false;
-  const noiseWords = [
-    "hola",
-    "hello",
-    "hi",
-    "buenas",
-    "buenos dias",
-    "buenas tardes",
-    "buenas noches",
-    "ok",
-    "si",
-    "no",
-  ];
-  if (noiseWords.includes(clean.toLowerCase())) return false;
-  return true;
+/**
+ * Valida si el texto es un nombre propio de persona.
+ *
+ * Árbol de decisión (en orden estricto):
+ *   PASO 1 — Limpieza (emojis, espacios)
+ *   PASO 2 — Extracción de frase de presentación ("mi nombre es…")
+ *   PASO 3 — Filtros de rechazo inmediato SIN IA (dígitos, URLs, símbolos)
+ *   PASO 4 — Decisión por cantidad de palabras SIN IA:
+ *              0 o >4 palabras → false; 1 palabra → 'ASK_SURNAME'
+ *   PASO 5 — Validación semántica con IA (solo 2-4 palabras)
+ *              Si IA falla → fallback estático (isLikelyChatNotName + sanitizeWaPersonName)
+ *
+ * @returns {Promise<true|false|'ASK_SURNAME'>}
+ */
+async function isValidFullName(input) {
+  if (!input || typeof input !== "string") return false;
+
+  // PASO 1 — Limpieza
+  let clean = input.replace(_EMOJI_REGEX, "").replace(/\s+/g, " ").trim();
+  if (!clean) return false;
+
+  // PASO 2 — Extraer nombre de frase de presentación
+  clean = _extractNameFromPhrase(clean);
+
+  // PASO 3 — Filtros de rechazo sin IA
+  if (/\d/.test(clean)) {
+    await _logSkippedAI("contains_digits");
+    return false;
+  }
+  if (/https?:\/\/|www\.|\.com|\.net/i.test(clean)) {
+    await _logSkippedAI("contains_url");
+    return false;
+  }
+  if (_SYMBOL_REGEX.test(clean)) {
+    await _logSkippedAI("contains_symbols");
+    return false;
+  }
+
+  // PASO 4 — Decisión por cantidad de palabras sin IA
+  const words = clean.split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    await _logSkippedAI("empty_after_clean");
+    return false;
+  }
+  if (words.length === 1) {
+    await _logSkippedAI("single_word_ask_surname");
+    return "ASK_SURNAME";
+  }
+  if (words.length > 4) {
+    await _logSkippedAI("too_many_words");
+    return false;
+  }
+  if (words.some((w) => w.length < 2)) {
+    await _logSkippedAI("word_too_short");
+    return false;
+  }
+
+  // PASO 5 — Validación semántica con IA (2-4 palabras)
+  const aiResult = await _validateWithAI(clean);
+  if (aiResult === null) {
+    // IA falló → fallback a lógica estática original para no bloquear el flujo
+    if (isLikelyChatNotName(clean)) return false;
+    const fallback = sanitizeWaPersonName(clean) !== null;
+    log.warn({ input: clean, fallback }, "fallback estático activado");
+    return fallback;
+  }
+  return aiResult;
 }
 
 /**
  * Prioriza el texto del mensaje; si no sirve, el nombre de perfil del contacto.
+ * Ahora async por isValidFullName. Solo acepta `true` (no 'ASK_SURNAME') para enriquecer.
  * @param {object} normalized — payload normalizado del webhook WA
- * @returns {{ name?: string }}
+ * @returns {Promise<{ name?: string }>}
  */
-function pickWaFullNameCandidate(normalized) {
+async function pickWaFullNameCandidate(normalized) {
   const t = normalized.content?.text != null ? String(normalized.content.text).trim() : "";
-  if (t && !isLikelyChatNotName(t) && isValidFullName(t)) return { name: sanitizeWaPersonName(t) };
+  if (t && !isLikelyChatNotName(t)) {
+    const r = await isValidFullName(t);
+    if (r === true) return { name: sanitizeWaPersonName(t) };
+  }
   const cn = normalized.contactName != null ? String(normalized.contactName).trim() : "";
-  if (cn && !isLikelyChatNotName(cn) && isValidFullName(cn)) return { name: sanitizeWaPersonName(cn) };
+  if (cn && !isLikelyChatNotName(cn)) {
+    const r = await isValidFullName(cn);
+    if (r === true) return { name: sanitizeWaPersonName(cn) };
+  }
   return {};
 }
 

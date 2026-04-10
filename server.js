@@ -194,10 +194,12 @@ const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./
 const { handleCustomersApiRequest } = require("./src/routes/customers");
 const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
 const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
+const { handleProviderApiRequest } = require("./src/handlers/providerApiHandler");
 const { handleSseApiRequest, handleSseStatsRequest } = require("./src/handlers/sseApiHandler");
 const { startWorker: startReconciliationWorker, stopWorker: stopReconciliationWorker } = require("./src/workers/reconciliationWorker");
 const { startInventoryWorker, stopInventoryWorker } = require("./src/workers/inventoryWorker");
 const { startMlStockWatcher, stopMlStockWatcher } = require("./src/workers/mlStockWatcher");
+const { startAiResetWorker, stopAiResetWorker } = require("./src/workers/aiResetWorker");
 const { handleInventoryApiRequest } = require("./src/handlers/inventoryApiHandler");
 const { routeWebhook: routeWhatsappHubFromBody } = require("./src/whatsapp/hookRouter");
 const { handleCrmApiRequest } = require("./src/routes/crm");
@@ -1934,6 +1936,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (await handleBundleApiRequest(req, res, url)) {
+    return;
+  }
+  if (await handleProviderApiRequest(req, res, url)) {
     return;
   }
   if (await handleDeliveryApiRequest(req, res, url)) {
@@ -6123,6 +6128,7 @@ server.listen(PORT, "0.0.0.0", () => {
   startReconciliationWorker();
   startInventoryWorker();
   startMlStockWatcher();
+  startAiResetWorker();
   refreshSettings().catch((e) =>
     console.error("[price_engine] refreshSettings init:", e.message || e)
   );
@@ -6273,5 +6279,6 @@ process.on("SIGTERM", () => {
   stopReconciliationWorker();
   stopInventoryWorker();
   stopMlStockWatcher();
+  stopAiResetWorker();
   server.close(() => process.exit(0));
 });

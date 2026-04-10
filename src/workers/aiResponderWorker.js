@@ -106,16 +106,8 @@ async function responderCycle() {
 }
 
 function startAiResponderWorker() {
-  if (process.env.NODE_ENV === "test") return;
-  if (!isEnabled()) {
-    log.info("ai_responder worker: OFF (AI_RESPONDER_ENABLED≠1)");
-    return;
-  }
-  log.info("ai_responder worker: ON — ciclo 5s");
-  cleanStuckProcessing().catch(() => {});
-  responderCycle();
-  workerHandle = setInterval(responderCycle, 5_000);
-  stuckHandle = setInterval(cleanStuckProcessing, 30 * 60 * 1_000);
+  log.info("AI Responder Worker DESACTIVADO temporalmente");
+  // DECISIÓN: desactivado hasta resolver doble envío
 }
 
 function stopAiResponderWorker() {

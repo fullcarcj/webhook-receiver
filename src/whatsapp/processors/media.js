@@ -146,6 +146,17 @@ async function handle(normalized) {
 
           if (!prefilter.isReceipt) return;
 
+          // Dedup por firebase_url: Wasender reintenta el webhook varias veces
+          const { rows: dupCheck } = await pool.query(
+            `SELECT id FROM payment_attempts WHERE firebase_url = $1 LIMIT 1`,
+            [firebaseUrl]
+          );
+          if (dupCheck.length) {
+            log.info({ firebaseUrl, existingId: dupCheck[0].id, messageId: normalized.messageId },
+              "media: payment_attempt ya existe para esta URL, skip duplicado");
+            return;
+          }
+
           const extracted = await extractReceiptData(firebaseUrl);
 
           const { rows: attemptRows } = await pool.query(
@@ -155,6 +166,7 @@ async function handle(normalized) {
                 extracted_bank, extracted_payment_type, extraction_confidence,
                 is_receipt, prefiler_score, prefiler_reason)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10,$11)
+             ON CONFLICT (firebase_url) DO NOTHING
              RETURNING id`,
             [
               customerId  ?? null,

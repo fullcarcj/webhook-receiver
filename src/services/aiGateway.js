@@ -105,7 +105,7 @@ function isUndefinedTable(err) {
 }
 
 async function legacyGeminiVision({ apiKey, mimeType, parts, model }) {
-  const m = model || "gemini-1.5-flash";
+  const m = model || "gemini-2.0-flash";
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent?key=${encodeURIComponent(apiKey)}`,
     {
@@ -147,7 +147,7 @@ async function callVision(opts) {
     if (isUndefinedTable(e)) {
       const apiKey = process.env.GEMINI_API_KEY;
       if (!apiKey) throw e;
-      const { content } = await legacyGeminiVision({ apiKey, parts, model: "gemini-1.5-flash" });
+      const { content } = await legacyGeminiVision({ apiKey, parts, model: "gemini-2.0-flash" });
       return content;
     }
     throw e;
@@ -156,7 +156,7 @@ async function callVision(opts) {
   if (!provider) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error("GEMINI_FLASH no configurado en BD ni GEMINI_API_KEY");
-    const { content } = await legacyGeminiVision({ apiKey, parts, model: "gemini-1.5-flash" });
+    const { content } = await legacyGeminiVision({ apiKey, parts, model: "gemini-2.0-flash" });
     return content;
   }
 
@@ -189,7 +189,7 @@ async function callVision(opts) {
     const { content: c, usage } = await legacyGeminiVision({
       apiKey,
       parts,
-      model: provider.model_name || "gemini-1.5-flash",
+      model: provider.model_name || "gemini-2.0-flash",
     });
     content = c;
     tokensIn = usage?.promptTokenCount || Math.min(500000, Math.ceil(JSON.stringify(parts).length / 4));

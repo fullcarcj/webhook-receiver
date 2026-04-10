@@ -1929,6 +1929,159 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Comprobantes de pago — tabla HTML; protegida con ?k= igual a ADMIN_SECRET. */
+  if (req.method === "GET" && (url.pathname === "/payment-attempts" || url.pathname === "/payment-attempts/")) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><meta charset=\"utf-8\"><title>Comprobantes</title><p>Define <code>ADMIN_SECRET</code> y reinicia.</p>");
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><meta charset=\"utf-8\"><title>Comprobantes</title><p>Acceso denegado. Usa <code>/payment-attempts?k=TU_CLAVE</code>.</p>");
+      return;
+    }
+    const sp = url.searchParams;
+    const limit  = Math.min(Math.max(parseInt(sp.get("limit")  || "50",  10), 1), 200);
+    const offset = Math.max(parseInt(sp.get("offset") || "0", 10), 0);
+    const status = sp.get("status") || null;
+    const today  = sp.get("today") === "1";
+    let where = "WHERE TRUE";
+    const params = [];
+    if (status)  { params.push(status); where += ` AND pa.reconciliation_status = $${params.length}`; }
+    if (today)   { where += ` AND pa.created_at >= CURRENT_DATE`; }
+    let rows, total;
+    try {
+      const { pool: _p } = require("./db");
+      const r  = await _p.query(`
+        SELECT pa.id, pa.created_at, pa.reconciliation_status,
+               pa.is_receipt, pa.prefiler_score, pa.prefiler_reason,
+               pa.firebase_url,
+               pa.extracted_reference, pa.extracted_amount_bs,
+               pa.extracted_date, pa.extracted_bank, pa.extracted_payment_type,
+               pa.extraction_confidence,
+               pa.reconciled_order_id, pa.reconciled_at,
+               c.full_name AS customer_name, c.phone AS customer_phone
+        FROM payment_attempts pa
+        LEFT JOIN customers c ON c.id = pa.customer_id
+        ${where}
+        ORDER BY pa.created_at DESC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+      `, [...params, limit, offset]);
+      const cnt = await _p.query(`SELECT COUNT(*) AS total FROM payment_attempts pa ${where}`, params);
+      rows  = r.rows;
+      total = Number(cnt.rows[0].total);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (sp.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, rows, meta: { total, limit, offset } }));
+      return;
+    }
+    const statusBadge = (s) => {
+      const map = {
+        matched:       'background:#003920;color:#00d395',
+        pending:       'background:#2a1f00;color:#f5a623',
+        manual_review: 'background:#3b1219;color:#f4212e',
+        no_match:      'background:#1e2732;color:#71767b',
+        rejected:      'background:#3b1219;color:#f4212e',
+      };
+      const style = map[s] || 'background:#1e2732;color:#c4cfda';
+      return `<span style="display:inline-block;padding:0.1rem 0.4rem;border-radius:4px;font-size:0.75rem;font-weight:600;${style}">${escapeHtml(String(s || "—"))}</span>`;
+    };
+    const scoreBar = (score) => {
+      if (score == null) return "—";
+      const pct = Math.round(Number(score) * 100);
+      const col = pct >= 75 ? "#00d395" : pct >= 55 ? "#f5a623" : "#f4212e";
+      return `<span style="color:${col};font-weight:600">${pct}%</span>`;
+    };
+    const rowsHtml = rows.map((r) => {
+      const fbUrl = r.firebase_url ? String(r.firebase_url) : null;
+      const imgCell = fbUrl
+        ? `<a href="${escapeHtml(fbUrl)}" target="_blank" rel="noreferrer" title="${escapeHtml(fbUrl)}">
+             <img src="${escapeHtml(fbUrl)}" style="max-width:70px;max-height:60px;border-radius:4px;vertical-align:middle;border:1px solid #38444d" loading="lazy" onerror="this.style.display='none';this.nextSibling.style.display='inline'">
+             <span style="display:none;font-size:0.72rem">🔗 ver</span>
+           </a>`
+        : "—";
+      // Badge extracción IA: OK si al menos un campo fue extraído, FALLÓ si ninguno
+      const hasExtracted = r.extracted_reference != null || r.extracted_amount_bs != null || r.extracted_bank != null;
+      const extractionBadge = hasExtracted
+        ? `<span style="display:inline-block;padding:0.1rem 0.45rem;border-radius:4px;font-size:0.75rem;font-weight:600;background:#003920;color:#00d395">OK</span>`
+        : `<span style="display:inline-block;padding:0.1rem 0.45rem;border-radius:4px;font-size:0.75rem;font-weight:600;background:#3b1219;color:#f4212e" title="Gemini no extrajo datos — API key, límite, o imagen ilegible">FALLÓ</span>`;
+      return `<tr>
+  <td>${escapeHtml(String(r.id))}</td>
+  <td class="muted">${escapeHtml(String(r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at).replace("T"," ").slice(0,19))}</td>
+  <td>${statusBadge(r.reconciliation_status)}</td>
+  <td>${scoreBar(r.prefiler_score)}</td>
+  <td style="font-size:0.72rem;color:#c4cfda">${escapeHtml(String(r.prefiler_reason || "—"))}</td>
+  <td>${imgCell}</td>
+  <td>${extractionBadge}</td>
+  <td>${escapeHtml(String(r.extracted_reference || "—"))}</td>
+  <td style="font-weight:600">${escapeHtml(r.extracted_amount_bs != null ? `Bs ${Number(r.extracted_amount_bs).toLocaleString("es-VE")}` : "—")}</td>
+  <td>${escapeHtml(String(r.extracted_date || "—"))}</td>
+  <td>${escapeHtml(String(r.extracted_bank || "—"))}</td>
+  <td>${escapeHtml(String(r.extracted_payment_type || "—"))}</td>
+  <td>${scoreBar(r.extraction_confidence)}</td>
+  <td>${escapeHtml(String(r.reconciled_order_id || "—"))}</td>
+  <td>${escapeHtml(String(r.customer_name || "—"))}</td>
+  <td class="muted">${escapeHtml(String(r.customer_phone || "—"))}</td>
+</tr>`;
+    }).join("");
+    const filterLinks = ["pending","matched","manual_review","no_match"].map((s) =>
+      `<a href="/payment-attempts?k=${encodeURIComponent(k)}&status=${s}&today=1" style="color:#8b98a5;margin-right:0.75rem;font-size:0.8rem">${s}</a>`
+    ).join("");
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta http-equiv="refresh" content="20"/>
+  <title>Comprobantes de pago</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.25rem; }
+    p.lead { color: #71767b; font-size: 0.85rem; margin: 0.25rem 0 0.75rem; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.76rem; }
+    th, td { border: 1px solid #38444d; padding: 0.3rem 0.4rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; font-size: 0.74rem; white-space: nowrap; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.75rem; }
+    a { color: #1d9bf0; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <h1>📄 Comprobantes de pago (payment_attempts)</h1>
+  <p class="lead">
+    ${total} registro(s) · mostrando ${rows.length} · <strong>${today ? "solo hoy" : "todos"}</strong> ·
+    ${status ? `filtro: <strong>${status}</strong> ·` : ""}
+    auto-refresh 20s ·
+    <a href="/payment-attempts?k=${encodeURIComponent(k)}&today=1">Hoy</a> ·
+    <a href="/payment-attempts?k=${encodeURIComponent(k)}">Todos</a> ·
+    <a href="/payment-attempts?k=${encodeURIComponent(k)}&today=1&format=json">JSON</a>
+  </p>
+  <div style="margin-bottom:0.5rem">${filterLinks}<a href="/payment-attempts?k=${encodeURIComponent(k)}&today=1" style="color:#8b98a5;font-size:0.8rem">todos los estados</a></div>
+  <table>
+    <thead><tr>
+      <th>id</th><th>creado</th><th>estado</th><th>prefiltro</th>
+      <th>motivo prefiltro</th><th>imagen</th><th>extracción IA</th>
+      <th>referencia</th><th>monto Bs</th><th>fecha tx</th><th>banco</th>
+      <th>tipo pago</th><th>confianza IA</th><th>orden conciliada</th>
+      <th>cliente</th><th>teléfono</th>
+    </tr></thead>
+    <tbody>${rowsHtml || '<tr><td colspan="16" style="text-align:center;color:#71767b;padding:1rem">Sin registros.</td></tr>'}</tbody>
+  </table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
   if (await handleSalesApiRequest(req, res, url)) {
     return;
   }
@@ -6235,6 +6388,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Banesco (conexión / monitor): http://localhost:${PORT}/banesco?k=TU_ADMIN_SECRET`);
     console.log(`Banesco JSON conexión: http://localhost:${PORT}/banesco-connection?k=TU_ADMIN_SECRET`);
     console.log(`Extractos bank_statements: http://localhost:${PORT}/statements?k=TU_ADMIN_SECRET`);
+    console.log(`Comprobantes pago (tabla): http://localhost:${PORT}/payment-attempts?k=TU_ADMIN_SECRET&today=1`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
     console.log(`Órdenes ML (sync-orders): http://localhost:${PORT}/ordenes-ml?k=TU_ADMIN_SECRET`);
     console.log(`Mensajes pack órdenes (BD): http://localhost:${PORT}/mensajes-pack-orden?k=TU_ADMIN_SECRET`);

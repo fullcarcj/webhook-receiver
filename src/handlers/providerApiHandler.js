@@ -161,8 +161,8 @@ async function runReceiptTest(req, res) {
            (customer_id, chat_id, firebase_url,
             extracted_reference, extracted_amount_bs, extracted_date,
             extracted_bank, extracted_payment_type, extraction_confidence,
-            is_receipt, prefiler_score)
-         VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, TRUE, $9)
+            is_receipt, prefiler_score, prefiler_reason)
+         VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $10)
          RETURNING id`,
         [
           customerId ?? null,
@@ -174,6 +174,7 @@ async function runReceiptTest(req, res) {
           extracted?.payment_type     ?? null,
           extracted?.confidence       ?? null,
           prefiltro.score,
+          prefiltro.reason ?? null,
         ]
       );
       attemptId = rows[0]?.id ?? null;

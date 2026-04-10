@@ -72,20 +72,29 @@ async function isPaymentReceipt(imageBuffer) {
     const bankColorRatio = bankColorHits / total;
 
     let score = 0;
-    score += lightRatio >= THRESHOLDS.MIN_LIGHT_PIXEL_RATIO
+    const factors = [];
+
+    const lightScore = lightRatio >= THRESHOLDS.MIN_LIGHT_PIXEL_RATIO
       ? 0.50
       : (lightRatio * 0.50) / THRESHOLDS.MIN_LIGHT_PIXEL_RATIO;
+    score += lightScore;
+    factors.push(`luz:${Math.round(lightRatio * 100)}%`);
 
-    if (isPortrait)            score += 0.25;
-    if (isLandscape)           score += 0.20;
-    if (bankColorRatio > 0.05) score += 0.25;
+    if (isPortrait)  { score += 0.25; factors.push("portrait"); }
+    if (isLandscape) { score += 0.20; factors.push("landscape"); }
+
+    if (bankColorRatio > 0.05) {
+      score += 0.25;
+      factors.push(`color_bancario:${Math.round(bankColorRatio * 100)}%`);
+    }
 
     score = Math.min(score, 1.00);
 
+    const passed = score >= THRESHOLDS.MIN_CONFIDENCE;
     return {
-      isReceipt: score >= THRESHOLDS.MIN_CONFIDENCE,
+      isReceipt: passed,
       score:     Math.round(score * 100) / 100,
-      reason:    score >= THRESHOLDS.MIN_CONFIDENCE ? "receipt_detected" : "low_score",
+      reason:    `${passed ? "ok" : "rechazado"} [${factors.join(", ")}]`,
     };
   } catch (err) {
     return { isReceipt: false, score: 0, reason: `error: ${err.message}` };

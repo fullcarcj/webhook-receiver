@@ -153,8 +153,8 @@ async function handle(normalized) {
                (customer_id, chat_id, firebase_url,
                 extracted_reference, extracted_amount_bs, extracted_date,
                 extracted_bank, extracted_payment_type, extraction_confidence,
-                is_receipt, prefiler_score)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10)
+                is_receipt, prefiler_score, prefiler_reason)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10,$11)
              RETURNING id`,
             [
               customerId  ?? null,
@@ -167,6 +167,7 @@ async function handle(normalized) {
               extracted?.payment_type     ?? null,
               extracted?.confidence       ?? null,
               prefilter.score,
+              prefilter.reason ?? null,
             ]
           );
 

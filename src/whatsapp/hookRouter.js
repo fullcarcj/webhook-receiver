@@ -57,10 +57,13 @@ async function routeWebhook(body) {
 
     try {
       await runProcessor(eventType, normalized);
-      // Media entrante: procesar en paralelo al flujo de texto (no bloquear)
+      // Media entrante: solo para el evento canónico messages.received
+      // messages.upsert y messages-personal.received traen el mismo mensaje → evitar triple proceso
+      const originalEv = normalized.__originalEvent || eventType;
+      const isCanonicalReceived = eventType === "messages.received" && originalEv === "messages.received";
       const hasMediaByType = MEDIA_TYPES.has(normalized.type);
       const hasMediaInRawPayload = !!detectMedia(extractRawMessage(normalized));
-      if (eventType === "messages.received" && (hasMediaByType || hasMediaInRawPayload)) {
+      if (isCanonicalReceived && (hasMediaByType || hasMediaInRawPayload)) {
         setImmediate(() => {
           mediaProcessor.handle(normalized).catch((err) => {
             logger.error({ err, eventType }, "media_processor_error");

@@ -338,6 +338,8 @@ function parseWebhookJobs(body) {
     evOut = "reactions.received";
   }
   norm.eventType = evOut;
+  // Preservar el evento original de Wasender para que hookRouter pueda filtrar duplicados
+  norm.__originalEvent = ev;
 
   console.log(
     "[parser] rawEvent=%s → evOut=%s fromPhone=%s toPhone=%s msgId=%s type=%s",

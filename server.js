@@ -2156,9 +2156,15 @@ const server = http.createServer(async (req, res) => {
                pa.extracted_date, pa.extracted_bank, pa.extracted_payment_type,
                pa.extraction_confidence,
                pa.reconciled_order_id, pa.reconciled_at,
-               c.full_name AS customer_name, c.phone AS customer_phone
+               c.full_name AS customer_name, c.phone AS customer_phone,
+               rl.bank_statement_id AS statement_id,
+               bs.reconciliation_status AS statement_status
         FROM payment_attempts pa
         LEFT JOIN customers c ON c.id = pa.customer_id
+        LEFT JOIN reconciliation_log rl
+          ON  rl.payment_attempt_id = pa.id
+          AND rl.bank_statement_id  IS NOT NULL
+        LEFT JOIN bank_statements bs ON bs.id = rl.bank_statement_id
         ${where}
         ORDER BY pa.created_at DESC
         LIMIT $${params.length + 1} OFFSET $${params.length + 2}
@@ -2181,11 +2187,18 @@ const server = http.createServer(async (req, res) => {
         matched:       'background:#003920;color:#00d395',
         pending:       'background:#2a1f00;color:#f5a623',
         manual_review: 'background:#3b1219;color:#f4212e',
-        no_match:      'background:#1e2732;color:#71767b',
-        rejected:      'background:#3b1219;color:#f4212e',
+        no_match:      'background:#3b1219;color:#f4212e',
+        rejected:      'background:#2a0a0a;color:#ff6b6b',
+      };
+      const label = {
+        matched:       '✅ matched',
+        pending:       '⏳ pending',
+        manual_review: '⚠️ manual_review',
+        no_match:      '❌ no_match',
+        rejected:      '🚫 rejected',
       };
       const style = map[s] || 'background:#1e2732;color:#c4cfda';
-      return `<span style="display:inline-block;padding:0.1rem 0.4rem;border-radius:4px;font-size:0.75rem;font-weight:600;${style}">${escapeHtml(String(s || "—"))}</span>`;
+      return `<span style="display:inline-block;padding:0.1rem 0.4rem;border-radius:4px;font-size:0.75rem;font-weight:600;${style}">${escapeHtml(label[s] || String(s || "—"))}</span>`;
     };
     const scoreBar = (score) => {
       if (score == null) return "—";
@@ -2206,6 +2219,12 @@ const server = http.createServer(async (req, res) => {
       const extractionBadge = hasExtracted
         ? `<span style="display:inline-block;padding:0.1rem 0.45rem;border-radius:4px;font-size:0.75rem;font-weight:600;background:#003920;color:#00d395">OK</span>`
         : `<span style="display:inline-block;padding:0.1rem 0.45rem;border-radius:4px;font-size:0.75rem;font-weight:600;background:#3b1219;color:#f4212e" title="Gemini no extrajo datos — API key, límite, o imagen ilegible">FALLÓ</span>`;
+      const stmtCell = r.statement_id != null
+        ? `<span style="display:inline-flex;align-items:center;gap:.3rem">
+             <span style="display:inline-block;padding:0.1rem 0.4rem;border-radius:4px;font-size:0.72rem;font-weight:700;background:#0c2a3a;color:#1d9bf0">#${escapeHtml(String(r.statement_id))}</span>
+             <span style="font-size:0.7rem;color:${r.statement_status === "MATCHED" ? "#00d395" : "#f5a623"}">${escapeHtml(String(r.statement_status || ""))}</span>
+           </span>`
+        : '<span style="color:#38444d;font-size:0.72rem">—</span>';
       return `<tr>
   <td>${escapeHtml(String(r.id))}</td>
   <td class="muted">${escapeHtml(String(r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at).replace("T"," ").slice(0,19))}</td>
@@ -2221,6 +2240,7 @@ const server = http.createServer(async (req, res) => {
   <td>${escapeHtml(String(r.extracted_payment_type || "—"))}</td>
   <td>${scoreBar(r.extraction_confidence)}</td>
   <td>${escapeHtml(String(r.reconciled_order_id || "—"))}</td>
+  <td>${stmtCell}</td>
   <td>${escapeHtml(String(r.customer_name || "—"))}</td>
   <td class="muted">${escapeHtml(String(r.customer_phone || "—"))}</td>
 </tr>`;
@@ -2264,9 +2284,9 @@ const server = http.createServer(async (req, res) => {
       <th>motivo prefiltro</th><th>imagen</th><th>extracción IA</th>
       <th>referencia</th><th>monto Bs</th><th>fecha tx</th><th>banco</th>
       <th>tipo pago</th><th>confianza IA</th><th>orden conciliada</th>
-      <th>cliente</th><th>teléfono</th>
+      <th>statement</th><th>cliente</th><th>teléfono</th>
     </tr></thead>
-    <tbody>${rowsHtml || '<tr><td colspan="16" style="text-align:center;color:#71767b;padding:1rem">Sin registros.</td></tr>'}</tbody>
+    <tbody>${rowsHtml || '<tr><td colspan="17" style="text-align:center;color:#71767b;padding:1rem">Sin registros.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;

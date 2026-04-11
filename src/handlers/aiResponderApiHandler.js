@@ -205,6 +205,7 @@ async function handleAiResponderRequest(req, res, url) {
     }
     let stats;
     let pending;
+    let queuedPending;
     let recentLog;
     try {
       stats = await getStats();
@@ -220,6 +221,16 @@ async function handleAiResponderRequest(req, res, url) {
          LIMIT 30`
       );
       pending = p.rows;
+      const qp = await pool.query(
+        `SELECT id, chat_id, customer_id, ai_reply_status,
+                LEFT(COALESCE(content::text, ''), 140) AS contenido,
+                created_at
+         FROM crm_messages
+         WHERE ai_reply_status IN ('pending_ai_reply', 'pending_receipt_confirm', 'processing')
+         ORDER BY created_at DESC
+         LIMIT 30`
+      );
+      queuedPending = qp.rows;
       const lg = await pool.query(
         `SELECT id, crm_message_id, action_taken, confidence,
                 COALESCE(provider_used, '') AS provider_used,
@@ -308,6 +319,29 @@ td.msg{max-width:22rem;word-break:break-word}
     · <a href="/api/ai-responder/log?k=${kEnc}">log JSON</a>
     · <a href="/api/ai-responder/pending?k=${kEnc}">pending JSON</a>
   </p>
+  ${queuedPending.length > 0 ? `
+  <p style="margin:.6rem 0 .3rem"><strong>⏳ En cola / procesando ahora</strong> <span class="muted">(${queuedPending.length})</span></p>
+  <table>
+    <thead><tr><th>#msg</th><th>chat</th><th>cliente</th><th>estado</th><th class="msg">contenido recibido</th><th>recibido</th></tr></thead>
+    <tbody>
+    ${queuedPending.map((r) => {
+      const est = String(r.ai_reply_status || "");
+      const estBadge = est === "processing"
+        ? `<span class="badge" style="background:#1a237e;color:#c5cae9">⚙ procesando</span>`
+        : est === "pending_receipt_confirm"
+        ? `<span class="badge pend">comprobante</span>`
+        : `<span class="badge pend">⏳ pendiente</span>`;
+      return `<tr>
+        <td>${r.id}</td>
+        <td>${escapeHtml(String(r.chat_id || "—"))}</td>
+        <td>${escapeHtml(String(r.customer_id || "—"))}</td>
+        <td>${estBadge}</td>
+        <td class="msg">${escapeHtml(r.contenido || "—")}</td>
+        <td>${escapeHtml(String(r.created_at))}</td>
+      </tr>`;
+    }).join("")}
+    </tbody>
+  </table>` : `<p class="muted" style="margin:.4rem 0 0">Sin mensajes en cola ahora.</p>`}
 </div>
 
 <h2>📋 Log completo de mensajes automáticos (últimos 80)</h2>

@@ -251,6 +251,13 @@ async function handleCrmApiRequest(req, res, url) {
         return true;
       }
 
+      // GET /api/crm/customers/:id/wallet/summary
+      if (req.method === "GET" && subpath === "/wallet/summary") {
+        const data = await crmService.getWalletSummary(customerId);
+        writeJson(res, 200, { ok: true, ...data });
+        return true;
+      }
+
       // GET /api/crm/customers/:id/wallet/history
       if (req.method === "GET" && subpath === "/wallet/history") {
         const data = await crmService.getWalletHistory({

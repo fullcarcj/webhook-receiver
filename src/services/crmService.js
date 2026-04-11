@@ -23,6 +23,7 @@ const CRM_TX_TYPES = {
   CREDIT_MANUAL:  "CREDIT_ADJUSTMENT",  // alias amigable
   CREDIT_RETURN:  "CREDIT_RETURN",
   DEBIT_SALE:     "DEBIT_PURCHASE",     // alias amigable
+  DEBIT_MANUAL:   "DEBIT_ADJUSTMENT",   // alias amigable
   DEBIT_ADJUST:   "DEBIT_ADJUSTMENT",
 };
 const VALID_CRM_TX_TYPES = Object.keys(CRM_TX_TYPES);
@@ -604,6 +605,63 @@ async function runMigration(companyId) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// getWalletSummary(customerId)
+//
+// Resumen del libro mayor para el panel admin.
+// Retorna totales de créditos, débitos y conteos por tipo.
+// ─────────────────────────────────────────────────────────────────────────────
+async function getWalletSummary(customerId) {
+  const id = Number(customerId);
+  if (!Number.isFinite(id) || id <= 0) {
+    const e = new Error("customer_id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  try {
+    const { rows: [summary] } = await pool.query(
+      `SELECT
+         COUNT(*)                                                         AS total_tx,
+         COALESCE(SUM(amount) FILTER (WHERE amount > 0), 0)              AS total_credits,
+         COALESCE(SUM(amount) FILTER (WHERE amount < 0), 0)              AS total_debits,
+         COUNT(*) FILTER (WHERE tx_type = 'CREDIT_RMA')                  AS rma_count,
+         COUNT(*) FILTER (WHERE tx_type IN ('DEBIT_PURCHASE','DEBIT_ADJUSTMENT')) AS sale_count,
+         COUNT(*) FILTER (WHERE status = 'CONFIRMED')                    AS confirmed_count,
+         COUNT(*) FILTER (WHERE status = 'PENDING')                      AS pending_count,
+         COUNT(*) FILTER (WHERE status = 'CANCELLED')                    AS cancelled_count,
+         MIN(created_at)                                                  AS first_tx,
+         MAX(created_at)                                                  AS last_tx
+       FROM wallet_transactions
+       WHERE customer_id = $1`,
+      [id]
+    );
+
+    const { rows: [wallet] } = await pool.query(
+      `SELECT COALESCE(SUM(balance), 0) AS balance_usd
+       FROM customer_wallets
+       WHERE customer_id = $1`,
+      [id]
+    );
+
+    return {
+      customer_id:     id,
+      balance_usd:     Number(wallet.balance_usd),
+      total_tx:        Number(summary.total_tx),
+      total_credits:   Number(summary.total_credits),
+      total_debits:    Number(summary.total_debits),
+      rma_count:       Number(summary.rma_count),
+      sale_count:      Number(summary.sale_count),
+      confirmed_count: Number(summary.confirmed_count),
+      pending_count:   Number(summary.pending_count),
+      cancelled_count: Number(summary.cancelled_count),
+      first_tx:        summary.first_tx,
+      last_tx:         summary.last_tx,
+    };
+  } catch (err) {
+    throw mapCrmError(err);
+  }
+}
+
 module.exports = {
   findOrCreateFromBuyer,
   getCustomer,
@@ -615,6 +673,7 @@ module.exports = {
   addWalletTransaction,
   getWalletBalance,
   getWalletHistory,
+  getWalletSummary,
   runMigration,
   VALID_CRM_TX_TYPES,
 };

@@ -245,7 +245,96 @@ ORDER BY c.total_spent_usd DESC NULLS LAST;
 
 
 -- ─────────────────────────────────────────────────────
--- 7. Verificación
+-- 7. balance_before_usd — auditoría del libro mayor
+--
+-- Agrega la columna a wallet_transactions si no existe.
+-- El trigger actualizado la poplua automáticamente en
+-- cada cambio de estado que afecta el balance.
+-- ─────────────────────────────────────────────────────
+ALTER TABLE wallet_transactions
+  ADD COLUMN IF NOT EXISTS balance_before_usd NUMERIC(15,4);
+
+-- Reemplazar update_wallet_balance() para capturar
+-- el saldo antes de cada movimiento confirmado.
+-- Idempotente: CREATE OR REPLACE.
+CREATE OR REPLACE FUNCTION update_wallet_balance()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+  v_before NUMERIC(15,4) := 0;
+BEGIN
+  IF TG_OP = 'INSERT' AND NEW.status = 'CONFIRMED' THEN
+    SELECT COALESCE(balance, 0)
+      INTO v_before
+      FROM customer_wallets WHERE id = NEW.wallet_id;
+
+    UPDATE wallet_transactions
+      SET balance_before_usd = v_before
+      WHERE id = NEW.id;
+
+    UPDATE customer_wallets
+      SET balance          = balance + NEW.amount,
+          last_movement_at = now()
+      WHERE id = NEW.wallet_id;
+
+  ELSIF TG_OP = 'UPDATE'
+    AND OLD.status = 'PENDING'
+    AND NEW.status = 'CONFIRMED' THEN
+
+    SELECT COALESCE(balance, 0)
+      INTO v_before
+      FROM customer_wallets WHERE id = NEW.wallet_id;
+
+    UPDATE wallet_transactions
+      SET balance_before_usd = v_before
+      WHERE id = NEW.id;
+
+    UPDATE customer_wallets
+      SET balance          = balance + NEW.amount,
+          last_movement_at = now()
+      WHERE id = NEW.wallet_id;
+
+  ELSIF TG_OP = 'UPDATE'
+    AND OLD.status = 'CONFIRMED'
+    AND NEW.status = 'CANCELLED' THEN
+
+    SELECT COALESCE(balance, 0)
+      INTO v_before
+      FROM customer_wallets WHERE id = OLD.wallet_id;
+
+    UPDATE wallet_transactions
+      SET balance_before_usd = v_before
+      WHERE id = NEW.id;
+
+    UPDATE customer_wallets
+      SET balance          = balance - OLD.amount,
+          last_movement_at = now()
+      WHERE id = OLD.wallet_id;
+  END IF;
+
+  IF TG_OP IN ('INSERT','UPDATE') THEN
+    PERFORM 1 FROM customer_wallets
+      WHERE id = NEW.wallet_id AND balance < 0;
+    IF FOUND THEN
+      RAISE EXCEPTION
+        'Balance negativo detectado en wallet_id=%. Operación revertida.',
+        NEW.wallet_id;
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+-- El trigger ya existe — DROP+CREATE es idempotente aquí.
+DROP TRIGGER IF EXISTS trg_wallet_balance ON wallet_transactions;
+CREATE TRIGGER trg_wallet_balance
+  AFTER INSERT OR UPDATE OF status
+  ON wallet_transactions
+  FOR EACH ROW EXECUTE FUNCTION update_wallet_balance();
+
+
+-- ─────────────────────────────────────────────────────
+-- 8. Verificación
 -- ─────────────────────────────────────────────────────
 SELECT column_name, data_type
 FROM information_schema.columns

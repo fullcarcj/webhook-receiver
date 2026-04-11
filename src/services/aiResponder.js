@@ -29,9 +29,21 @@ function confidenceMin() {
   return Number.isFinite(n) ? n : 85;
 }
 
-/** Si =1, omite solo la cola de revisión humana (un nombre: `AI_RESPONDER_FORCE_SEND`). */
+/**
+ * Switch `AI_RESPONDER_FORCE_SEND`: revisión humana **apagada** (auto-envío si hay texto).
+ * ON (sin revisión): 1, true, yes, on (case-insensitive).
+ * OFF (con revisión): 0, false, no, off, vacío o cualquier otro valor.
+ */
 function isForceSend() {
-  return String(process.env.AI_RESPONDER_FORCE_SEND || "").trim() === "1";
+  const v = String(process.env.AI_RESPONDER_FORCE_SEND ?? "").trim().toLowerCase();
+  if (!v) return false;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  return ["1", "true", "yes", "on"].includes(v);
+}
+
+/** true = el operador debe aprobar antes de enviar (switch FORCE apagado). */
+function isHumanReviewGateOn() {
+  return !isForceSend();
 }
 
 /** Respuesta fija negocio; placeholders: {{CONTEXTO_IA}}, {{NOMBRE}} (opcional). */
@@ -508,7 +520,7 @@ async function processOneMessage(message) {
   if (result.needsHuman && isForceSend()) {
     log.warn(
       { messageId, confidence: result.confidence },
-      "ai_responder: AI_RESPONDER_FORCE_SEND=1 — omite cola revisión humana (needsHuman), envío directo"
+      "ai_responder: FORCE_SEND switch ON — omite cola revisión humana (needsHuman), envío directo"
     );
   }
 
@@ -613,6 +625,7 @@ module.exports = {
   isEnabled,
   confidenceMin,
   isForceSend,
+  isHumanReviewGateOn,
   maybeQueueInboundText,
   generateResponse,
   processOneMessage,

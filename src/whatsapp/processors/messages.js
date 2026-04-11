@@ -19,6 +19,10 @@
  *   → Solo INSERT crm_chat_states (AWAITING_NAME, push_name, trigger_message_id).
  *   → NO se toca customers, crm_chats ni crm_messages.
  *   → Post-commit: "¡Hola! Bienvenido a Solomotor3k. ¿Cómo te llamas? (Nombre y Apellido)"
+ *
+ * AWAITING_NAME + texto que no es nombre válido (incl. 1 palabra tipo ASK_SURNAME):
+ *   → upsertChat(customer_id NULL) + crm_messages + maybeQueueInboundText → **Tipo M sin customer**
+ *   (crm_chat_states sigue AWAITING_NAME hasta que envíe nombre válido en CASO 2).
  */
 
 const pino = require("pino");
@@ -464,18 +468,33 @@ async function handle(normalized) {
         messageText.length > 0 &&
         !isInboundTextFinal
       ) {
-        if (isAskSurnameResult) {
-          // 1 sola palabra (ej. "Javier", "Hola") → pedir nombre y apellido completos.
-          postAction = "ask_surname";
-          msgLog.info({ fromPhone: normalized.fromPhone, messageText: messageText.slice(0, 40) }, "tipo_h_ask_surname");
-        } else {
-          // Nombre inválido (frase, verbo, etc.) → mantener estado en espera sin responder.
-          postAction = null;
-          msgLog.info(
-            { fromPhone: normalized.fromPhone, messageText: messageText.slice(0, 120) },
-            "tipo_h_invalid_name_standby"
-          );
-        }
+        // Texto no válido como nombre completo (frase, 1 palabra, etc.) → Tipo M sin customer
+        // (crm_chats.phone = fromPhone; customer_id NULL hasta que registre nombre en otro mensaje).
+        msgLog.info(
+          {
+            fromPhone: normalized.fromPhone,
+            messageText: messageText.slice(0, 120),
+            askSurname: isAskSurnameResult,
+          },
+          "tipo_m_awaiting_name_non_valid_text"
+        );
+        const lastAt = new Date((normalized.timestamp || Math.floor(Date.now() / 1000)) * 1000);
+        const preview = messageText.slice(0, 200);
+        const chatRow = await upsertChat(client, {
+          customerId: null,
+          phone: normalized.fromPhone,
+          lastMessageAt: lastAt,
+          lastMessageText: preview,
+          lastMessageType: normalized.type || "text",
+        });
+        postChatId = chatRow.id;
+        await saveMessageAndUpdateChat(client, {
+          chatId: postChatId,
+          customerId: null,
+          normalized,
+          eventType,
+        });
+        postAction = null;
       } else if (!chatState || isTriggerReplay) {
         // ══════════════════════════════════════════════════════════════
         // CASO 3: Contacto completamente nuevo (o mismo trigger replay)
@@ -574,18 +593,6 @@ async function handle(normalized) {
             );
           })
           .catch((err) => msgLog.error({ err, phoneRaw: _askPhone }, "trySendCrmWaAskName"));
-      });
-    } else if (postAction === "ask_surname") {
-      // Usuario envió 1 sola palabra: reutilizamos el envío de ask_name (pide nombre + apellido).
-      const _askPhone = normalized.fromPhone;
-      msgLog.info({ phoneRaw: _askPhone }, "tipo_h_ask_surname_dispatch");
-      setImmediate(() => {
-        Promise.resolve()
-          .then(() => trySendCrmWaAskName({ phoneRaw: _askPhone }))
-          .then((r) => {
-            msgLog.info({ outcome: r?.outcome, ok: r?.ok, phoneRaw: _askPhone }, "tipo_h_ask_surname_result");
-          })
-          .catch((err) => msgLog.error({ err, phoneRaw: _askPhone }, "trySendCrmWaAskName_ask_surname"));
       });
     }
 

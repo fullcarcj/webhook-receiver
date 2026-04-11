@@ -3,7 +3,13 @@
 const pino = require("pino");
 const { pool } = require("../../db");
 const { ensureAdmin } = require("../middleware/adminAuth");
-const { sendAiReplyToCustomer, logAiResponse, providerAuditTipoM, isForceSend } = require("../services/aiResponder");
+const {
+  sendAiReplyToCustomer,
+  logAiResponse,
+  providerAuditTipoM,
+  isForceSend,
+  isHumanReviewGateOn,
+} = require("../services/aiResponder");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder_api" });
 
@@ -58,6 +64,7 @@ async function getStats() {
     ai_responder_enabled: String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1",
     confidence_min: parseInt(process.env.AI_RESPONDER_CONFIDENCE_MIN || "85", 10) || 85,
     force_send: isForceSend(),
+    human_review_gate: isHumanReviewGateOn(),
     tipo_m_mode: "plantilla + context_line (IA no elige flujo)",
     today_messages: today.rows[0] || {},
     today_log_by_action: Object.fromEntries(logc.rows.map((r) => [r.action_taken, r.n])),
@@ -288,7 +295,7 @@ td.msg{max-width:22rem;word-break:break-word}
 <p>
   <span class="badge ${stats.ai_responder_enabled ? "on" : "off"}">${stats.ai_responder_enabled ? "WORKER ON" : "WORKER OFF — falta AI_RESPONDER_ENABLED=1"}</span>
   <span class="badge ${stats.provider && stats.provider.groq_key_ok ? "on" : "off"}">GROQ_API_KEY: ${stats.provider && stats.provider.groq_key_ok ? "OK" : "❌ FALTA"}</span>
-  <span class="badge ${stats.force_send ? "off" : "on"}" title="AI_RESPONDER_FORCE_SEND">${stats.force_send ? "⚠ FORCE_SEND=1" : "revisión humana si aplica"}</span>
+  <span class="badge ${stats.human_review_gate ? "on" : "off"}" title="AI_RESPONDER_FORCE_SEND = switch revisión humana">${stats.human_review_gate ? "Revisión humana ON" : "Revisión humana OFF (FORCE)"}</span>
 </p>
 
 <div class="card">

@@ -239,7 +239,7 @@ const { handleCrmApiRequest } = require("./src/routes/crm");
 const { handleBankBanescoRequest } = require("./src/routes/bankBanesco");
 const { handleBankStatementsRequest } = require("./src/routes/bankStatements");
 const { startBanescoMonitor } = require("./src/jobs/banescoMonitor");
-const { rejectDuringDowntime, isInDowntime, msUntilSystemUp } = require("./src/utils/sessionGuard");
+const { rejectDuringDowntime, isInDowntime, msUntilSystemUp, getDowntimeInfo } = require("./src/utils/sessionGuard");
 const {
   reserveForOrder,
   commitReservation,
@@ -2020,14 +2020,34 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/api/health") {
-    const down = isInDowntime();
-    const msLeft = msUntilSystemUp();
-    res.writeHead(down ? 503 : 200, { "Content-Type": "application/json; charset=utf-8" });
+    // NUNCA bloquear con rejectDuringDowntime — es el heartbeat del sistema.
+    const info = getDowntimeInfo();
+    let dbOk = false;
+    let dbLatencyMs = null;
+    try {
+      const t0 = Date.now();
+      await pool.query("SELECT 1");
+      dbLatencyMs = Date.now() - t0;
+      dbOk = true;
+    } catch (err) {
+      console.error("[health] DB check failed:", err.message);
+    }
+    // Siempre 200 — el cliente hace polling aquí durante el downtime.
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(
       JSON.stringify({
-        status: down ? "DOWNTIME" : "OK",
-        time_vet: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
-        retry_after_seconds: down ? Math.ceil(msLeft / 1000) : 0,
+        status:              dbOk ? "ok" : "degraded",
+        inDowntime:          info.inDowntime,
+        downtimeWindow:      info.downtimeWindow,
+        currentTimeVet:      info.currentTimeVet,
+        minutesUntilRestore: info.minutesUntilRestore,
+        message:             info.message,
+        db: {
+          connected: dbOk,
+          latencyMs: dbLatencyMs,
+        },
+        version: process.env.npm_package_version || "1.0.0",
+        uptime:  Math.floor(process.uptime()),
       })
     );
     return;
@@ -2187,6 +2207,7 @@ const server = http.createServer(async (req, res) => {
 
     // POST /api/ml/sku-map
     if (req.method === "POST" && url.pathname === "/api/ml/sku-map") {
+      if (rejectDuringDowntime(req, res)) return;
       let body;
       try { body = await parseJsonBody(req); } catch (e) { respondJsonBodyParseError(res, e); return; }
       const { ml_item_id, product_sku, ml_variation_id, no_stock_action } = body || {};
@@ -2345,6 +2366,7 @@ const server = http.createServer(async (req, res) => {
 
     // ── POST / DELETE (requieren admin) ───────────────────────────────────────
     if (rejectAdminSecret(req, res)) return;
+    if (rejectDuringDowntime(req, res)) return;
 
     let body;
     try { body = await parseJsonBody(req); } catch (e) { respondJsonBodyParseError(res, e); return; }
@@ -2572,18 +2594,38 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (
+    req.method !== "GET" &&
+    url.pathname.startsWith("/api/lots") &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handleLotsApiRequest(req, res, url)) {
     return;
   }
 
+  if (
+    req.method !== "GET" &&
+    url.pathname.startsWith("/api/wallet") &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handleWalletApiRequest(req, res, url)) {
     return;
   }
 
+  if (
+    req.method !== "GET" &&
+    url.pathname.startsWith("/api/crm") &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handleVehicleApiRequest(req, res, url)) {
     return;
   }
 
+  if (
+    req.method === "POST" &&
+    url.pathname.startsWith("/api/customers/purchase") &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handlePurchaseApiRequest(req, res, url)) {
     return;
   }
@@ -2878,27 +2920,58 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (
+    req.method !== "GET" &&
+    url.pathname.startsWith("/api/sales") &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handleSalesApiRequest(req, res, url)) {
     return;
   }
+
+  if (
+    req.method !== "GET" &&
+    url.pathname.startsWith("/api/cash") &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handleCashApiRequest(req, res, url)) {
     return;
   }
+
+  if (
+    req.method !== "GET" &&
+    (url.pathname.startsWith("/api/bundles") || url.pathname.startsWith("/api/price-review")) &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handleBundleApiRequest(req, res, url)) {
     return;
   }
+
   if (await handleProviderApiRequest(req, res, url)) {
     return;
   }
   if (await handleAiResponderRequest(req, res, url)) {
     return;
   }
+
+  if (
+    req.method !== "GET" &&
+    url.pathname.startsWith("/api/delivery") &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handleDeliveryApiRequest(req, res, url)) {
     return;
   }
+
+  if (
+    req.method !== "GET" &&
+    url.pathname.startsWith("/api/price") &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handlePriceApiRequest(req, res, url)) {
     return;
   }
+
   if (await handleMlApiRequest(req, res, url)) {
     return;
   }
@@ -2907,6 +2980,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (
+    req.method !== "GET" &&
+    (url.pathname.startsWith("/api/customers") || url.pathname.startsWith("/api/crm/loyalty")) &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handleCustomerLoyaltyRoutes(req, res, url)) {
     return;
   }
@@ -2931,10 +3009,17 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (
+    req.method !== "GET" &&
+    url.pathname.startsWith("/api/inventory") &&
+    rejectDuringDowntime(req, res)
+  ) { return; }
   if (await handleInventoryApiRequest(req, res, url)) {
     return;
   }
 
+  // /api/crm ya tiene guard antes de handleVehicleApiRequest arriba;
+  // handleCrmApiRequest maneja /webhook/whatsapp (nunca bloquear) y /api/crm/logs (GET).
   if (await handleCrmApiRequest(req, res, url)) {
     return;
   }
@@ -3579,6 +3664,7 @@ const server = http.createServer(async (req, res) => {
       adminSecret && (k === adminSecret || req.headers["x-admin-secret"] === adminSecret);
 
     if (req.method === "POST") {
+      if (rejectDuringDowntime(req, res)) return;
       if (!adminSecret) {
         res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));

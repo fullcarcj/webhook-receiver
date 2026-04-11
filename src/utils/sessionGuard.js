@@ -1,50 +1,120 @@
 'use strict';
 
-// Venezuela no tiene horario de verano — siempre UTC-4
-const VET_OFFSET_MS      = 4 * 60 * 60 * 1000;
-const DOWNTIME_START_HOUR = 23;  // 11:00 PM VET
-const DOWNTIME_END_HOUR   = 6;   // 06:00 AM VET
+// Venezuela no tiene horario de verano — siempre UTC-4 (abolido en 2007).
+const VET_OFFSET_MS = 4 * 60 * 60 * 1000;
 
-function nowVET() {
+// Ventana de downtime: 23:30 → 05:00 VET (cruza medianoche).
+const DOWNTIME_START_HOUR   = 23;
+const DOWNTIME_START_MINUTE = 30;
+const DOWNTIME_END_HOUR     =  5;
+const DOWNTIME_END_MINUTE   =  0;
+const DOWNTIME_START_MIN    = DOWNTIME_START_HOUR * 60 + DOWNTIME_START_MINUTE; // 1410
+const DOWNTIME_END_MIN      = DOWNTIME_END_HOUR   * 60 + DOWNTIME_END_MINUTE;   //  300
+
+/**
+ * Hora actual en VET (UTC-4) como objeto Date.
+ * Usar .getUTCHours() / .getUTCMinutes() sobre el resultado.
+ */
+function getVetNow() {
   return new Date(Date.now() - VET_OFFSET_MS);
 }
 
+// Alias interno
+const nowVET = getVetNow;
+
+/**
+ * ¿Estamos dentro de la ventana de downtime? (23:30 → 05:00 VET)
+ * La ventana cruza medianoche, por lo que la lógica es OR no AND:
+ *   totalMin >= 1410  →  downtime (parte nocturna)
+ *   totalMin <   300  →  downtime (parte de madrugada)
+ */
 function isInDowntime() {
-  const hour = nowVET().getUTCHours();
-  return hour >= DOWNTIME_START_HOUR || hour < DOWNTIME_END_HOUR;
+  const vet    = getVetNow();
+  const total  = vet.getUTCHours() * 60 + vet.getUTCMinutes();
+  return total >= DOWNTIME_START_MIN || total < DOWNTIME_END_MIN;
 }
 
+/**
+ * Milisegundos hasta que el sistema vuelva (05:00 VET).
+ * Retorna 0 si no estamos en downtime.
+ */
 function msUntilSystemUp() {
   if (!isInDowntime()) return 0;
-  const vet     = nowVET();
-  const hour    = vet.getUTCHours();
-  const minutes = vet.getUTCMinutes();
-  let minutesUntil6am;
-  if (hour >= DOWNTIME_START_HOUR) {
-    minutesUntil6am = (24 - hour + DOWNTIME_END_HOUR) * 60 - minutes;
+  const vet   = getVetNow();
+  const total = vet.getUTCHours() * 60 + vet.getUTCMinutes();
+  let minsLeft;
+  if (total >= DOWNTIME_START_MIN) {
+    // Parte nocturna (23:30 → 00:00)
+    minsLeft = (24 * 60 - total) + DOWNTIME_END_MIN;
   } else {
-    minutesUntil6am = (DOWNTIME_END_HOUR - hour) * 60 - minutes;
+    // Parte de madrugada (00:00 → 05:00)
+    minsLeft = DOWNTIME_END_MIN - total;
   }
-  return minutesUntil6am * 60 * 1000;
+  return Math.max(0, minsLeft) * 60 * 1000;
 }
 
-// Usar solo en rutas de escritura críticas.
-// Retorna true si rechazó el request (el handler debe hacer return).
-// Retorna false si el sistema está activo (continuar normalmente).
-function rejectDuringDowntime(req, res) {
+/**
+ * Minutos hasta que el sistema vuelva (05:00 VET).
+ * Retorna 0 si no estamos en downtime.
+ */
+function minutesUntilRestore() {
+  return Math.ceil(msUntilSystemUp() / 60000);
+}
+
+/**
+ * Objeto de estado completo del downtime.
+ */
+function getDowntimeInfo() {
+  const inDowntime = isInDowntime();
+  const mins       = inDowntime ? minutesUntilRestore() : null;
+  return {
+    inDowntime,
+    currentTimeVet:      getVetNow().toISOString(),
+    downtimeWindow:      '23:30 - 05:00 VET',
+    minutesUntilRestore: mins,
+    message: inDowntime
+      ? `Sistema en mantenimiento. Vuelve a las 05:00 VET (en ${mins} minutos).`
+      : 'Sistema operativo.',
+  };
+}
+
+/**
+ * Middleware helper para handlers de escritura.
+ *
+ * Si estamos en downtime → responde 503 y retorna TRUE  (el handler debe hacer return).
+ * Si no → retorna FALSE (continuar normalmente).
+ *
+ * Uso: if (rejectDuringDowntime(req, res)) return;
+ *
+ * @param {*} _req  Request (no se usa; aceptado para compatibilidad con código existente)
+ * @param {*} res   Response
+ */
+function rejectDuringDowntime(_req, res) {
   if (!isInDowntime()) return false;
-  const msLeft   = msUntilSystemUp();
-  const minsLeft = Math.ceil(msLeft / 60000);
+  const info    = getDowntimeInfo();
+  const secsLeft = Math.ceil(msUntilSystemUp() / 1000);
   res.writeHead(503, {
-    'Content-Type':  'application/json',
-    'Retry-After':   Math.ceil(msLeft / 1000),
+    'Content-Type': 'application/json; charset=utf-8',
+    'Retry-After':  String(secsLeft),
   });
   res.end(JSON.stringify({
-    error:                'SYSTEM_DOWNTIME',
-    message:              `Sistema en mantenimiento. Disponible en ~${minsLeft} minutos (06:00 AM VET).`,
-    retry_after_seconds:  Math.ceil(msLeft / 1000),
+    error:               'SERVICE_UNAVAILABLE',
+    message:             info.message,
+    inDowntime:          true,
+    downtimeWindow:      info.downtimeWindow,
+    currentTimeVet:      info.currentTimeVet,
+    minutesUntilRestore: info.minutesUntilRestore,
+    retryAfterSeconds:   secsLeft,
   }));
   return true;
 }
 
-module.exports = { isInDowntime, msUntilSystemUp, rejectDuringDowntime };
+module.exports = {
+  isInDowntime,
+  msUntilSystemUp,
+  minutesUntilRestore,
+  rejectDuringDowntime,
+  getDowntimeInfo,
+  getVetNow,
+  nowVET,
+};

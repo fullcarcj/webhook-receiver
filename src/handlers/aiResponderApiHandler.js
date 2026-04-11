@@ -233,15 +233,19 @@ async function handleAiResponderRequest(req, res, url) {
       );
       queuedPending = qp.rows;
       const lg = await pool.query(
-        `SELECT id, crm_message_id, action_taken, confidence,
-                COALESCE(provider_used, '') AS provider_used,
-                LEFT(COALESCE(reasoning, ''), 400) AS evidencia_razon,
-                COALESCE(NULLIF(TRIM(error_message), ''), '') AS evidencia_error,
-                LEFT(COALESCE(input_text, ''), 100) AS input_prev,
-                LEFT(COALESCE(reply_text, ''), 120) AS reply_preview,
-                created_at
-         FROM ai_response_log
-         ORDER BY created_at DESC
+        `SELECT l.id, l.crm_message_id, l.action_taken, l.confidence,
+                COALESCE(l.provider_used, '') AS provider_used,
+                LEFT(COALESCE(l.reasoning, ''), 400) AS evidencia_razon,
+                COALESCE(NULLIF(TRIM(l.error_message), ''), '') AS evidencia_error,
+                LEFT(COALESCE(l.input_text, ''), 100) AS input_prev,
+                LEFT(COALESCE(l.reply_text, ''), 120) AS reply_preview,
+                l.created_at,
+                COALESCE(ch_log.phone, ch_msg.phone) AS chat_phone
+         FROM ai_response_log l
+         LEFT JOIN crm_chats ch_log ON ch_log.id = l.chat_id
+         LEFT JOIN crm_messages cm ON cm.id = l.crm_message_id
+         LEFT JOIN crm_chats ch_msg ON ch_msg.id = cm.chat_id
+         ORDER BY l.created_at DESC
          LIMIT 80`
       );
       recentLog = lg.rows;
@@ -292,6 +296,7 @@ tr.row-ok{background:#061a0e}
 td.evid{font-size:.66rem;max-width:18rem;word-break:break-word}
 td.errdetail{font-size:.62rem;max-width:42rem;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;line-height:1.35}
 td.msg{max-width:22rem;word-break:break-word}
+td.phone{font-family:ui-monospace,Consolas,monospace;font-size:.68rem;white-space:nowrap}
 .pill{display:inline-block;padding:.05rem .3rem;border-radius:3px;font-size:.65rem}
 </style></head><body>
 <h1>🤖 AI Responder — <span class="badge m">Tipo M</span></h1>
@@ -364,6 +369,7 @@ td.msg{max-width:22rem;word-break:break-word}
 <table>
   <thead><tr>
     <th>#log</th><th>#msg</th>
+    <th>teléfono (chat)</th>
     <th>resultado</th>
     <th>conf</th>
     <th class="msg">mensaje del cliente</th>
@@ -386,6 +392,7 @@ ${recentLog
     return `<tr class="${rowClass}">
   <td>${r.id}</td>
   <td>${r.crm_message_id ?? "—"}</td>
+  <td class="phone">${escapeHtml(r.chat_phone && String(r.chat_phone).trim() ? String(r.chat_phone).trim() : "—")}</td>
   <td><span class="badge ${badgeCls}">${badgeTxt}</span></td>
   <td>${r.confidence ?? "—"}</td>
   <td class="msg">${escapeHtml(r.input_prev || "—")}</td>
@@ -471,7 +478,13 @@ async function approve(mid) {
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "80", 10) || 80, 500);
     try {
       const { rows } = await pool.query(
-        `SELECT * FROM ai_response_log ORDER BY created_at DESC LIMIT $1`,
+        `SELECT l.*, COALESCE(ch_log.phone, ch_msg.phone) AS chat_phone
+         FROM ai_response_log l
+         LEFT JOIN crm_chats ch_log ON ch_log.id = l.chat_id
+         LEFT JOIN crm_messages cm ON cm.id = l.crm_message_id
+         LEFT JOIN crm_chats ch_msg ON ch_msg.id = cm.chat_id
+         ORDER BY l.created_at DESC
+         LIMIT $1`,
         [limit]
       );
       writeJson(res, 200, { ok: true, rows });

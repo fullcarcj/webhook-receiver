@@ -1,5 +1,7 @@
 -- Conteo cíclico de inventario (Ferrari ERP / WMS)
 -- Prerrequisitos: sql/wms-bins.sql, sql/wms-audit-v2.sql (trg_audit_bin_stock, movement_reason)
+-- bin_stock / count_lines deben usar columna `product_sku` coherente con `products(sku)`:
+--   en BD existente: `npm run db:wms-products-canonical` (y luego re-ejecutar este archivo para refrescar funciones).
 -- Los ajustes usan set_config('app.*') para que audit_bin_stock_change registre reference_type = cycle_count.
 -- psql $DATABASE_URL -f sql/cycle-count.sql
 
@@ -80,7 +82,7 @@ CREATE TABLE IF NOT EXISTS count_lines (
   id                    BIGSERIAL PRIMARY KEY,
   session_id            BIGINT NOT NULL REFERENCES count_sessions(id) ON DELETE CASCADE,
   bin_id                BIGINT NOT NULL REFERENCES warehouse_bins(id) ON DELETE CASCADE,
-  producto_sku          TEXT   NOT NULL,
+  product_sku          TEXT   NOT NULL,
   qty_system            NUMERIC(18,4) NOT NULL,
   qty_counted           NUMERIC(18,4),
   difference_value_usd  NUMERIC(12,4),
@@ -89,7 +91,7 @@ CREATE TABLE IF NOT EXISTS count_lines (
   counted_by            INTEGER,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT uq_count_line_session_bin_sku UNIQUE (session_id, bin_id, producto_sku)
+  CONSTRAINT uq_count_line_session_bin_sku UNIQUE (session_id, bin_id, product_sku)
 );
 
 CREATE INDEX IF NOT EXISTS idx_count_lines_session ON count_lines (session_id);
@@ -121,31 +123,31 @@ BEGIN
     IF v_sess.aisle_id IS NULL THEN
       RAISE EXCEPTION 'BY_AISLE requiere aisle_id';
     END IF;
-    INSERT INTO count_lines (session_id, bin_id, producto_sku, qty_system, status)
-    SELECT p_session_id, bs.bin_id, bs.producto_sku, bs.qty_available, 'PENDING'::count_line_status
+    INSERT INTO count_lines (session_id, bin_id, product_sku, qty_system, status)
+    SELECT p_session_id, bs.bin_id, bs.product_sku, bs.qty_available, 'PENDING'::count_line_status
     FROM bin_stock bs
     JOIN warehouse_bins wb ON wb.id = bs.bin_id
     JOIN warehouse_shelves ws ON ws.id = wb.shelf_id
     WHERE ws.aisle_id = v_sess.aisle_id
-    ON CONFLICT (session_id, bin_id, producto_sku) DO NOTHING;
+    ON CONFLICT (session_id, bin_id, product_sku) DO NOTHING;
   ELSIF v_sess.mode = 'BY_SKU' THEN
     IF v_sess.filter_sku IS NULL OR btrim(v_sess.filter_sku) = '' THEN
       RAISE EXCEPTION 'BY_SKU requiere filter_sku';
     END IF;
-    INSERT INTO count_lines (session_id, bin_id, producto_sku, qty_system, status)
-    SELECT p_session_id, bs.bin_id, bs.producto_sku, bs.qty_available, 'PENDING'::count_line_status
+    INSERT INTO count_lines (session_id, bin_id, product_sku, qty_system, status)
+    SELECT p_session_id, bs.bin_id, bs.product_sku, bs.qty_available, 'PENDING'::count_line_status
     FROM bin_stock bs
-    WHERE bs.producto_sku = v_sess.filter_sku
-    ON CONFLICT (session_id, bin_id, producto_sku) DO NOTHING;
+    WHERE bs.product_sku = v_sess.filter_sku
+    ON CONFLICT (session_id, bin_id, product_sku) DO NOTHING;
   ELSIF v_sess.mode = 'BY_BIN' THEN
     IF v_sess.filter_bin_id IS NULL THEN
       RAISE EXCEPTION 'BY_BIN requiere filter_bin_id';
     END IF;
-    INSERT INTO count_lines (session_id, bin_id, producto_sku, qty_system, status)
-    SELECT p_session_id, bs.bin_id, bs.producto_sku, bs.qty_available, 'PENDING'::count_line_status
+    INSERT INTO count_lines (session_id, bin_id, product_sku, qty_system, status)
+    SELECT p_session_id, bs.bin_id, bs.product_sku, bs.qty_available, 'PENDING'::count_line_status
     FROM bin_stock bs
     WHERE bs.bin_id = v_sess.filter_bin_id
-    ON CONFLICT (session_id, bin_id, producto_sku) DO NOTHING;
+    ON CONFLICT (session_id, bin_id, product_sku) DO NOTHING;
   ELSE
     RAISE EXCEPTION 'Modo de sesión no soportado: %', v_sess.mode;
   END IF;
@@ -181,8 +183,8 @@ BEGIN
     RAISE EXCEPTION 'Línea ya procesada: %', v_line.status;
   END IF;
 
-  SELECT precio_usd INTO v_precio
-  FROM productos WHERE sku = v_line.producto_sku;
+  SELECT COALESCE(p.precio_usd, p.unit_price_usd, 0) INTO v_precio
+  FROM products p WHERE p.sku = v_line.product_sku;
 
   v_diff_val := ABS(p_qty_counted - v_line.qty_system)
                 * COALESCE(v_precio, 0);
@@ -283,21 +285,21 @@ BEGIN
     qty_available = qty_available + v_delta,
     last_counted_at = now(),
     updated_at = now()
-  WHERE bin_id = v_line.bin_id AND producto_sku = v_line.producto_sku;
+  WHERE bin_id = v_line.bin_id AND product_sku = v_line.product_sku;
 
   GET DIAGNOSTICS v_rc = ROW_COUNT;
 
   IF v_rc = 0 THEN
     IF v_delta < 0 THEN
-      RAISE EXCEPTION 'Sin fila bin_stock para bin_id=% sku=%', v_line.bin_id, v_line.producto_sku;
+      RAISE EXCEPTION 'Sin fila bin_stock para bin_id=% sku=%', v_line.bin_id, v_line.product_sku;
     END IF;
-    INSERT INTO bin_stock (bin_id, producto_sku, qty_available, qty_reserved)
-    VALUES (v_line.bin_id, v_line.producto_sku, v_delta, 0);
+    INSERT INTO bin_stock (bin_id, product_sku, qty_available, qty_reserved)
+    VALUES (v_line.bin_id, v_line.product_sku, v_delta, 0);
   END IF;
 
   IF EXISTS (
     SELECT 1 FROM bin_stock
-    WHERE bin_id = v_line.bin_id AND producto_sku = v_line.producto_sku
+    WHERE bin_id = v_line.bin_id AND product_sku = v_line.product_sku
       AND (qty_available < 0 OR qty_reserved < 0)
   ) THEN
     RAISE EXCEPTION 'Stock negativo tras ajuste de conteo (línea %)', p_line_id;

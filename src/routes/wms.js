@@ -1,17 +1,21 @@
 "use strict";
 
-const { timingSafeCompare } = require("../services/currencyService");
+const { ensureAdmin } = require("../middleware/adminAuth");
 const {
   adjustStock,
   reserveStock,
   releaseReservation,
+  commitBinReservationSql,
   getStockBySku,
-  getPickingList,
+  getStockByBin,
+  getPickingListBySkus,
+  getPickingListForWarehouse,
   getMovementHistory,
+  listWarehouses,
+  listBins,
   getBinByCode,
   createBin,
 } = require("../services/wmsService");
-/** Reservas por orden ML (`ml_order_reservations`); independiente de stock/reserve genérico arriba */
 const {
   reserveForOrder,
   commitReservation,
@@ -37,36 +41,90 @@ async function parseJsonBody(req) {
   return JSON.parse(txt);
 }
 
-function ensureAdmin(req, res) {
-  const secret = process.env.ADMIN_SECRET;
-  if (!secret) {
-    writeJson(res, 503, { ok: false, error: "define ADMIN_SECRET en el servidor" });
-    return false;
-  }
-  const provided = req.headers["x-admin-secret"];
-  if (!timingSafeCompare(provided, secret)) {
-    writeJson(res, 403, { ok: false, error: "forbidden" });
-    return false;
-  }
-  return true;
-}
-
 async function handleWmsApiRequest(req, res, url) {
   if (!url.pathname.startsWith("/api/wms")) return false;
 
   try {
+    const binsStockMatch = url.pathname.match(/^\/api\/wms\/bins\/(\d+)\/stock\/?$/);
+    if (req.method === "GET" && binsStockMatch) {
+      if (!ensureAdmin(req, res, url)) return true;
+      const binId = Number(binsStockMatch[1]);
+      const data = await getStockByBin(binId);
+      writeJson(res, 200, { ok: true, data });
+      return true;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/wms/warehouses") {
+      if (!ensureAdmin(req, res, url)) return true;
+      const rows = await listWarehouses(1);
+      writeJson(res, 200, { ok: true, data: rows });
+      return true;
+    }
+
+    const whBinsMatch = url.pathname.match(/^\/api\/wms\/warehouses\/(\d+)\/bins\/?$/);
+    if (req.method === "GET" && whBinsMatch) {
+      if (!ensureAdmin(req, res, url)) return true;
+      const warehouseId = Number(whBinsMatch[1]);
+      const aisleId = url.searchParams.get("aisle_id");
+      const status = url.searchParams.get("status");
+      const data = await listBins({
+        warehouseId,
+        aisleId: aisleId ? Number(aisleId) : null,
+        status: status || null,
+      });
+      writeJson(res, 200, { ok: true, data });
+      return true;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/wms/picking") {
+      if (!ensureAdmin(req, res, url)) return true;
+      const wid = url.searchParams.get("warehouse_id");
+      if (!wid || !String(wid).trim()) {
+        writeJson(res, 400, { ok: false, error: "warehouse_id obligatorio" });
+        return true;
+      }
+      const raw = url.searchParams.get("skus") || "";
+      const skus = raw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const data = await getPickingListForWarehouse({
+        warehouseId: Number(wid),
+        skus: skus.length ? skus : null,
+      });
+      writeJson(res, 200, { ok: true, data });
+      return true;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/wms/movements") {
+      if (!ensureAdmin(req, res, url)) return true;
+      const data = await getMovementHistory({
+        sku: url.searchParams.get("sku") || null,
+        binId: url.searchParams.get("bin_id"),
+        referenceType: url.searchParams.get("reference_type"),
+        referenceId: url.searchParams.get("reference_id"),
+        limit: url.searchParams.get("limit"),
+        offset: url.searchParams.get("offset"),
+      });
+      writeJson(res, 200, { ok: true, ...data });
+      return true;
+    }
+
     if (req.method === "GET" && url.pathname.startsWith("/api/wms/stock/")) {
+      if (!ensureAdmin(req, res, url)) return true;
       const sku = decodeURIComponent(url.pathname.slice("/api/wms/stock/".length).replace(/\/+$/, ""));
       if (!sku) {
         writeJson(res, 400, { ok: false, error: "sku requerido" });
         return true;
       }
-      const row = await getStockBySku(sku);
-      writeJson(res, 200, { ok: true, data: row });
+      const wid = url.searchParams.get("warehouse_id");
+      const rows = await getStockBySku(sku, wid ? Number(wid) : null);
+      writeJson(res, 200, { ok: true, data: rows });
       return true;
     }
 
     if (req.method === "GET" && url.pathname === "/api/wms/picking-list") {
+      if (!ensureAdmin(req, res, url)) return true;
       const raw = url.searchParams.get("skus") || "";
       const skus = raw
         .split(",")
@@ -87,7 +145,7 @@ async function handleWmsApiRequest(req, res, url) {
         if (Number.isFinite(n) && n > 0) orderOpts = { orderId: n };
       }
       try {
-        const data = await getPickingList(skus, orderOpts);
+        const data = await getPickingListBySkus(skus, orderOpts);
         writeJson(res, 200, { ok: true, ...data });
       } catch (e) {
         const msg = e && e.message ? String(e.message) : "error";
@@ -101,40 +159,46 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/stock/adjust") {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       const body = await parseJsonBody(req);
-      const out = await adjustStock({
-        binId: Number(body.bin_id),
-        sku: String(body.sku || "").trim(),
-        deltaAvailable: body.delta_available,
-        deltaReserved: body.delta_reserved,
-        reason: body.reason,
-        referenceId: body.reference_id,
-        referenceType: body.reference_type,
-        userId: body.user_id,
-        notes: body.notes,
-      });
-      writeJson(res, 200, { ok: true, ...out });
+      const binId = body.bin_id != null ? body.bin_id : body.binId;
+      const sku = body.product_sku != null ? body.product_sku : body.sku;
+      if (binId == null || !String(sku || "").trim()) {
+        writeJson(res, 400, { ok: false, error: "bin_id y product_sku (o sku) son obligatorios" });
+        return true;
+      }
+      if (body.delta != null && body.delta !== "" && Number(body.delta) === 0) {
+        writeJson(res, 400, { ok: false, error: "delta no puede ser 0" });
+        return true;
+      }
+      const out = await adjustStock({ ...body, bin_id: binId, sku });
+      writeJson(res, 200, { ok: true, data: out });
       return true;
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/stock/reserve") {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       const body = await parseJsonBody(req);
+      const qty = body.qty != null ? body.qty : body.quantity;
+      if (!Number.isFinite(Number(qty)) || Number(qty) <= 0) {
+        writeJson(res, 400, { ok: false, error: "qty > 0 requerido" });
+        return true;
+      }
       try {
         const out = await reserveStock({
-          sku: String(body.sku || "").trim(),
-          quantity: body.quantity,
-          referenceId: body.reference_id,
-          referenceType: body.reference_type,
-          userId: body.user_id,
+          bin_id: body.bin_id,
+          sku: body.product_sku || body.sku,
+          qty,
+          reference_id: body.reference_id,
+          reference_type: body.reference_type,
+          user_id: body.user_id,
         });
         writeJson(res, 200, { ok: true, ...out });
       } catch (e) {
         if (e && e.code === "INSUFFICIENT_STOCK") {
           writeJson(res, 409, {
             ok: false,
-            error: "INSUFFICIENT_STOCK",
+            code: "INSUFFICIENT_STOCK",
             available: e.available,
             requested: e.requested,
           });
@@ -145,22 +209,66 @@ async function handleWmsApiRequest(req, res, url) {
       return true;
     }
 
-    if (req.method === "POST" && url.pathname === "/api/wms/stock/release") {
-      if (!ensureAdmin(req, res)) return true;
+    if (req.method === "POST" && url.pathname === "/api/wms/stock/commit") {
+      if (!ensureAdmin(req, res, url)) return true;
       const body = await parseJsonBody(req);
-      const out = await releaseReservation({
-        sku: String(body.sku || "").trim(),
-        quantity: body.quantity,
-        referenceId: body.reference_id,
-        userId: body.user_id,
-      });
-      writeJson(res, 200, { ok: true, ...out });
+      const qty = body.qty != null ? body.qty : body.quantity;
+      if (!Number.isFinite(Number(qty)) || Number(qty) <= 0) {
+        writeJson(res, 400, { ok: false, error: "qty > 0 requerido" });
+        return true;
+      }
+      try {
+        const row = await commitBinReservationSql({
+          binId: body.bin_id,
+          sku: body.product_sku || body.sku,
+          qty,
+          referenceType: body.reference_type,
+          referenceId: body.reference_id,
+          userId: body.user_id,
+        });
+        writeJson(res, 200, { ok: true, data: row });
+      } catch (e) {
+        if (e && e.code === "INSUFFICIENT_RESERVATION") {
+          writeJson(res, 409, { ok: false, code: "INSUFFICIENT_RESERVATION" });
+        } else {
+          throw e;
+        }
+      }
       return true;
     }
 
-    /** Órdenes ML → tabla ml_order_reservations (misma lógica que el webhook orders_v2). Requiere X-Admin-Secret. */
+    if (req.method === "POST" && url.pathname === "/api/wms/stock/release") {
+      if (!ensureAdmin(req, res, url)) return true;
+      const body = await parseJsonBody(req);
+      const qty = body.qty != null ? body.qty : body.quantity;
+      if (!Number.isFinite(Number(qty)) || Number(qty) <= 0) {
+        writeJson(res, 400, { ok: false, error: "qty > 0 requerido" });
+        return true;
+      }
+      try {
+        const out = await releaseReservation({
+          bin_id: body.bin_id,
+          sku: body.product_sku || body.sku,
+          qty,
+          reference_id: body.reference_id,
+          reference_type: body.reference_type,
+          user_id: body.user_id,
+        });
+        writeJson(res, 200, { ok: true, ...out });
+      } catch (e) {
+        if (e && e.code === "INSUFFICIENT_RESERVATION") {
+          writeJson(res, 409, { ok: false, code: "INSUFFICIENT_RESERVATION" });
+        } else if (e && e.code === "RELEASE_NOT_FOUND") {
+          writeJson(res, Number(e.status) || 404, { ok: false, code: "RELEASE_NOT_FOUND" });
+        } else {
+          throw e;
+        }
+      }
+      return true;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/wms/ml-order/reserve") {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       const body = await parseJsonBody(req);
       const mlOrderId = Number(body.ml_order_id);
       const items = Array.isArray(body.items) ? body.items : [];
@@ -188,7 +296,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/ml-order/commit") {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       const body = await parseJsonBody(req);
       const mlOrderId = Number(body.ml_order_id != null ? body.ml_order_id : body.mlOrderId);
       const userId = body.user_id != null ? body.user_id : body.userId != null ? body.userId : null;
@@ -206,7 +314,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/ml-order/release") {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       const body = await parseJsonBody(req);
       const mlOrderId = Number(body.ml_order_id != null ? body.ml_order_id : body.mlOrderId);
       const userId = body.user_id != null ? body.user_id : body.userId != null ? body.userId : null;
@@ -224,7 +332,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/api/wms/movements/")) {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       const sku = decodeURIComponent(url.pathname.slice("/api/wms/movements/".length).replace(/\/+$/, ""));
       if (!sku) {
         writeJson(res, 400, { ok: false, error: "sku requerido" });
@@ -247,7 +355,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/bins") {
-      if (!ensureAdmin(req, res)) return true;
+      if (!ensureAdmin(req, res, url)) return true;
       const body = await parseJsonBody(req);
       const row = await createBin({
         shelfId: Number(body.shelf_id),
@@ -261,6 +369,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/api/wms/bins/")) {
+      if (!ensureAdmin(req, res, url)) return true;
       const binCode = decodeURIComponent(url.pathname.slice("/api/wms/bins/".length).replace(/\/+$/, ""));
       if (!binCode) {
         writeJson(res, 400, { ok: false, error: "bin_code requerido" });

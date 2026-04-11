@@ -259,6 +259,14 @@ async function handlePublicFrontendRequest(req, res, url) {
         json(res, 200, { ok: true, items });
         return true;
       }
+      if (pathname === "/api/v1/catalog/compat/years") {
+        const out = await catalogMotorService.listEngineOptions({
+          makeName: url.searchParams.get("make") || url.searchParams.get("make_name") || "",
+          modelName: url.searchParams.get("model") || url.searchParams.get("model_name") || "",
+        });
+        json(res, 200, { ok: true, ...out });
+        return true;
+      }
       json(res, 404, {
         ok: false,
         error: "not_found",

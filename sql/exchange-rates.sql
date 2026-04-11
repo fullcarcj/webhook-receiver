@@ -269,6 +269,38 @@ CREATE TRIGGER trg_purchases_updated_at
 
 
 -- ─────────────────────────────────────────────────────
+-- 5b. purchase_lines (POS compras; catálogo products.sku)
+-- ─────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS purchase_lines (
+  id               BIGSERIAL PRIMARY KEY,
+  purchase_id      BIGINT        NOT NULL REFERENCES purchases(id) ON DELETE CASCADE,
+  product_sku      TEXT          NOT NULL REFERENCES products(sku),
+  lot_id           BIGINT,
+  bin_id           BIGINT,
+
+  quantity         NUMERIC(12,3) NOT NULL,
+  unit_cost_usd    NUMERIC(15,6) NOT NULL,
+
+  landed_cost_usd  NUMERIC(15,6),
+
+  line_total_usd   NUMERIC(15,4) GENERATED ALWAYS AS
+                     (quantity * unit_cost_usd) STORED,
+
+  CONSTRAINT chk_pl_qty   CHECK (quantity > 0),
+  CONSTRAINT chk_pl_cost  CHECK (unit_cost_usd > 0),
+  CONSTRAINT chk_pl_landed CHECK (landed_cost_usd IS NULL OR landed_cost_usd >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pl_purchase
+  ON purchase_lines (purchase_id);
+CREATE INDEX IF NOT EXISTS idx_pl_sku
+  ON purchase_lines (product_sku);
+CREATE INDEX IF NOT EXISTS idx_pl_lot
+  ON purchase_lines (lot_id)
+  WHERE lot_id IS NOT NULL;
+
+
+-- ─────────────────────────────────────────────────────
 -- 6. Vista: margen real por venta (POS sales)
 -- ─────────────────────────────────────────────────────
 DROP VIEW IF EXISTS v_sale_margins;

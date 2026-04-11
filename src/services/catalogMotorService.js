@@ -163,11 +163,42 @@ async function listValveEquivalences(productoSku, options) {
   }
 }
 
+/**
+ * Cilindradas y rangos de año disponibles para una marca+modelo.
+ * Usado por el buscador para rellenar el select de cilindrada dinámicamente.
+ * @param {{ makeName: string, modelName: string }} p
+ */
+async function listEngineOptions(p) {
+  const makeName = String(p.makeName || "").trim();
+  const modelName = String(p.modelName || "").trim();
+  if (!makeName || !modelName) {
+    const e = new Error("make y model son obligatorios");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT e.displacement_l
+       FROM engines e
+       JOIN vehicle_models vm ON vm.id = e.model_id
+       JOIN vehicle_makes vmk ON vmk.id = vm.make_id
+       WHERE vmk.name = $1 AND vm.name = $2
+         AND e.displacement_l IS NOT NULL
+       ORDER BY e.displacement_l`,
+      [makeName, modelName]
+    );
+    return { displacements: rows.map((r) => Number(r.displacement_l)) };
+  } catch (err) {
+    wrapSchemaError(err);
+  }
+}
+
 module.exports = {
   listVehicleMakes,
   listVehicleModelsByMakeName,
   searchCatalogCompatibility,
   listCompatibilityForSku,
   listValveEquivalences,
+  listEngineOptions,
   isSchemaMissingError,
 };

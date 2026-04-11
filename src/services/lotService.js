@@ -22,7 +22,7 @@ async function applyBinStockDelta(client, { binId, sku, deltaAvailable, deltaRes
     `UPDATE bin_stock
      SET qty_available = qty_available + $1,
          qty_reserved = qty_reserved + $2
-     WHERE bin_id = $3 AND producto_sku = $4
+     WHERE bin_id = $3 AND product_sku = $4
      RETURNING qty_available, qty_reserved`,
     [da, dr, binId, skuStr]
   );
@@ -32,7 +32,7 @@ async function applyBinStockDelta(client, { binId, sku, deltaAvailable, deltaRes
       throw Object.assign(new Error("Stock insuficiente o bin/SKU inexistente"), { code: "INVALID_ADJUSTMENT" });
     }
     const ins = await client.query(
-      `INSERT INTO bin_stock (bin_id, producto_sku, qty_available, qty_reserved)
+      `INSERT INTO bin_stock (bin_id, product_sku, qty_available, qty_reserved)
        VALUES ($1, $2, $3, $4)
        RETURNING qty_available, qty_reserved`,
       [binId, skuStr, da, dr]
@@ -342,4 +342,6 @@ module.exports = {
   dispatchFromLot,
   getExpiryAlerts,
   runDailyExpiry,
+  /** Misma lógica que `adjustStock` sin `BEGIN`/`COMMIT` propios (transacción externa). */
+  applyBinStockDelta,
 };

@@ -1,0 +1,7 @@
+feat: cap global WA 5 mensajes por numero por dia via waThrottle
+
+Tabla wa_throttle con phone_e164 y sent_date ya creada en BD.
+waThrottle.js implementa checkWaSendCap atomico con UPSERT WHERE.
+wasender-client.js integra throttle en texto, imagen y ubicacion.
+GET /api/stats/wa-throttle para monitoreo diario.
+Variable WA_DAILY_CAP configura el limite (default 5).

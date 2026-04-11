@@ -109,7 +109,7 @@ async function getSessionDetail(sessionId) {
     `SELECT cl.*, wb.bin_code, p.descripcion AS descripcion
      FROM count_lines cl
      JOIN warehouse_bins wb ON wb.id = cl.bin_id
-     LEFT JOIN productos p ON p.sku = cl.producto_sku
+     LEFT JOIN products p ON p.sku = cl.product_sku
      WHERE cl.session_id = $1
      ORDER BY cl.id`,
     [sid]

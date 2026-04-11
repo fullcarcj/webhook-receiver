@@ -105,15 +105,27 @@ async function handleWalletApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/wallet/transactions") {
-      const customerId = url.searchParams.get("customer_id");
-      if (!customerId) {
-        writeJson(res, 400, { ok: false, error: "customer_id requerido" });
+      const customerId  = url.searchParams.get("customer_id");
+      const mlBuyerId   = url.searchParams.get("ml_buyer_id");
+      const opts = {
+        limit:  url.searchParams.get("limit"),
+        offset: url.searchParams.get("offset"),
+        status: url.searchParams.get("status") || undefined,
+      };
+      if (customerId && mlBuyerId) {
+        writeJson(res, 400, { ok: false, error: "usar solo customer_id o ml_buyer_id" });
         return true;
       }
-      const data = await walletService.listTransactions(customerId, {
-        limit: url.searchParams.get("limit"),
-        offset: url.searchParams.get("offset"),
-      });
+      if (mlBuyerId) {
+        const data = await walletService.listTransactionsByMlBuyerId(mlBuyerId, opts);
+        writeJson(res, 200, { ok: true, ...data });
+        return true;
+      }
+      if (!customerId) {
+        writeJson(res, 400, { ok: false, error: "customer_id o ml_buyer_id requerido" });
+        return true;
+      }
+      const data = await walletService.listTransactions(customerId, opts);
       writeJson(res, 200, { ok: true, ...data });
       return true;
     }
@@ -122,6 +134,42 @@ async function handleWalletApiRequest(req, res, url) {
       const body = await parseJsonBody(req);
       const row = await walletService.createCustomer(body);
       writeJson(res, 201, { ok: true, data: row });
+      return true;
+    }
+
+    // Buscar o crear customer a partir de ml_buyer_id (+ crear wallet USD)
+    if (req.method === "POST" && url.pathname === "/api/wallet/ensure-customer") {
+      const body = await parseJsonBody(req);
+      if (!body.ml_buyer_id) {
+        writeJson(res, 400, { ok: false, error: "ml_buyer_id es obligatorio" });
+        return true;
+      }
+      const result = await walletService.ensureCustomerFromMlBuyer(body.ml_buyer_id, body);
+      writeJson(res, result.created ? 201 : 200, { ok: true, ...result });
+      return true;
+    }
+
+    // Crédito RMA directo por ml_buyer_id
+    if (req.method === "POST" && url.pathname === "/api/wallet/credit-rma") {
+      const body = await parseJsonBody(req);
+      if (!body.ml_buyer_id) {
+        writeJson(res, 400, { ok: false, error: "ml_buyer_id es obligatorio" });
+        return true;
+      }
+      if (!body.amount || Number(body.amount) <= 0) {
+        writeJson(res, 400, { ok: false, error: "amount debe ser > 0" });
+        return true;
+      }
+      const result = await walletService.creditRma({
+        mlBuyerId:     body.ml_buyer_id,
+        amount:        body.amount,
+        referenceType: body.reference_type || "rma",
+        referenceId:   body.reference_id   || null,
+        notes:         body.notes          || null,
+        currency:      body.currency       || "USD",
+        approvedBy:    body.approved_by    || null,
+      });
+      writeJson(res, 201, { ok: true, ...result });
       return true;
     }
 

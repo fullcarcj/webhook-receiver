@@ -178,6 +178,14 @@ const { handleShipmentsApiRequest } = require("./src/routes/shipments");
 const { handleWmsApiRequest } = require("./src/routes/wms");
 const { handleCycleCountApiRequest } = require("./src/routes/cycleCount");
 const { handlePosSalesApiRequest } = require("./src/routes/posSales");
+const { handleIgtfApiRequest } = require("./src/routes/igtf");
+const { handleTaxRetentionsApiRequest } = require("./src/routes/taxRetentions");
+const { handleFiscalApiRequest } = require("./src/routes/fiscal");
+const { handleFiscalDocumentsRequest } = require("./src/routes/fiscalDocuments");
+const { openCurrentPeriods } = require("./src/services/fiscalService");
+const { handleCatalogPublicPage } = require("./src/routes/catalogPublicPage");
+const { handleAdminPanel } = require("./src/routes/adminPanel");
+const { handleWmsTestPage } = require("./src/routes/wmsTestPage");
 const { handleLotsApiRequest } = require("./src/routes/lots");
 const { handleWalletApiRequest } = require("./src/routes/wallet");
 const { handleCrmApiPreflight } = require("./src/middleware/crmApiCors");
@@ -189,6 +197,25 @@ const { handleBundleApiRequest } = require("./src/handlers/bundleApiHandler");
 const { handleDeliveryApiRequest } = require("./src/handlers/deliveryApiHandler");
 const { handlePriceApiRequest } = require("./src/handlers/priceEngineApiHandler");
 const { handleMlApiRequest } = require("./src/handlers/mlApiHandler");
+const {
+  processErpWebhook,
+  getOrder: getMlErpOrder,
+  listOrders: listMlErpOrders,
+  listAlerts: listMlErpAlerts,
+  resolveAlert: resolveMlErpAlert,
+  addSkuMap,
+  listSkuMaps,
+} = require("./src/services/mlOrderService");
+const {
+  listMakes, createMake,
+  listModels, createModel,
+  listEngines, createEngine, linkEngineToModel,
+  addCompatibility, removeCompatibility,
+  listCompatibilitiesByProduct, searchByVehicle,
+  searchByText: catalogSearchByText,
+  setValveSpecs, getValveSpecs, findValveEquivalences,
+  bulkImport: catalogBulkImport,
+} = require("./src/services/compatibilityService");
 const salesService = require("./src/services/salesService");
 const { refreshSettings } = require("./src/services/priceEngineService");
 const { expirePendingRequests } = require("./src/services/priceApprovalService");
@@ -1426,6 +1453,20 @@ function scheduleTopicFetchFromWebhook(body) {
             })();
           });
         }
+        /** ERP: reserva automática con SKU map + alertas (ML_ERP_ORDERS_ENABLED=1). */
+        if (
+          result.ok &&
+          parsed &&
+          topic === "orders_v2" &&
+          process.env.ML_ERP_ORDERS_ENABLED === "1"
+        ) {
+          setImmediate(() => {
+            processErpWebhook({ orderData: parsed, mlUserId }).catch((err) => {
+              console.error("[mlOrder ERP] Error:", err && err.message ? err.message : err);
+            });
+          });
+        }
+
         if (result.ok && !isOrdersV2Topic && !isItemsTopic && !isOrdersFeedbackTopic) {
           processStatus = FETCH_PROCESS_STATUS_PENDING;
         }
@@ -2000,6 +2041,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (
+    req.method !== "GET" &&
+    url.pathname.startsWith("/api/shipping") &&
+    rejectDuringDowntime(req, res)
+  ) {
+    return;
+  }
+
   if (await handleShippingApiRequest(req, res, url)) {
     return;
   }
@@ -2016,6 +2065,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (
+    req.method !== "GET" &&
+    url.pathname.startsWith("/api/wms") &&
+    rejectDuringDowntime(req, res)
+  ) {
+    return;
+  }
+
   if (await handleWmsApiRequest(req, res, url)) {
     return;
   }
@@ -2024,7 +2081,494 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── /api/ml/orders /api/ml/alerts /api/ml/sku-map ──────────────────────────
+  if (url.pathname.startsWith("/api/ml/")) {
+    if (rejectAdminSecret(req, res)) return;
+
+    // GET /api/ml/orders
+    if (req.method === "GET" && url.pathname === "/api/ml/orders") {
+      try {
+        const q = url.searchParams;
+        const result = await listMlErpOrders({
+          erpStatus:     q.get("erp_status")     || null,
+          paymentStatus: q.get("payment_status") || null,
+          limit:         q.get("limit")  ? +q.get("limit")  : 50,
+          offset:        q.get("offset") ? +q.get("offset") : 0,
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/ml/orders/:mlOrderId
+    const mOrder = url.pathname.match(/^\/api\/ml\/orders\/(\d+)\/?$/);
+    if (req.method === "GET" && mOrder) {
+      try {
+        const data = await getMlErpOrder(+mOrder[1]);
+        if (!data) {
+          res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "Orden no encontrada" }));
+        } else {
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, ...data }));
+        }
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/ml/alerts
+    if (req.method === "GET" && url.pathname === "/api/ml/alerts") {
+      try {
+        const q = url.searchParams;
+        const result = await listMlErpAlerts({
+          isResolved: q.get("is_resolved") === "true",
+          limit:  q.get("limit")  ? +q.get("limit")  : 50,
+          offset: q.get("offset") ? +q.get("offset") : 0,
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    // POST /api/ml/alerts/:id/resolve
+    const mAlert = url.pathname.match(/^\/api\/ml\/alerts\/(\d+)\/resolve\/?$/);
+    if (req.method === "POST" && mAlert) {
+      let body;
+      try { body = await parseJsonBody(req); } catch (e) { respondJsonBodyParseError(res, e); return; }
+      if (rejectDuringDowntime(req, res)) return;
+      try {
+        const alert = await resolveMlErpAlert({
+          alertId: +mAlert[1],
+          userId:  body.user_id || null,
+          notes:   body.notes   || null,
+        });
+        if (!alert) {
+          res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "Alerta no encontrada" }));
+        } else {
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, alert }));
+        }
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/ml/sku-map
+    if (req.method === "GET" && url.pathname === "/api/ml/sku-map") {
+      try {
+        const q = url.searchParams;
+        const result = await listSkuMaps({
+          companyId: 1,
+          limit:  q.get("limit")  ? +q.get("limit")  : 100,
+          offset: q.get("offset") ? +q.get("offset") : 0,
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    // POST /api/ml/sku-map
+    if (req.method === "POST" && url.pathname === "/api/ml/sku-map") {
+      let body;
+      try { body = await parseJsonBody(req); } catch (e) { respondJsonBodyParseError(res, e); return; }
+      const { ml_item_id, product_sku, ml_variation_id, no_stock_action } = body || {};
+      if (!ml_item_id || !product_sku) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "ml_item_id y product_sku son obligatorios" }));
+        return;
+      }
+      const validActions = ["ALERT_ONLY", "CANCEL_ML", "BACKORDER"];
+      if (no_stock_action && !validActions.includes(no_stock_action)) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({
+          ok: false,
+          error: `no_stock_action debe ser: ${validActions.join(" | ")}`,
+        }));
+        return;
+      }
+      try {
+        const map = await addSkuMap({
+          mlItemId:      ml_item_id,
+          mlVariationId: ml_variation_id || null,
+          productSku:    product_sku,
+          noStockAction: no_stock_action || null,
+          companyId:     1,
+        });
+        res.writeHead(201, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, map }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
+    res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "endpoint /api/ml no existe" }));
+    return;
+  }
+
+  // ── /api/catalog/* ─────────────────────────────────────────────────────────
+  // GET endpoints: públicos (sin auth). POST/DELETE: requieren admin secret.
+  if (url.pathname.startsWith("/api/catalog")) {
+    const pn = url.pathname;
+    const q  = url.searchParams;
+
+    // ── GET públicos ──────────────────────────────────────────────────────────
+    if (req.method === "GET") {
+      try {
+        // GET /api/catalog/makes
+        if (pn === "/api/catalog/makes" || pn === "/api/catalog/makes/") {
+          const data = await listMakes();
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, makes: data }));
+          return;
+        }
+
+        // GET /api/catalog/models ?make_id=
+        if (pn === "/api/catalog/models" || pn === "/api/catalog/models/") {
+          const data = await listModels({ makeId: q.get("make_id") ? +q.get("make_id") : null });
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, models: data }));
+          return;
+        }
+
+        // GET /api/catalog/engines ?make_id= &model_id= &year=
+        if (pn === "/api/catalog/engines" || pn === "/api/catalog/engines/") {
+          const data = await listEngines({
+            makeId:  q.get("make_id")  ? +q.get("make_id")  : null,
+            modelId: q.get("model_id") ? +q.get("model_id") : null,
+            year:    q.get("year")     ? +q.get("year")     : null,
+          });
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, engines: data }));
+          return;
+        }
+
+        // GET /api/catalog/search ?make_id= &model_id= &year= &engine_code= &position=
+        if (pn === "/api/catalog/search" || pn === "/api/catalog/search/") {
+          const makeId     = q.get("make_id")     ? +q.get("make_id")     : null;
+          const modelId    = q.get("model_id")    ? +q.get("model_id")    : null;
+          const year       = q.get("year")        ? +q.get("year")        : null;
+          const engineCode = q.get("engine_code") || null;
+          const position   = q.get("position")    || null;
+          if (!makeId && !modelId && !year && !engineCode) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "Al menos uno de make_id, model_id, year, engine_code es obligatorio" }));
+            return;
+          }
+          const data = await searchByVehicle({ makeId, modelId, year, engineCode, position });
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, results: data, total: data.length }));
+          return;
+        }
+
+        // GET /api/catalog/search/text ?q= &limit=
+        if (pn === "/api/catalog/search/text" || pn === "/api/catalog/search/text/") {
+          const qText = (q.get("q") || "").trim();
+          if (qText.length < 2) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "Mínimo 2 caracteres" }));
+            return;
+          }
+          const data = await catalogSearchByText({
+            q:     qText,
+            limit: q.get("limit") ? +q.get("limit") : 20,
+          });
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, results: data, total: data.length }));
+          return;
+        }
+
+        // GET /api/catalog/products/:sku/compatibility
+        const mCompat = pn.match(/^\/api\/catalog\/products\/([^/]+)\/compatibility\/?$/);
+        if (mCompat) {
+          const data = await listCompatibilitiesByProduct(decodeURIComponent(mCompat[1]));
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, compatibilities: data }));
+          return;
+        }
+
+        // GET /api/catalog/products/:sku/valve-specs
+        const mVs = pn.match(/^\/api\/catalog\/products\/([^/]+)\/valve-specs\/?$/);
+        if (mVs) {
+          const data = await getValveSpecs(decodeURIComponent(mVs[1]));
+          if (!data) {
+            res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "Sin especificaciones de válvula para este SKU" }));
+          } else {
+            res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: true, specs: data }));
+          }
+          return;
+        }
+
+        // GET /api/catalog/products/:sku/equivalences ?tolerance_mm=
+        const mEq = pn.match(/^\/api\/catalog\/products\/([^/]+)\/equivalences\/?$/);
+        if (mEq) {
+          const data = await findValveEquivalences({
+            productSku:  decodeURIComponent(mEq[1]),
+            toleranceMm: q.get("tolerance_mm") ? +q.get("tolerance_mm") : 0.5,
+          });
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, equivalences: data }));
+          return;
+        }
+
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "endpoint /api/catalog GET no existe" }));
+        return;
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+        return;
+      }
+    }
+
+    // ── POST / DELETE (requieren admin) ───────────────────────────────────────
+    if (rejectAdminSecret(req, res)) return;
+
+    let body;
+    try { body = await parseJsonBody(req); } catch (e) { respondJsonBodyParseError(res, e); return; }
+
+    try {
+      // POST /api/catalog/makes
+      if (req.method === "POST" && (pn === "/api/catalog/makes" || pn === "/api/catalog/makes/")) {
+        if (!body.name) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "name es obligatorio" }));
+          return;
+        }
+        const data = await createMake({ name: body.name, country: body.country || null });
+        res.writeHead(201, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, make: data }));
+        return;
+      }
+
+      // POST /api/catalog/models
+      if (req.method === "POST" && (pn === "/api/catalog/models" || pn === "/api/catalog/models/")) {
+        if (!body.make_id || !body.name) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "make_id y name son obligatorios" }));
+          return;
+        }
+        const validBT = ["SEDAN", "SUV", "PICKUP", "VAN", "HATCHBACK"];
+        if (body.body_type && !validBT.includes(String(body.body_type).toUpperCase())) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: `body_type debe ser: ${validBT.join(" | ")}` }));
+          return;
+        }
+        const data = await createModel({ makeId: +body.make_id, name: body.name, bodyType: body.body_type || null });
+        res.writeHead(201, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, model: data }));
+        return;
+      }
+
+      // POST /api/catalog/engines
+      if (req.method === "POST" && (pn === "/api/catalog/engines" || pn === "/api/catalog/engines/")) {
+        if (!body.engine_code) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "engine_code es obligatorio" }));
+          return;
+        }
+        const data = await createEngine({
+          engineCode:    body.engine_code,
+          displacementCc: body.displacement_cc ? +body.displacement_cc : null,
+          cylinders:     body.cylinders   ? +body.cylinders   : null,
+          fuelType:      body.fuel_type   || null,
+          valveConfig:   body.valve_config || null,
+          notes:         body.notes        || null,
+        });
+        res.writeHead(201, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, engine: data }));
+        return;
+      }
+
+      // POST /api/catalog/engines/:engineId/models
+      const mEngModel = pn.match(/^\/api\/catalog\/engines\/(\d+)\/models\/?$/);
+      if (req.method === "POST" && mEngModel) {
+        if (!body.model_id || !body.year_from || !body.year_to) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "model_id, year_from y year_to son obligatorios" }));
+          return;
+        }
+        const yf = +body.year_from, yt = +body.year_to;
+        if (yt < yf || yf < 1950 || yt > 2050) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "year_from/year_to inválidos (1950-2050, to >= from)" }));
+          return;
+        }
+        const data = await linkEngineToModel({
+          modelId:  +body.model_id,
+          engineId: +mEngModel[1],
+          yearFrom: yf,
+          yearTo:   yt,
+          notes:    body.notes || null,
+        });
+        res.writeHead(201, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, link: data }));
+        return;
+      }
+
+      // POST /api/catalog/compatibility
+      if (req.method === "POST" && (pn === "/api/catalog/compatibility" || pn === "/api/catalog/compatibility/")) {
+        if (!body.product_sku || !body.engine_id) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "product_sku y engine_id son obligatorios" }));
+          return;
+        }
+        const validPos = ["INLET", "EXHAUST", "BOTH"];
+        if (body.position && !validPos.includes(String(body.position).toUpperCase())) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: `position debe ser: ${validPos.join(" | ")}` }));
+          return;
+        }
+        const data = await addCompatibility({
+          productSku: body.product_sku,
+          engineId:   +body.engine_id,
+          position:   body.position || null,
+          notes:      body.notes    || null,
+        });
+        res.writeHead(201, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, compatibility: data }));
+        return;
+      }
+
+      // DELETE /api/catalog/compatibility
+      if (req.method === "DELETE" && (pn === "/api/catalog/compatibility" || pn === "/api/catalog/compatibility/")) {
+        if (!body.product_sku || !body.engine_id) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "product_sku y engine_id son obligatorios" }));
+          return;
+        }
+        const data = await removeCompatibility({
+          productSku: body.product_sku,
+          engineId:   +body.engine_id,
+          position:   body.position !== undefined ? body.position : undefined,
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, ...data }));
+        return;
+      }
+
+      // POST /api/catalog/products/:sku/valve-specs
+      const mVsPost = pn.match(/^\/api\/catalog\/products\/([^/]+)\/valve-specs\/?$/);
+      if (req.method === "POST" && mVsPost) {
+        const { head_diameter_mm, stem_diameter_mm, overall_length_mm } = body || {};
+        if (!head_diameter_mm || !stem_diameter_mm || !overall_length_mm ||
+            +head_diameter_mm <= 0 || +stem_diameter_mm <= 0 || +overall_length_mm <= 0) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "head_diameter_mm, stem_diameter_mm, overall_length_mm son obligatorios y > 0" }));
+          return;
+        }
+        const data = await setValveSpecs({
+          productSku:      decodeURIComponent(mVsPost[1]),
+          headDiameterMm:  +head_diameter_mm,
+          stemDiameterMm:  +stem_diameter_mm,
+          overallLengthMm: +overall_length_mm,
+          material:        body.material      || null,
+          stemMaterial:    body.stem_material || null,
+          faceAngleDeg:    body.face_angle_deg ? +body.face_angle_deg : 45,
+          marginMm:        body.margin_mm      ? +body.margin_mm      : null,
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, specs: data }));
+        return;
+      }
+
+      // POST /api/catalog/import
+      if (req.method === "POST" && (pn === "/api/catalog/import" || pn === "/api/catalog/import/")) {
+        const rows = body && Array.isArray(body.rows) ? body.rows : null;
+        if (!rows || rows.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "rows debe ser un array no vacío" }));
+          return;
+        }
+        if (rows.length > 1000) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: "Máximo 1000 filas por request. Dividir el Excel en lotes de 1000 filas." }));
+          return;
+        }
+        const result = await catalogBulkImport(rows);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, ...result }));
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "endpoint /api/catalog no existe" }));
+      return;
+    } catch (e) {
+      const status = e.status || 500;
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: e.message, code: e.code || undefined }));
+      return;
+    }
+  }
+
+  if (
+    req.method === "POST" &&
+    (url.pathname === "/api/pos/sales" ||
+      url.pathname === "/api/pos/sales/" ||
+      url.pathname === "/api/pos/purchases" ||
+      url.pathname === "/api/pos/purchases/") &&
+    rejectDuringDowntime(req, res)
+  ) {
+    return;
+  }
+
   if (await handlePosSalesApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (
+    req.method === "POST" &&
+    /^\/api\/igtf\/declarations\/\d{4}\/\d{1,2}\/close\/?$/.test(url.pathname || "") &&
+    rejectDuringDowntime(req, res)
+  ) {
+    return;
+  }
+
+  if (await handleIgtfApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleTaxRetentionsApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (
+    req.method !== "GET" &&
+    (String(url.pathname || "").startsWith("/api/fiscal") ||
+      /^\/api\/settings\/tax\/.+$/i.test(String(url.pathname || ""))) &&
+    rejectDuringDowntime(req, res)
+  ) {
+    return;
+  }
+
+  if (await handleFiscalApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleFiscalDocumentsRequest(req, res, url)) {
     return;
   }
 
@@ -6528,6 +7072,18 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (handleCatalogPublicPage(req, res, url)) {
+    return;
+  }
+
+  if (handleWmsTestPage(req, res, url)) {
+    return;
+  }
+
+  if (handleAdminPanel(req, res, url)) {
+    return;
+  }
+
   res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify({ ok: false, error: "no encontrado" }));
 });
@@ -6588,6 +7144,14 @@ server.listen(PORT, "0.0.0.0", () => {
       .catch((e) => console.error("OAuth:", e.message));
   }
   warmAllMlAccountsRefresh().catch((e) => console.error("[OAuth warm accounts]", e.message));
+  openCurrentPeriods(1)
+    .then((p) => {
+      const a = p && p.iva && p.iva.period_label;
+      const b = p && p.islr && p.islr.period_label;
+      if (a && b) console.log("[fiscal] Períodos abiertos:", a, "|", b);
+      else console.log("[fiscal] Períodos abiertos (parcial):", a || "—", "|", b || "—");
+    })
+    .catch((err) => console.error("[fiscal] Error abriendo períodos:", err && err.message ? err.message : err));
   if (process.env.ML_AUTO_SEND_POST_SALE === "1") {
     console.log(
       `[post-sale] envío automático ON (ML_AUTO_SEND_TOPICS=${process.env.ML_AUTO_SEND_TOPICS || "orders_v2"})`

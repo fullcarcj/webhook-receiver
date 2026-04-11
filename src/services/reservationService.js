@@ -62,7 +62,7 @@ const SELECT_BIN_FOR_RESERVE = `
   JOIN warehouse_shelves ws ON ws.id = wb.shelf_id
   JOIN warehouse_aisles wa ON wa.id = ws.aisle_id
   JOIN warehouses w ON w.id = wa.warehouse_id
-  WHERE bs.producto_sku = $1
+  WHERE bs.product_sku = $1
     AND bs.qty_available >= $2
     AND w.is_active = TRUE
   ORDER BY
@@ -107,7 +107,7 @@ async function reserveForOrder({ mlOrderId, mlResourceUrl, items, userId }) {
       if (prod.length === 0) {
         const { rows: sumRow } = await client.query(
           `SELECT COALESCE(SUM(qty_available), 0)::numeric AS available
-           FROM bin_stock WHERE producto_sku = $1`,
+           FROM bin_stock WHERE product_sku = $1`,
           [sku]
         );
         shortages.push({
@@ -123,7 +123,7 @@ async function reserveForOrder({ mlOrderId, mlResourceUrl, items, userId }) {
       if (binRows.length === 0) {
         const { rows: sumRow } = await client.query(
           `SELECT COALESCE(SUM(qty_available), 0)::numeric AS available
-           FROM bin_stock WHERE producto_sku = $1`,
+           FROM bin_stock WHERE product_sku = $1`,
           [sku]
         );
         shortages.push({
@@ -159,7 +159,7 @@ async function reserveForOrder({ mlOrderId, mlResourceUrl, items, userId }) {
         `UPDATE bin_stock
          SET qty_available = qty_available - $1,
              qty_reserved = qty_reserved + $1
-         WHERE bin_id = $2 AND producto_sku = $3
+         WHERE bin_id = $2 AND product_sku = $3
            AND qty_available >= $1
          RETURNING id`,
         [sel.quantity, sel.binId, sel.sku]
@@ -239,7 +239,7 @@ async function commitReservation({ mlOrderId, userId }) {
       await client.query(
         `UPDATE bin_stock
          SET qty_reserved = qty_reserved - $1
-         WHERE bin_id = $2 AND producto_sku = $3
+         WHERE bin_id = $2 AND product_sku = $3
            AND qty_reserved >= $1`,
         [r.qty_reserved, r.bin_id, r.producto_sku]
       );
@@ -299,7 +299,7 @@ async function releaseReservation({ mlOrderId, userId }) {
         `UPDATE bin_stock
          SET qty_available = qty_available + $1,
              qty_reserved = qty_reserved - $1
-         WHERE bin_id = $2 AND producto_sku = $3
+         WHERE bin_id = $2 AND product_sku = $3
            AND qty_reserved >= $1`,
         [r.qty_reserved, r.bin_id, r.producto_sku]
       );

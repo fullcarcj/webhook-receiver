@@ -431,6 +431,184 @@ async function getWalletSummaryByMlBuyerId(mlBuyerId, currency) {
   }
 }
 
+/**
+ * Historial de transacciones por ml_buyer_id.
+ * Une wallet_transactions con customer_ml_buyers para evitar exigir customer_id al llamador.
+ */
+async function listTransactionsByMlBuyerId(mlBuyerId, options) {
+  const bid = Number(mlBuyerId);
+  if (!Number.isFinite(bid) || bid <= 0) {
+    const e = new Error("ml_buyer_id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const limit  = Math.min(Math.max(Number(options.limit)  || 50, 1), 200);
+  const offset = Math.max(Number(options.offset) || 0, 0);
+  const status = options.status ? String(options.status).toUpperCase() : null;
+
+  try {
+    const params = [bid, limit, offset];
+    const statusClause = status ? `AND wt.status = $4::wallet_tx_status` : "";
+    if (status) params.push(status);
+
+    const { rows } = await pool.query(
+      `SELECT wt.*
+       FROM wallet_transactions wt
+       JOIN customer_ml_buyers cmb ON cmb.customer_id = wt.customer_id
+       WHERE cmb.ml_buyer_id = $1
+       ${statusClause}
+       ORDER BY wt.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      params
+    );
+    return { items: rows, limit, offset };
+  } catch (err) {
+    throw mapWalletError(err);
+  }
+}
+
+/**
+ * Busca o crea un customer a partir de un ml_buyer_id.
+ * Flujo:
+ *   1. Buscar customer ya vinculado en customer_ml_buyers.
+ *   2. Si no, buscar en customers.primary_ml_buyer_id.
+ *   3. Si no, crear customer con datos de ml_buyers (nickname, phone_1).
+ *   4. Vincular en customer_ml_buyers si no estaba.
+ *   5. Crear wallet USD si no existe.
+ * Retorna { customer, wallet, created: bool }.
+ */
+async function ensureCustomerFromMlBuyer(mlBuyerId, overrides) {
+  const bid = Number(mlBuyerId);
+  if (!Number.isFinite(bid) || bid <= 0) {
+    const e = new Error("ml_buyer_id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  // Verificar que ml_buyer_id existe
+  const { rows: [buyer] } = await pool.query(
+    `SELECT buyer_id, nickname, nombre_apellido, phone_1, email
+     FROM ml_buyers WHERE buyer_id = $1`,
+    [bid]
+  );
+  if (!buyer) {
+    const e = new Error(`ml_buyer_id ${bid} no existe en ml_buyers`);
+    e.code = "NOT_FOUND";
+    throw e;
+  }
+
+  try {
+    // 1. ¿Ya tiene customer vinculado?
+    const { rows: [linked] } = await pool.query(
+      `SELECT c.*
+       FROM customers c
+       JOIN customer_ml_buyers cmb ON cmb.customer_id = c.id
+       WHERE cmb.ml_buyer_id = $1 LIMIT 1`,
+      [bid]
+    );
+
+    let customer = linked;
+    let created  = false;
+
+    if (!customer) {
+      // 2. ¿customer con primary_ml_buyer_id?
+      const { rows: [byPrimary] } = await pool.query(
+        `SELECT * FROM customers WHERE primary_ml_buyer_id = $1 LIMIT 1`,
+        [bid]
+      );
+      customer = byPrimary;
+    }
+
+    if (!customer) {
+      // 3. Crear customer con datos del buyer
+      const fullName =
+        (overrides && overrides.full_name)
+          ? String(overrides.full_name).trim()
+          : (buyer.nombre_apellido || buyer.nickname || `ML ${bid}`);
+
+      const { rows: [newCust] } = await pool.query(
+        `INSERT INTO customers
+           (full_name, phone, primary_ml_buyer_id, notes)
+         VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+        [
+          fullName,
+          buyer.phone_1 || (overrides && overrides.phone) || null,
+          bid,
+          overrides && overrides.notes ? String(overrides.notes) : null,
+        ]
+      );
+      customer = newCust;
+      created  = true;
+    }
+
+    // 4. Vincular si no estaba en customer_ml_buyers
+    await pool.query(
+      `INSERT INTO customer_ml_buyers (customer_id, ml_buyer_id, is_primary)
+       VALUES ($1, $2, TRUE)
+       ON CONFLICT (customer_id, ml_buyer_id) DO NOTHING`,
+      [customer.id, bid]
+    );
+
+    // 5. Crear wallet USD si no existe
+    const wallet = await ensureWallet(customer.id, "USD");
+
+    return { customer, wallet, created };
+  } catch (err) {
+    if (err.code === "BAD_REQUEST" || err.code === "NOT_FOUND") throw err;
+    throw mapWalletError(err);
+  }
+}
+
+/**
+ * Crea un crédito RMA por ml_buyer_id en un solo paso.
+ * Si approvedBy viene → CONFIRMED automáticamente (activa trigger de saldo).
+ * Si no → PENDING (requiere confirmación posterior).
+ * Retorna { customer, wallet, transaction }.
+ */
+async function creditRma({ mlBuyerId, amount, referenceType, referenceId, notes, currency, approvedBy }) {
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    const e = new Error("amount debe ser > 0 para un crédito RMA");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  const cur = String(currency || "USD").toUpperCase();
+  if (cur !== "USD" && cur !== "VES") {
+    const e = new Error("currency debe ser USD o VES");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  // Obtener/crear customer y wallet
+  const { customer, wallet } = await ensureCustomerFromMlBuyer(mlBuyerId);
+
+  // Si la wallet es en moneda distinta, crear la wallet de la moneda solicitada
+  let targetWallet = wallet;
+  if (wallet.currency !== cur) {
+    targetWallet = await ensureWallet(customer.id, cur);
+  }
+
+  const status     = approvedBy != null ? "CONFIRMED" : "PENDING";
+  const approver   = approvedBy != null ? Number(approvedBy) : null;
+
+  const tx = await createTransaction({
+    wallet_id:      targetWallet.id,
+    customer_id:    customer.id,
+    tx_type:        "CREDIT_RMA",
+    status,
+    currency:       cur,
+    amount:         amt,
+    reference_type: referenceType || null,
+    reference_id:   referenceId   ? String(referenceId) : null,
+    notes:          notes         || null,
+    approved_by:    approver,
+  });
+
+  return { customer, wallet: targetWallet, transaction: tx };
+}
+
 async function listDriftRows() {
   try {
     const { rows } = await pool.query(
@@ -456,10 +634,13 @@ module.exports = {
   confirmTransaction,
   cancelTransaction,
   listTransactions,
+  listTransactionsByMlBuyerId,
   getWalletSummaryByCustomerId,
   getWalletSummaryByMlBuyerId,
   listDriftRows,
   mlBuyerExists,
   validateAmountForTxType,
   needsApproverOnConfirm,
+  ensureCustomerFromMlBuyer,
+  creditRma,
 };

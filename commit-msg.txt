@@ -1,0 +1,5 @@
+feat: columna statement en payment-attempts + fix badge no_match rojo
+
+- Columna "statement" muestra bank_statement_id via reconciliation_log
+  (solo cuando la conciliacion real lo vinculo, no por referencia suelta)
+- Badge no_match ahora es rojo con emoji como matched/pending/manual_review

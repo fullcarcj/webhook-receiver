@@ -4,7 +4,7 @@ require("../../load-env-local");
 
 const fs = require("fs");
 const { pool } = require("../../db-postgres");
-const { assignCategoryToProducts, getUnassignedProducts } = require("../services/shippingService");
+const { assignCategoryToProductsLegacy, getUnassignedProducts } = require("../services/shippingService");
 
 function parseArgs(argv) {
   let csvPath = null;
@@ -52,13 +52,14 @@ async function loadAutoAssignments() {
      WHERE company_id = 1 AND name IN ('Válvulas', 'General') AND is_active = TRUE`
   );
   const catNames = cats.map((c) => c.name);
-  if (!catNames.includes("Válvulas") || !catNames.includes("General")) {
+  const hasValv = catNames.includes("Válvulas de Motor") || catNames.includes("Válvulas");
+  if (!hasValv || !catNames.includes("General")) {
     console.error("[bulk] ERROR: Faltan categorías requeridas en BD.");
-    console.error('[bulk] Crear primero: "Válvulas" y "General" en shipping_categories.');
+    console.error('[bulk] Crear primero: "Válvulas de Motor" (o "Válvulas") y "General" globales (provider_id NULL).');
     console.error("[bulk] Categorías encontradas:", catNames.join(", ") || "ninguna");
     process.exit(1);
   }
-  const valvRows = cats.filter((c) => c.name === "Válvulas");
+  const valvRows = cats.filter((c) => c.name === "Válvulas de Motor" || c.name === "Válvulas");
   const genRows = cats.filter((c) => c.name === "General");
   const valvId = valvRows[0] ? Number(valvRows[0].id) : null;
   const genId = genRows[0] ? Number(genRows[0].id) : null;
@@ -77,7 +78,8 @@ async function loadAutoAssignments() {
   for (const r of rows) {
     const desc = String(r.descripcion || "").toLowerCase();
     const sku = String(r.sku || "");
-    const isValvula = desc.includes("valvula") || sku.toUpperCase().includes("VALVE");
+    const isValvula =
+      desc.includes("valvula") || desc.includes("válvula") || sku.toUpperCase().includes("VALVE");
     out.push({
       sku,
       shipping_category_id: isValvula ? valvId : genId,
@@ -108,7 +110,7 @@ async function run() {
   const batches = chunk(assignments, 100);
   let processed = 0;
   for (const b of batches) {
-    await assignCategoryToProducts(b);
+    await assignCategoryToProductsLegacy(b);
     processed += b.length;
     console.log(`[bulk] Procesados ${processed}/${assignments.length} SKUs...`);
   }

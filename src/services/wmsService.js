@@ -3,10 +3,9 @@
 const { pool } = require("../../db-postgres");
 
 /**
- * @param {import('pg').PoolClient} client
+ * @param {import("pg").PoolClient} client
  * @param {object} p
  */
-/** Exportado para `lotService` (misma transacción que movimientos de lote). */
 async function setMovementSessionVars(client, p) {
   const reason = p.reason != null ? String(p.reason) : "";
   const refId = p.referenceId != null ? String(p.referenceId) : "";
@@ -21,10 +20,65 @@ async function setMovementSessionVars(client, p) {
   await client.query(`SELECT set_config('app.notes', $1, true)`, [notes]);
 }
 
+/** Alias documentado (reservas ML, conteo, lotes). */
+const setMovementContext = setMovementSessionVars;
+
+function normalizeReasonForSql(reason) {
+  const r = reason != null ? String(reason).trim() : "";
+  if (!r) return "ADJUSTMENT_UP";
+  if (r === "MANUAL_ADJUSTMENT" || r === "MANUAL") return "ADJUSTMENT_UP";
+  return r;
+}
+
+function mapAdjustStockSqlError(e, binId, sku) {
+  const msg = e && e.message ? String(e.message) : "";
+  if (msg.includes("unique") || msg.includes("duplicate")) {
+    return Object.assign(new Error("Conflicto al ajustar stock"), { code: "CONFLICT", status: 409 });
+  }
+  if (msg.includes("foreign key") || msg.includes("violates foreign key")) {
+    return Object.assign(new Error("SKU o bin inexistente en catálogo"), { code: "INVALID_SKU_OR_BIN", status: 400 });
+  }
+  console.warn("[wms] adjust_stock SQL:", msg, binId, sku);
+  return e;
+}
+
 /**
- * adjustStock — set_config ×5 + UPDATE/INSERT bin_stock (trigger de auditoría).
+ * Ajuste vía función SQL `adjust_stock` (UPSERT + GREATEST).
+ * @param {object} p
  */
-async function adjustStock({
+async function adjustStockSql(p) {
+  const binId = Number(p.binId);
+  const sku = String(p.sku || p.product_sku || "").trim();
+  const delta = Number(p.delta);
+  if (!Number.isFinite(binId) || binId <= 0) {
+    throw Object.assign(new Error("bin_id inválido"), { code: "INVALID_BIN", status: 400 });
+  }
+  if (!sku) {
+    throw Object.assign(new Error("product_sku requerido"), { code: "INVALID_SKU", status: 400 });
+  }
+  if (!Number.isFinite(delta) || delta === 0) {
+    throw Object.assign(new Error("delta distinto de cero requerido"), { code: "INVALID_DELTA", status: 400 });
+  }
+  const reason = normalizeReasonForSql(p.reason);
+  const refType = p.referenceType != null ? String(p.referenceType) : "";
+  const refId = p.referenceId != null ? String(p.referenceId) : "";
+  const userId = p.userId != null && p.userId !== "" ? Number(p.userId) : null;
+  const notes = p.notes != null ? String(p.notes) : null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM adjust_stock($1::bigint, $2::text, $3::numeric, $4::text, $5::text, $6::text, $7::int, $8::text)`,
+      [binId, sku, delta, reason, refType || null, refId || null, Number.isFinite(userId) ? userId : null, notes]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    throw mapAdjustStockSqlError(e, binId, sku);
+  }
+}
+
+/**
+ * Ajuste manual con deltas disponible/reservado (compatibilidad; transacción + trigger).
+ */
+async function adjustStockDeltas({
   binId,
   sku,
   deltaAvailable,
@@ -59,8 +113,8 @@ async function adjustStock({
       `UPDATE bin_stock
        SET qty_available = qty_available + $1,
            qty_reserved = qty_reserved + $2
-       WHERE bin_id = $3 AND producto_sku = $4
-       RETURNING qty_available, qty_reserved`,
+       WHERE bin_id = $3 AND product_sku = $4
+       RETURNING qty_available, qty_reserved, qty_total`,
       [da, dr, binId, skuStr]
     );
 
@@ -72,9 +126,9 @@ async function adjustStock({
         });
       }
       const ins = await client.query(
-        `INSERT INTO bin_stock (bin_id, producto_sku, qty_available, qty_reserved)
+        `INSERT INTO bin_stock (bin_id, product_sku, qty_available, qty_reserved)
          VALUES ($1, $2, $3, $4)
-         RETURNING qty_available, qty_reserved`,
+         RETURNING qty_available, qty_reserved, qty_total`,
         [binId, skuStr, da, dr]
       );
       row = ins.rows[0];
@@ -92,6 +146,7 @@ async function adjustStock({
       success: true,
       newQtyAvailable: Number(row.qty_available),
       newQtyReserved: Number(row.qty_reserved),
+      qty_total: row.qty_total != null ? Number(row.qty_total) : undefined,
     };
   } catch (e) {
     try {
@@ -103,8 +158,100 @@ async function adjustStock({
   }
 }
 
-async function reserveStock({ sku, quantity, referenceId, referenceType, userId }) {
-  const q = Number(quantity);
+/**
+ * `adjustStock`: si viene `delta` → `adjust_stock` en BD; si no, deltas legacy.
+ */
+async function adjustStock(body) {
+  if (body.delta != null && body.delta !== "") {
+    return adjustStockSql({
+      binId: body.binId != null ? body.binId : body.bin_id,
+      sku: body.sku || body.product_sku,
+      delta: body.delta,
+      reason: body.reason,
+      referenceType: body.referenceType || body.reference_type,
+      referenceId: body.referenceId || body.reference_id,
+      userId: body.userId != null ? body.userId : body.user_id,
+      notes: body.notes,
+    });
+  }
+  return adjustStockDeltas({
+    binId: body.binId != null ? body.binId : body.bin_id,
+    sku: body.sku || body.product_sku,
+    deltaAvailable: body.deltaAvailable != null ? body.deltaAvailable : body.delta_available,
+    deltaReserved: body.deltaReserved != null ? body.deltaReserved : body.delta_reserved,
+    reason: body.reason,
+    referenceId: body.referenceId || body.reference_id,
+    referenceType: body.referenceType || body.reference_type,
+    userId: body.userId != null ? body.userId : body.user_id,
+    notes: body.notes,
+  });
+}
+
+async function reserveStockSql({ binId, sku, qty, referenceType, referenceId, userId }) {
+  const b = Number(binId);
+  const q = Number(qty);
+  const skuStr = String(sku || "").trim();
+  if (!Number.isFinite(b) || b <= 0) {
+    throw Object.assign(new Error("bin_id inválido"), { code: "INVALID_BIN", status: 400 });
+  }
+  if (!skuStr) {
+    throw Object.assign(new Error("product_sku requerido"), { code: "INVALID_SKU", status: 400 });
+  }
+  if (!Number.isFinite(q) || q <= 0) {
+    throw Object.assign(new Error("qty inválida"), { code: "INVALID_QUANTITY", status: 400 });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM reserve_stock($1::bigint, $2::text, $3::numeric, $4::text, $5::text, $6::int)`,
+      [
+        b,
+        skuStr,
+        q,
+        referenceType != null ? String(referenceType) : null,
+        referenceId != null ? String(referenceId) : null,
+        userId != null && userId !== "" ? Number(userId) : null,
+      ]
+    );
+    return rows[0];
+  } catch (e) {
+    const msg = e && e.message ? String(e.message) : "";
+    if (msg.includes("INSUFFICIENT_STOCK")) {
+      const { rows } = await pool.query(
+        `SELECT qty_available FROM bin_stock WHERE bin_id = $1 AND product_sku = $2`,
+        [b, skuStr]
+      );
+      const available = rows[0] != null ? Number(rows[0].qty_available) : 0;
+      throw Object.assign(new Error("Stock insuficiente"), {
+        code: "INSUFFICIENT_STOCK",
+        status: 409,
+        available,
+        requested: q,
+      });
+    }
+    throw e;
+  }
+}
+
+/**
+ * Reserva: con `binId` usa `reserve_stock`; sin bin elige bin con más disponible (compat API anterior).
+ */
+async function reserveStock({ binId, bin_id, sku, product_sku, quantity, qty, referenceId, reference_id, referenceType, reference_type, userId, user_id }) {
+  const skuStr = String(sku || product_sku || "").trim();
+  const q = Number(qty != null ? qty : quantity);
+  const bIn = binId != null ? binId : bin_id;
+
+  if (bIn != null && String(bIn).trim() !== "") {
+    const row = await reserveStockSql({
+      binId: bIn,
+      sku: skuStr,
+      qty: q,
+      referenceType: referenceType || reference_type,
+      referenceId: referenceId || reference_id,
+      userId: userId != null ? userId : user_id,
+    });
+    return { success: true, row, newQtyAvailable: Number(row.qty_available), newQtyReserved: Number(row.qty_reserved) };
+  }
+
   if (!Number.isFinite(q) || q <= 0) {
     throw Object.assign(new Error("quantity inválida"), { code: "INVALID_QUANTITY" });
   }
@@ -113,17 +260,17 @@ async function reserveStock({ sku, quantity, referenceId, referenceType, userId 
     `SELECT bs.bin_id, bs.qty_available::numeric AS qty_available
      FROM bin_stock bs
      JOIN warehouse_bins wb ON wb.id = bs.bin_id
-     WHERE bs.producto_sku = $1 AND bs.qty_available >= $2
-     ORDER BY wb.is_primary DESC, bs.qty_available DESC
+     WHERE bs.product_sku = $1 AND bs.qty_available >= $2
+     ORDER BY wb.is_primary DESC NULLS LAST, bs.qty_available DESC
      LIMIT 1`,
-    [sku, q]
+    [skuStr, q]
   );
 
   if (candidates.length === 0) {
     const { rows: sumRow } = await pool.query(
       `SELECT COALESCE(SUM(qty_available), 0)::numeric AS available
-       FROM bin_stock WHERE producto_sku = $1`,
-      [sku]
+       FROM bin_stock WHERE product_sku = $1`,
+      [skuStr]
     );
     const available = Number(sumRow[0]?.available || 0);
     throw Object.assign(new Error("INSUFFICIENT_STOCK"), {
@@ -133,104 +280,195 @@ async function reserveStock({ sku, quantity, referenceId, referenceType, userId 
     });
   }
 
-  const binId = candidates[0].bin_id;
-  const out = await adjustStock({
-    binId,
-    sku,
-    deltaAvailable: -q,
-    deltaReserved: q,
-    reason: "RESERVATION",
-    referenceId,
-    referenceType,
-    userId,
-    notes: null,
+  const pickedBin = candidates[0].bin_id;
+  const row = await reserveStockSql({
+    binId: pickedBin,
+    sku: skuStr,
+    qty: q,
+    referenceType: referenceType || reference_type,
+    referenceId: referenceId || reference_id,
+    userId: userId != null ? userId : user_id,
   });
 
   try {
     const { rows: prodRows } = await pool.query(
       `SELECT COALESCE(requires_lot_tracking, FALSE) AS r FROM products WHERE sku = $1`,
-      [String(sku || "").trim()]
+      [skuStr]
     );
     if (prodRows[0]?.r === true) {
       console.warn(
-        `[wms] SKU ${String(sku).trim()} requiere control de lote. ` +
-          `Confirmar lote antes del despacho físico vía POST /api/lots/dispatch`
+        `[wms] SKU ${skuStr} requiere control de lote. Confirmar lote antes del despacho físico vía POST /api/lots/dispatch`
       );
     }
   } catch (e) {
     if (e && e.code === "42703") {
-      /* columna requires_lot_tracking ausente en products hasta migración lot-management */
+      /* columna opcional */
     } else {
       console.warn("[wms] reserveStock lot-tracking check:", e.message || e);
     }
   }
 
-  return out;
+  return {
+    success: true,
+    bin_id: pickedBin,
+    row,
+    newQtyAvailable: Number(row.qty_available),
+    newQtyReserved: Number(row.qty_reserved),
+  };
 }
 
-async function releaseReservation({ sku, quantity, referenceId, userId }) {
-  const q = Number(quantity);
+async function commitBinReservationSql({ binId, sku, qty, referenceType, referenceId, userId }) {
+  const b = Number(binId);
+  const q = Number(qty);
+  const skuStr = String(sku || "").trim();
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM commit_reservation($1::bigint, $2::text, $3::numeric, $4::text, $5::text, $6::int)`,
+      [
+        b,
+        skuStr,
+        q,
+        referenceType != null ? String(referenceType) : null,
+        referenceId != null ? String(referenceId) : null,
+        userId != null && userId !== "" ? Number(userId) : null,
+      ]
+    );
+    return rows[0];
+  } catch (e) {
+    const msg = e && e.message ? String(e.message) : "";
+    if (msg.includes("INSUFFICIENT_RESERVATION")) {
+      throw Object.assign(new Error("Reserva insuficiente"), {
+        code: "INSUFFICIENT_RESERVATION",
+        status: 409,
+      });
+    }
+    throw e;
+  }
+}
+
+async function releaseBinReservationSql({ binId, sku, qty, referenceType, referenceId, userId }) {
+  const b = Number(binId);
+  const q = Number(qty);
+  const skuStr = String(sku || "").trim();
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM release_reservation($1::bigint, $2::text, $3::numeric, $4::text, $5::text, $6::int)`,
+      [
+        b,
+        skuStr,
+        q,
+        referenceType != null ? String(referenceType) : null,
+        referenceId != null ? String(referenceId) : null,
+        userId != null && userId !== "" ? Number(userId) : null,
+      ]
+    );
+    return rows[0];
+  } catch (e) {
+    const msg = e && e.message ? String(e.message) : "";
+    if (msg.includes("INSUFFICIENT_RESERVATION")) {
+      throw Object.assign(new Error("Reserva insuficiente"), {
+        code: "INSUFFICIENT_RESERVATION",
+        status: 409,
+      });
+    }
+    throw e;
+  }
+}
+
+async function releaseReservation({ binId, bin_id, sku, product_sku, quantity, qty, referenceId, reference_id, referenceType, reference_type, userId, user_id }) {
+  const skuStr = String(sku || product_sku || "").trim();
+  const q = Number(qty != null ? qty : quantity);
+  const bIn = binId != null ? binId : bin_id;
+
+  if (bIn != null && String(bIn).trim() !== "") {
+    const row = await releaseBinReservationSql({
+      binId: bIn,
+      sku: skuStr,
+      qty: q,
+      referenceType: referenceType || reference_type,
+      referenceId: referenceId || reference_id,
+      userId: userId != null ? userId : user_id,
+    });
+    return { success: true, row, newQtyAvailable: Number(row.qty_available), newQtyReserved: Number(row.qty_reserved) };
+  }
+
   if (!Number.isFinite(q) || q <= 0) {
     throw Object.assign(new Error("quantity inválida"), { code: "INVALID_QUANTITY" });
   }
 
-  let binId;
-  if (referenceId != null && String(referenceId).trim() !== "") {
-    const ref = String(referenceId).trim();
+  let binIdResolved;
+  const ref = referenceId != null ? referenceId : reference_id;
+  if (ref != null && String(ref).trim() !== "") {
     const { rows: refRows } = await pool.query(
       `SELECT bin_id FROM stock_movements_audit
-       WHERE producto_sku = $1 AND reason = 'RESERVATION' AND reference_id = $2
+       WHERE product_sku = $1 AND reason::text = 'RESERVATION' AND reference_id = $2
        ORDER BY id DESC
        LIMIT 1`,
-      [sku, ref]
+      [skuStr, String(ref).trim()]
     );
-    binId = refRows[0]?.bin_id;
+    binIdResolved = refRows[0]?.bin_id;
   }
-  if (!binId) {
+  if (!binIdResolved) {
     const { rows: fb } = await pool.query(
       `SELECT bs.bin_id
        FROM bin_stock bs
-       WHERE bs.producto_sku = $1 AND bs.qty_reserved >= $2
+       WHERE bs.product_sku = $1 AND bs.qty_reserved >= $2
        ORDER BY bs.qty_reserved DESC
        LIMIT 1`,
-      [sku, q]
+      [skuStr, q]
     );
-    binId = fb[0]?.bin_id;
+    binIdResolved = fb[0]?.bin_id;
   }
 
-  if (!binId) {
+  if (!binIdResolved) {
     throw Object.assign(new Error("No hay reserva liberable para este SKU/referencia"), {
       code: "RELEASE_NOT_FOUND",
+      status: 404,
     });
   }
 
-  return adjustStock({
-    binId,
-    sku,
-    deltaAvailable: q,
-    deltaReserved: -q,
-    reason: "RESERVATION_CANCEL",
-    referenceId,
-    referenceType: null,
-    userId,
-    notes: null,
+  const row = await releaseBinReservationSql({
+    binId: binIdResolved,
+    sku: skuStr,
+    qty: q,
+    referenceType: referenceType || reference_type,
+    referenceId: ref,
+    userId: userId != null ? userId : user_id,
   });
+  return { success: true, bin_id: binIdResolved, row, newQtyAvailable: Number(row.qty_available), newQtyReserved: Number(row.qty_reserved) };
 }
 
-async function getStockBySku(sku) {
-  const { rows } = await pool.query(`SELECT * FROM v_stock_by_sku WHERE producto_sku = $1`, [sku]);
-  return rows[0] || null;
+async function getStockBySku(sku, warehouseId) {
+  const s = String(sku || "").trim();
+  const params = [s];
+  let wh = "";
+  if (warehouseId != null && String(warehouseId).trim() !== "") {
+    wh = " AND warehouse_id = $2";
+    params.push(Number(warehouseId));
+  }
+  const { rows } = await pool.query(`SELECT * FROM v_stock_by_sku WHERE product_sku = $1${wh} ORDER BY warehouse_id`, params);
+  return rows;
+}
+
+async function getStockByBin(binId) {
+  const b = Number(binId);
+  if (!Number.isFinite(b) || b <= 0) return [];
+  const { rows } = await pool.query(
+    `SELECT bs.*,
+            COALESCE(NULLIF(trim(p.description), ''), p.sku::text) AS descripcion,
+            COALESCE(p.precio_usd, p.unit_price_usd) AS precio_usd
+     FROM bin_stock bs
+     JOIN products p ON p.sku = bs.product_sku
+     WHERE bs.bin_id = $1 AND bs.qty_total > 0
+     ORDER BY bs.product_sku`,
+    [b]
+  );
+  return rows;
 }
 
 const PICKING_LIST_MAX_SKUS = 200;
 
-/**
- * Rutas de picking desde `v_picking_route` (orden serpentín: warehouse_id, pick_sort_order).
- * Enriquece columnas no incluidas en la vista vía JOIN (sin duplicar la lógica de la vista en SQL).
- * @param {string[]} skus
- * @param {{ orderId?: number|string|null }} [options]
- */
-async function getPickingList(skus, options = {}) {
+async function getPickingListBySkus(skus, options = {}) {
   if (!Array.isArray(skus) || skus.length === 0) {
     throw new Error("skus debe ser un array no vacío");
   }
@@ -248,31 +486,30 @@ async function getPickingList(skus, options = {}) {
 
   const { rows } = await pool.query(
     `SELECT
-       vr.producto_sku,
-       p.descripcion,
+       vr.product_sku,
+       COALESCE(NULLIF(trim(p.description), ''), p.sku::text) AS descripcion,
        bs.qty_available,
        bs.qty_reserved,
        vr.bin_code,
        wb.level,
-       ws.shelf_code,
-       ws.shelf_number,
-       wa.aisle_code,
-       wa.aisle_number,
-       vr.warehouse_code,
+       vr.shelf_code,
+       vr.shelf_number,
+       vr.aisle_code,
+       vr.aisle_number,
+       w.code AS warehouse_code,
        vr.warehouse_id,
-       vr.pick_sort_order
+       vr.picking_order AS pick_sort_order
      FROM v_picking_route vr
-     JOIN bin_stock bs ON bs.bin_id = vr.bin_id AND bs.producto_sku = vr.producto_sku
-     JOIN productos p ON p.sku = vr.producto_sku
+     JOIN bin_stock bs ON bs.bin_id = vr.bin_id AND bs.product_sku = vr.product_sku
+     JOIN products p ON p.sku = vr.product_sku
      JOIN warehouse_bins wb ON wb.id = vr.bin_id
-     JOIN warehouse_shelves ws ON ws.id = wb.shelf_id
-     JOIN warehouse_aisles wa ON wa.id = ws.aisle_id
-     WHERE vr.producto_sku = ANY($1::text[])
-     ORDER BY vr.warehouse_id, vr.pick_sort_order`,
+     JOIN warehouses w ON w.id = vr.warehouse_id
+     WHERE vr.product_sku = ANY($1::text[])
+     ORDER BY vr.warehouse_id, vr.aisle_number, vr.picking_order, vr.shelf_number`,
     [safeSkus]
   );
 
-  const foundSkus = new Set(rows.map((r) => r.producto_sku));
+  const foundSkus = new Set(rows.map((r) => r.product_sku));
   const missing = safeSkus.filter((s) => !foundSkus.has(s));
 
   const warehouses = {};
@@ -280,7 +517,7 @@ async function getPickingList(skus, options = {}) {
     const wh = row.warehouse_code != null && String(row.warehouse_code).trim() !== "" ? String(row.warehouse_code) : "_";
     if (!warehouses[wh]) warehouses[wh] = [];
     warehouses[wh].push({
-      sku: row.producto_sku,
+      sku: row.product_sku,
       descripcion: row.descripcion,
       bin_code: row.bin_code,
       aisle: row.aisle_code,
@@ -306,17 +543,67 @@ async function getPickingList(skus, options = {}) {
   return out;
 }
 
-async function getMovementHistory({ sku, binId, fromDate, toDate, page, pageSize }) {
-  const ps = Math.min(Math.max(parseInt(pageSize, 10) || 50, 1), 100);
-  const p = Math.max(parseInt(page, 10) || 1, 1);
-  const offset = (p - 1) * ps;
+async function getPickingListForWarehouse({ warehouseId, skus }) {
+  const wid = Number(warehouseId);
+  if (!Number.isFinite(wid) || wid <= 0) {
+    throw Object.assign(new Error("warehouse_id obligatorio"), { code: "INVALID_WAREHOUSE", status: 400 });
+  }
+  const clean =
+    Array.isArray(skus) && skus.length > 0
+      ? [...new Set(skus.map((s) => String(s).trim()).filter(Boolean))].slice(0, PICKING_LIST_MAX_SKUS)
+      : null;
+  if (clean && clean.length > 0) {
+    const { rows } = await pool.query(
+      `SELECT vr.*, w.code AS warehouse_code
+       FROM v_picking_route vr
+       JOIN warehouses w ON w.id = vr.warehouse_id
+       WHERE vr.warehouse_id = $1 AND vr.product_sku = ANY($2::text[])
+       ORDER BY vr.aisle_number, vr.picking_order, vr.shelf_number`,
+      [wid, clean]
+    );
+    return rows;
+  }
+  const { rows } = await pool.query(
+    `SELECT vr.*, w.code AS warehouse_code
+     FROM v_picking_route vr
+     JOIN warehouses w ON w.id = vr.warehouse_id
+     WHERE vr.warehouse_id = $1
+     ORDER BY vr.aisle_number, vr.picking_order, vr.shelf_number`,
+    [wid]
+  );
+  return rows;
+}
 
-  const cond = [`producto_sku = $1`];
-  const params = [sku];
-  let i = 2;
+async function getMovementHistory({
+  sku,
+  binId,
+  referenceType,
+  referenceId,
+  fromDate,
+  toDate,
+  page,
+  pageSize,
+  limit,
+  offset,
+}) {
+  const cond = ["TRUE"];
+  const params = [];
+  let i = 1;
+  if (sku != null && String(sku).trim() !== "") {
+    cond.push(`product_sku = $${i++}`);
+    params.push(String(sku).trim());
+  }
   if (binId != null && binId !== "") {
     cond.push(`bin_id = $${i++}`);
     params.push(Number(binId));
+  }
+  if (referenceType != null && String(referenceType).trim() !== "") {
+    cond.push(`reference_type = $${i++}`);
+    params.push(String(referenceType).trim());
+  }
+  if (referenceId != null && String(referenceId).trim() !== "") {
+    cond.push(`reference_id = $${i++}`);
+    params.push(String(referenceId).trim());
   }
   if (fromDate) {
     cond.push(`created_at >= $${i++}::date`);
@@ -327,6 +614,21 @@ async function getMovementHistory({ sku, binId, fromDate, toDate, page, pageSize
     params.push(toDate);
   }
 
+  const hasLimit = limit != null && String(limit).trim() !== "";
+  const hasOffset = offset != null && String(offset).trim() !== "";
+  const useOffset = hasLimit || hasOffset;
+  let lim;
+  let off;
+  if (useOffset) {
+    lim = Math.min(Math.max(parseInt(String(limit != null ? limit : 50), 10) || 50, 1), 200);
+    off = Math.max(parseInt(String(offset != null ? offset : 0), 10) || 0, 0);
+  } else {
+    const ps = Math.min(Math.max(parseInt(pageSize, 10) || 50, 1), 100);
+    const p = Math.max(parseInt(page, 10) || 1, 1);
+    lim = ps;
+    off = (p - 1) * ps;
+  }
+
   const where = `WHERE ${cond.join(" AND ")}`;
   const countSql = `SELECT COUNT(*)::bigint AS c FROM stock_movements_audit ${where}`;
   const limIdx = i;
@@ -334,19 +636,82 @@ async function getMovementHistory({ sku, binId, fromDate, toDate, page, pageSize
   const dataSql = `SELECT * FROM stock_movements_audit ${where}
     ORDER BY id DESC
     LIMIT $${limIdx} OFFSET $${offIdx}`;
-  const dataParams = [...params, ps, offset];
+  const dataParams = [...params, lim, off];
 
   const [{ rows: cr }, { rows }] = await Promise.all([
     pool.query(countSql, params),
     pool.query(dataSql, dataParams),
   ]);
 
+  const total = Number(cr[0]?.c || 0);
+  if (useOffset) {
+    return { movements: rows, total };
+  }
+  const p = Math.floor(off / lim) + 1;
   return {
     rows,
-    total: Number(cr[0]?.c || 0),
+    movements: rows,
+    total,
     page: p,
-    pageSize: ps,
+    pageSize: lim,
   };
+}
+
+async function listWarehouses(companyId) {
+  const cid = companyId != null ? Number(companyId) : 1;
+  const { rows } = await pool.query(
+    `SELECT * FROM warehouses WHERE company_id = $1 ORDER BY is_default DESC NULLS LAST, name ASC`,
+    [cid]
+  );
+  return rows;
+}
+
+async function listBins({ warehouseId, aisleId, status }) {
+  const wid = Number(warehouseId);
+  if (!Number.isFinite(wid) || wid <= 0) {
+    throw Object.assign(new Error("warehouse_id inválido"), { code: "INVALID_WAREHOUSE", status: 400 });
+  }
+  const params = [wid];
+  let extra = "";
+  let idx = 2;
+  if (aisleId != null && String(aisleId).trim() !== "") {
+    extra += ` AND wa.id = $${idx++}`;
+    params.push(Number(aisleId));
+  }
+  if (status != null && String(status).trim() !== "") {
+    extra += ` AND wb.status = $${idx++}`;
+    params.push(String(status).trim());
+  }
+
+  const { rows } = await pool.query(
+    `SELECT
+       wb.id,
+       wb.shelf_id,
+       wb.bin_code,
+       wb.level,
+       wb.capacity,
+       wb.bin_type,
+       wb.status,
+       wb.notes,
+       wb.created_at,
+       wb.updated_at,
+       wa.aisle_code,
+       wa.aisle_number,
+       ws.shelf_code,
+       ws.shelf_number,
+       w.name AS warehouse_name,
+       COALESCE(SUM(bs.qty_available), 0)::numeric AS total_available
+     FROM warehouse_bins wb
+     JOIN warehouse_shelves ws ON ws.id = wb.shelf_id
+     JOIN warehouse_aisles wa ON wa.id = ws.aisle_id
+     JOIN warehouses w ON w.id = wa.warehouse_id
+     LEFT JOIN bin_stock bs ON bs.bin_id = wb.id
+     WHERE w.id = $1${extra}
+     GROUP BY wb.id, wa.aisle_code, wa.aisle_number, ws.shelf_code, ws.shelf_number, w.name
+     ORDER BY wa.aisle_number, ws.shelf_number, wb.level`,
+    params
+  );
+  return rows;
 }
 
 async function getBinByCode(binCode) {
@@ -393,14 +758,21 @@ async function createBin({ shelfId, level, maxWeightKg, maxVolumeCbm, notes }) {
 
 module.exports = {
   setMovementSessionVars,
-  /** Alias documentado (conteo cíclico y otros flujos): mismo comportamiento que setMovementSessionVars. */
-  setMovementContext: setMovementSessionVars,
+  setMovementContext,
   adjustStock,
+  adjustStockSql,
+  adjustStockDeltas,
   reserveStock,
+  commitBinReservationSql,
+  releaseBinReservationSql,
   releaseReservation,
   getStockBySku,
-  getPickingList,
+  getStockByBin,
+  getPickingListForWarehouse,
+  getPickingListBySkus,
   getMovementHistory,
+  listWarehouses,
+  listBins,
   getBinByCode,
   createBin,
 };

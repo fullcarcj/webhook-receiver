@@ -514,7 +514,7 @@ async function createPosPurchase(p) {
   const subRounded = Math.round(subtotalUsd * 10000) / 10000;
   const totalUsd = subRounded;
 
-  const rate = await resolveRateSnapshot(companyId, null);
+  const rate = await resolveRateSnapshot(companyId, p.rateSnapshot || null);
   const totalBs = Math.round(totalUsd * Number(rate.rate_applied) * 100) / 100;
 
   const purchaseDate =
@@ -706,9 +706,76 @@ async function createPosPurchase(p) {
   }
 }
 
+/**
+ * Compra POS por ID (cabecera + líneas).
+ * @param {number|string} purchaseId
+ */
+async function getPosPurchaseById(purchaseId) {
+  const id = Number(purchaseId);
+  if (!Number.isFinite(id) || id <= 0) {
+    throw Object.assign(new Error("id inválido"), { code: "INVALID_ID" });
+  }
+  const { rows: pRows } = await pool.query(`SELECT * FROM purchases WHERE id = $1`, [id]);
+  if (!pRows.length) {
+    throw Object.assign(new Error("Compra no encontrada"), { code: "NOT_FOUND" });
+  }
+  const { rows: lines } = await pool.query(
+    `SELECT pl.*, COALESCE(NULLIF(trim(p.description), ''), p.sku) AS product_description
+     FROM purchase_lines pl
+     JOIN products p ON p.sku = pl.product_sku
+     WHERE pl.purchase_id = $1
+     ORDER BY pl.id`,
+    [id]
+  );
+  return { purchase: pRows[0], lines };
+}
+
+/**
+ * Listado paginado de compras POS.
+ * @param {object} opts
+ * @param {number} [opts.companyId=1]
+ * @param {string|null} [opts.from]       YYYY-MM-DD
+ * @param {string|null} [opts.to]         YYYY-MM-DD
+ * @param {string|null} [opts.status]
+ * @param {number} [opts.limit=50]
+ * @param {number} [opts.offset=0]
+ */
+async function listPosPurchases({ companyId = 1, from = null, to = null, status = null, limit = 50, offset = 0 } = {}) {
+  const cid = Number(companyId) || 1;
+  const lim = Math.min(Math.max(1, Number(limit) || 50), 200);
+  const off = Math.max(0, Number(offset) || 0);
+
+  const conditions = [`company_id = $1`];
+  const params = [cid];
+  let p = 2;
+
+  if (from) { conditions.push(`purchase_date >= $${p++}::date`); params.push(from); }
+  if (to)   { conditions.push(`purchase_date <= $${p++}::date`); params.push(to); }
+  if (status) { conditions.push(`status = $${p++}`); params.push(status.toUpperCase()); }
+
+  const where = conditions.join(" AND ");
+
+  const [{ rows: dataRows }, { rows: countRows }] = await Promise.all([
+    pool.query(
+      `SELECT * FROM purchases WHERE ${where} ORDER BY purchase_date DESC, id DESC LIMIT $${p} OFFSET $${p + 1}`,
+      [...params, lim, off]
+    ),
+    pool.query(`SELECT COUNT(*) AS total FROM purchases WHERE ${where}`, params),
+  ]);
+
+  return {
+    purchases: dataRows,
+    total: Number(countRows[0].total),
+    limit:  lim,
+    offset: off,
+  };
+}
+
 module.exports = {
   createPosSale,
   createPosPurchase,
   getPosSaleById,
+  getPosPurchaseById,
+  listPosPurchases,
   resolveRateSnapshot,
 };

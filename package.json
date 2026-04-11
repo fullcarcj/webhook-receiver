@@ -50,6 +50,7 @@
     "db:sales": "node scripts/run-sales-migration.js",
     "db:sales-ml": "node scripts/run-sales-ml-migration.js",
     "db:sales-global": "node scripts/run-sales-global-migration.js",
+    "db:sales-rate-snapshot": "node scripts/run-sales-rate-snapshot-migration.js",
     "db:sales-completed": "node scripts/run-sales-completed-migration.js",
     "db:customers-phone2": "node scripts/run-customers-phone2-migration.js",
     "db:customers-name-suggested": "node scripts/run-customers-name-suggested-migration.js",

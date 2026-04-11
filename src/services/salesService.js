@@ -1167,6 +1167,38 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     const ratingDays = Math.max(1, parseInt(process.env.ML_RATING_DEADLINE_DAYS || "30", 10) || 30);
     const notes = `Import ml_orders ml_user_id=${mUid} order_id=${oid}`;
 
+    // Snapshot de tasa: busca la tasa activa más cercana a la fecha de la orden ML.
+    // Si date_created no está disponible, usa la de hoy.
+    let rateRow = null;
+    const mlOrderDate = ml.date_created
+      ? new Date(ml.date_created).toISOString().slice(0, 10)
+      : new Date().toISOString().slice(0, 10);
+    const compId = Number(process.env.SALES_CURRENCY_COMPANY_ID || "1") || 1;
+    try {
+      const { rows: rateRows } = await client.query(
+        `SELECT active_rate, active_rate_type, rate_date
+         FROM daily_exchange_rates
+         WHERE company_id = $1 AND rate_date <= $2::date
+         ORDER BY rate_date DESC LIMIT 1`,
+        [compId, mlOrderDate]
+      );
+      if (rateRows.length && rateRows[0].active_rate != null) {
+        rateRow = rateRows[0];
+      }
+    } catch (_e) {
+      rateRow = null;
+    }
+    const rateApplied = rateRow ? Number(rateRow.active_rate) : null;
+    const rateType    = rateRow ? String(rateRow.active_rate_type || "BCV").toUpperCase() : null;
+    const rateDate    = rateRow
+      ? (rateRow.rate_date instanceof Date
+          ? rateRow.rate_date.toISOString().slice(0, 10)
+          : String(rateRow.rate_date).slice(0, 10))
+      : null;
+    const totalBs = rateApplied && Number.isFinite(rateApplied) && rateApplied > 0
+      ? Number((totalUsd * rateApplied).toFixed(2))
+      : null;
+
     let loyaltyPoints = 0;
     const earnLoyalty = process.env.SALES_ML_IMPORT_LOYALTY === "1";
     if (earnLoyalty && customerId && st === "paid") {
@@ -1185,17 +1217,24 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     const mlCreatedAt = ml.date_created || null;
     if (hasLifecycle) {
       ins = await client.query(
-        `INSERT INTO sales_orders (source, external_order_id, customer_id, status, order_total_amount, notes, sold_by,
-          applies_stock, records_cash, ml_user_id, loyalty_points_earned,
+        `INSERT INTO sales_orders (source, external_order_id, customer_id, status, order_total_amount,
+          total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
+          notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned,
           lifecycle_status, ml_status, rating_deadline_at, created_at)
-         VALUES ('mercadolibre', $1, $2, $3, $4, $5, NULL, FALSE, FALSE, $6, $7,
-          $8, $9, NOW() + ($10::text || ' days')::interval, COALESCE($11::timestamptz, NOW()))
+         VALUES ('mercadolibre', $1, $2, $3, $4,
+          $5, $6, $7, $8::date,
+          $9, NULL, FALSE, FALSE, $10, $11,
+          $12, $13, NOW() + ($14::text || ' days')::interval, COALESCE($15::timestamptz, NOW()))
          RETURNING id`,
         [
           extId,
           customerId,
           st,
           totalUsd.toFixed(2),
+          totalBs != null ? totalBs.toFixed(2) : null,
+          rateApplied,
+          rateType,
+          rateDate,
           notes,
           mUid,
           loyaltyPoints,
@@ -1207,11 +1246,16 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
       );
     } else {
       ins = await client.query(
-        `INSERT INTO sales_orders (source, external_order_id, customer_id, status, order_total_amount, notes, sold_by,
-          applies_stock, records_cash, ml_user_id, loyalty_points_earned, created_at)
-         VALUES ('mercadolibre', $1, $2, $3, $4, $5, NULL, FALSE, FALSE, $6, $7, COALESCE($8::timestamptz, NOW()))
+        `INSERT INTO sales_orders (source, external_order_id, customer_id, status, order_total_amount,
+          total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
+          notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned, created_at)
+         VALUES ('mercadolibre', $1, $2, $3, $4,
+          $5, $6, $7, $8::date,
+          $9, NULL, FALSE, FALSE, $10, $11, COALESCE($12::timestamptz, NOW()))
          RETURNING id`,
-        [extId, customerId, st, totalUsd.toFixed(2), notes, mUid, loyaltyPoints, mlCreatedAt]
+        [extId, customerId, st, totalUsd.toFixed(2),
+         totalBs != null ? totalBs.toFixed(2) : null, rateApplied, rateType, rateDate,
+         notes, mUid, loyaltyPoints, mlCreatedAt]
       );
     }
     const salesId = ins.rows[0].id;

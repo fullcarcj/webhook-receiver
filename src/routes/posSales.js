@@ -1,7 +1,13 @@
 "use strict";
 
 const { ensureAdmin } = require("../middleware/adminAuth");
-const { createPosSale, createPosPurchase, getPosSaleById } = require("../services/posSalesService");
+const {
+  createPosSale,
+  createPosPurchase,
+  getPosSaleById,
+  getPosPurchaseById,
+  listPosPurchases,
+} = require("../services/posSalesService");
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -74,6 +80,28 @@ async function handlePosSalesApiRequest(req, res, url) {
       return true;
     }
 
+    const mPurGet = rest.match(/^\/api\/pos\/purchases\/(\d+)$/);
+    if (req.method === "GET" && mPurGet) {
+      if (!ensureAdmin(req, res, url)) return true;
+      const data = await getPosPurchaseById(mPurGet[1]);
+      writeJson(res, 200, { ok: true, data });
+      return true;
+    }
+
+    if (req.method === "GET" && (rest === "/api/pos/purchases" || rest === "/api/pos/purchases/")) {
+      if (!ensureAdmin(req, res, url)) return true;
+      const data = await listPosPurchases({
+        companyId: url.searchParams.get("company_id") ? Number(url.searchParams.get("company_id")) : 1,
+        from:      url.searchParams.get("from")    || null,
+        to:        url.searchParams.get("to")      || null,
+        status:    url.searchParams.get("status")  || null,
+        limit:     url.searchParams.get("limit")   ? Number(url.searchParams.get("limit"))  : 50,
+        offset:    url.searchParams.get("offset")  ? Number(url.searchParams.get("offset")) : 0,
+      });
+      writeJson(res, 200, { ok: true, ...data });
+      return true;
+    }
+
     if (req.method === "POST" && (rest === "/api/pos/purchases" || rest === "/api/pos/purchases/")) {
       if (!ensureAdmin(req, res, url)) return true;
       const body = await parseJsonBody(req);
@@ -109,12 +137,13 @@ async function handlePosSalesApiRequest(req, res, url) {
         }
       }
       const result = await createPosPurchase({
-        companyId: 1,
-        purchaseDate: body.purchase_date || null,
+        companyId:        body.company_id || 1,
+        purchaseDate:     body.purchase_date || null,
         importShipmentId: body.import_shipment_id != null ? body.import_shipment_id : null,
-        lines: body.lines,
-        notes: body.notes || null,
-        userId: body.user_id != null ? body.user_id : null,
+        lines:            body.lines,
+        notes:            body.notes || null,
+        userId:           body.user_id != null ? body.user_id : null,
+        rateSnapshot:     body.rate_snapshot || null,
       });
       writeJson(res, 201, {
         success: true,

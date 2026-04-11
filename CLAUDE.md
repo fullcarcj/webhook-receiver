@@ -212,7 +212,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Currency (tasas) | `src/services/currencyService.js`, `src/routes/currency.js`, `sql/currency-management.sql` |
 | Shipping/flete | `src/services/shippingService.js`, `src/routes/shipping.js`, `src/scripts/bulkAssignShippingCategories.js`, `sql/shipping-providers.sql` |
 | Landed cost | `src/services/landedCostService.js`, `sql/landed-cost.sql` |
-| WMS (ubicaciones / stock) | `src/services/wmsService.js`, `src/routes/wms.js`, `sql/wms-bins.sql` |
+| WMS (ubicaciones / stock) | `src/services/wmsService.js`, `src/routes/wms.js`, `sql/wms-bins.sql`; lotes / shelf-life: `sql/lot-management.sql`, `src/services/lotService.js`, `src/routes/lots.js` (`/api/lots`), `npm run db:lots-management` |
 | Reservas ML ↔ bin_stock | `src/services/reservationService.js`, `sql/ml-reservations.sql`, enganche en `server.js` (topic `orders_v2` + fetch) |
 | Orden de migración SQL | `sql/run-migrations.md` |
 | Banesco monitor / CSV / statements | `src/services/banescoService.js`, `src/jobs/banescoMonitor.js`, `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`, `src/services/bankStatementsService.js`, `sql/bank-reconciliation.sql` |

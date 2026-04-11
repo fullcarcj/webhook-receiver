@@ -400,14 +400,54 @@ async function processOneMessage(message) {
         : null;
 
   if (!result.replyText) {
+    if (!isForceSend()) {
+      await pool.query(
+        `UPDATE crm_messages
+         SET ai_reply_status = 'needs_human_review',
+             ai_reasoning = $1,
+             ai_confidence = $2,
+             ai_processed_at = NOW()
+         WHERE id = $3`,
+        [result.reasoning, result.confidence, messageId]
+      );
+      await logAiResponse(pool, {
+        crm_message_id: messageId,
+        customer_id: customerId,
+        chat_id: chatId,
+        input_text: inputText,
+        receipt_data: rdForLog,
+        reply_text: null,
+        confidence: result.confidence,
+        reasoning: result.reasoning,
+        provider_used: providerAuditTipoM(result.provider),
+        tokens_used: 0,
+        action_taken: "queued_review",
+        error_message: null,
+      });
+      notifyHumanReview({
+        message_id: messageId,
+        customer_id: customerId,
+        chat_id: chatId,
+        input_preview: inputText.slice(0, 160),
+        suggested_reply: null,
+        confidence: result.confidence,
+        reasoning: result.reasoning,
+      });
+      return;
+    }
+    log.warn({ messageId }, "ai_responder: AI_RESPONDER_FORCE_SEND=1 — sin reply_text, omite needs_human_review");
     await pool.query(
       `UPDATE crm_messages
-       SET ai_reply_status = 'needs_human_review',
+       SET ai_reply_status = 'skipped',
            ai_reasoning = $1,
            ai_confidence = $2,
            ai_processed_at = NOW()
        WHERE id = $3`,
-      [result.reasoning, result.confidence, messageId]
+      [
+        `${String(result.reasoning || "").slice(0, 400)} [FORCE_SEND: sin texto para enviar]`,
+        result.confidence,
+        messageId,
+      ]
     );
     await logAiResponse(pool, {
       crm_message_id: messageId,
@@ -420,6 +460,35 @@ async function processOneMessage(message) {
       reasoning: result.reasoning,
       provider_used: providerAuditTipoM(result.provider),
       tokens_used: 0,
+      action_taken: "skipped_empty",
+      error_message: "force_send_no_reply_text",
+    });
+    return;
+  }
+
+  if (result.needsHuman && !isForceSend()) {
+    await pool.query(
+      `UPDATE crm_messages
+       SET ai_reply_status = 'needs_human_review',
+           ai_reply_text = $1,
+           ai_confidence = $2,
+           ai_reasoning = $3,
+           ai_provider = $4,
+           ai_processed_at = NOW()
+       WHERE id = $5`,
+      [result.replyText, result.confidence, result.reasoning, result.provider, messageId]
+    );
+    await logAiResponse(pool, {
+      crm_message_id: messageId,
+      customer_id: customerId,
+      chat_id: chatId,
+      input_text: inputText,
+      receipt_data: rdForLog,
+      reply_text: result.replyText,
+      confidence: result.confidence,
+      reasoning: result.reasoning,
+      provider_used: providerAuditTipoM(result.provider),
+      tokens_used: 0,
       action_taken: "queued_review",
       error_message: null,
     });
@@ -428,11 +497,18 @@ async function processOneMessage(message) {
       customer_id: customerId,
       chat_id: chatId,
       input_preview: inputText.slice(0, 160),
-      suggested_reply: null,
+      suggested_reply: result.replyText,
       confidence: result.confidence,
       reasoning: result.reasoning,
     });
     return;
+  }
+
+  if (result.needsHuman && isForceSend()) {
+    log.warn(
+      { messageId, confidence: result.confidence },
+      "ai_responder: AI_RESPONDER_FORCE_SEND=1 — omite cola revisión humana (needsHuman), envío directo"
+    );
   }
 
   const { rows: alreadySent } = await pool.query(

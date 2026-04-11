@@ -8,6 +8,8 @@
  *   WA_DAILY_CAP          — límite de mensajes por número por día, default 5
  *   WA_QUIET_HOURS_*      — ventana configurable (default 00:00–05:00 America/Caracas); solo bloquea si WA_QUIET_HOURS_BLOCK_SEND=1 (ver load-env-local.js, src/services/waQuietHours.js)
  *   WA_PREVENT_DUPLICATES, WA_MAX_REMINDERS_PER_DAY — anti-spam (src/services/waAntiSpam.js)
+ *   WASENDER_429_MAX_RETRIES — reintentos si Wasender devuelve 429 (p. ej. Account Protection: 1 msg / 5s). Default 5.
+ *   WASENDER_429_MIN_WAIT_MS — espera mínima entre reintentos (ms). Default 5200 (ligeramente >5s).
  *
  * Opciones de envío:
  *   messageType — 'CHAT' | 'REMINDER' | 'MARKETING' | 'CRITICAL' (default CHAT: no anti-spam; automatizaciones deben usar otro tipo)
@@ -55,6 +57,66 @@ function normalizePhoneE164(to) {
   if (!s) return "";
   if (!s.startsWith("+")) s = "+" + s.replace(/^\+/, "");
   return s;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Wasender Account Protection suele responder 429 + retry_after (segundos).
+ * Esperamos al menos WASENDER_429_MIN_WAIT_MS y al menos retry_after*1000.
+ */
+function wasender429WaitMs(json) {
+  const minMs = Math.max(
+    1000,
+    Math.min(20000, parseInt(String(process.env.WASENDER_429_MIN_WAIT_MS || "5200"), 10) || 5200)
+  );
+  let raSec = NaN;
+  if (json && typeof json === "object" && json.retry_after != null) {
+    raSec = Number(json.retry_after);
+  }
+  const apiMs = Number.isFinite(raSec) && raSec > 0 ? Math.ceil(raSec * 1000) : minMs;
+  return Math.min(90000, Math.max(apiMs, minMs));
+}
+
+/**
+ * POST /api/send-message con reintentos ante 429.
+ * @returns {Promise<{ ok: boolean, status: number, json: object|null, bodyText: string }>}
+ */
+async function postSendMessageWithRetry(apiBaseUrl, apiKey, body) {
+  const url = `${apiBaseUrl}/api/send-message`;
+  const maxAttempts = Math.max(
+    1,
+    Math.min(10, parseInt(String(process.env.WASENDER_429_MAX_RETRIES || "5"), 10) || 5)
+  );
+  let last = { ok: false, status: 0, json: null, bodyText: "" };
+  for (let i = 0; i < maxAttempts; i++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    const bodyText = await res.text();
+    let json = null;
+    try {
+      json = bodyText ? JSON.parse(bodyText) : null;
+    } catch (_) {
+      json = null;
+    }
+    const ok = res.ok && json && json.success === true;
+    last = { ok, status: res.status, json, bodyText };
+    if (ok) return last;
+    if (res.status === 429 && i < maxAttempts - 1) {
+      const ms = wasender429WaitMs(json);
+      console.warn(`[wasender] HTTP 429 — esperando ${ms}ms antes del reintento ${i + 2}/${maxAttempts}`);
+      await sleep(ms);
+      continue;
+    }
+    break;
+  }
+  return last;
 }
 
 function blockedPolicyResponse(reason) {
@@ -159,27 +221,11 @@ async function sendWasenderTextMessage(opts) {
     }
   }
 
-  const url = `${apiBaseUrl}/api/send-message`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ to, text }),
-  });
-  const bodyText = await res.text();
-  let json = null;
-  try {
-    json = bodyText ? JSON.parse(bodyText) : null;
-  } catch (_) {
-    json = null;
-  }
-  const ok = res.ok && json && json.success === true;
+  const { ok, status, json, bodyText } = await postSendMessageWithRetry(apiBaseUrl, apiKey, { to, text });
   if (ok) {
     await recordAntiSpamAfterSuccess(pool, opts, asp.contentHash, asp.shouldLogAfterSend);
   }
-  return { ok, status: res.status, json, bodyText };
+  return { ok, status, json, bodyText };
 }
 
 /**
@@ -229,29 +275,13 @@ async function sendWasenderImageMessage(opts) {
       return { ok: false, status: 0, json: null, bodyText: "", throttled: true };
     }
   }
-  const url = `${apiBaseUrl}/api/send-message`;
   const body = { to, imageUrl };
   if (text) body.text = text;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  const bodyText = await res.text();
-  let json = null;
-  try {
-    json = bodyText ? JSON.parse(bodyText) : null;
-  } catch (_) {
-    json = null;
-  }
-  const ok = res.ok && json && json.success === true;
+  const { ok, status, json, bodyText } = await postSendMessageWithRetry(apiBaseUrl, apiKey, body);
   if (ok) {
     await recordAntiSpamAfterSuccess(pool, opts, asp.contentHash, asp.shouldLogAfterSend);
   }
-  return { ok, status: res.status, json, bodyText };
+  return { ok, status, json, bodyText };
 }
 
 /**
@@ -320,27 +350,11 @@ async function sendWasenderLocationMessage(opts) {
   if (address) location.address = address;
   const body = { to, location };
   if (capText) body.text = capText;
-  const url = `${apiBaseUrl}/api/send-message`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  const bodyText = await res.text();
-  let json = null;
-  try {
-    json = bodyText ? JSON.parse(bodyText) : null;
-  } catch (_) {
-    json = null;
-  }
-  const ok = res.ok && json && json.success === true;
+  const { ok, status, json, bodyText } = await postSendMessageWithRetry(apiBaseUrl, apiKey, body);
   if (ok) {
     await recordAntiSpamAfterSuccess(pool, opts, asp.contentHash, asp.shouldLogAfterSend);
   }
-  return { ok, status: res.status, json, bodyText };
+  return { ok, status, json, bodyText };
 }
 
 module.exports = {

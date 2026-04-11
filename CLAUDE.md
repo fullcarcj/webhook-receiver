@@ -116,6 +116,8 @@ Sin OAuth en el job, los POST a la API de ML pueden fallar al renovar token.
 - Job/CI: `src/jobs/dailyRatesFetch.js`, workflow `.github/workflows/daily-rates.yml`.
 - **`POST /api/currency/fetch`:** en el servidor, auth con `Authorization: Bearer <CRON_SECRET>` **o** cabecera `X-Admin-Secret` (mismo valor que `ADMIN_SECRET`). `CRON_SECRET` debe existir en producción (p. ej. Render) y coincidir con el secret de GitHub si el workflow dispara el endpoint.
 - **POS (`sales` / `sale_lines`, snapshot de tasa):** `POST /api/pos/sales` y `GET /api/pos/sales/:id` (admin `X-Admin-Secret` o `?k=`); tasa por defecto desde `getTodayRate` / `daily_exchange_rates`; cuerpo opcional `rate_snapshot` para forzar `rate_applied` + `rate_type` + `rate_date`. Migración: `npm run db:exchange-rates`. No confundir con `GET /api/sales` (`sales_orders`).
+- **POS (`purchases` / `purchase_lines`, snapshot de tasa):** `POST /api/pos/purchases` (acepta `rate_snapshot` igual que ventas, y `company_id` desde el body); `GET /api/pos/purchases/:id` (cabecera + líneas); `GET /api/pos/purchases` (listado paginado, filtros `?from=YYYY-MM-DD`, `?to=`, `?status=`, `?limit=`, `?offset=`). Auth admin en todos. Landed cost por línea: snapshot de `products.landed_cost_usd` al comprar.
+- **`sales_orders` — triplete completo de tasa:** columnas `rate_type TEXT` y `rate_date DATE` agregadas vía `sql/20260411_sales_orders_rate_snapshot.sql` (`npm run db:sales-rate-snapshot`); backfill automático de filas existentes desde `daily_exchange_rates`. `importSalesOrderFromMlOrder` ahora rellena `total_amount_bs`, `exchange_rate_bs_per_usd`, `rate_type` y `rate_date` buscando la tasa activa más cercana a `date_created` de la orden ML. Si no hay tasa disponible los campos quedan `NULL` (no error duro). Variable env: `SALES_CURRENCY_COMPANY_ID` (default `1`).
 - **GitHub → tasas:** el workflow usa `secrets.RENDER_URL` (URL raíz del servicio, sin path), `secrets.CRON_SECRET` y comprueba `secrets.DATABASE_URL`; hace `GET /health` y luego `POST …/api/currency/fetch`. `RENDER_URL` no es variable del proceso Node en cloud; solo secret del repo para el `curl` desde Actions.
 - **BCV:** scrape con cliente **HTTPS nativo** (Node), timeout largo por defecto. URL por defecto: página de intervención cambiaria del BCV; override con `BCV_URL`. Opcionales: `BCV_FETCH_TIMEOUT_MS`, `BCV_TLS_INSECURE=1` si falla la verificación TLS del sitio (último recurso).
 - Regla operativa: precios en Bs se calculan en runtime (vista/queries), no se persisten por SKU.
@@ -152,7 +154,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 
 | Área | Variables relevantes |
 |------|----------------------|
-| App / admin | `PORT`, `ADMIN_SECRET` (rutas admin sin clave → 503) |
+| App / admin | `PORT`, `ADMIN_SECRET` (rutas admin sin clave → 503); rate limiting en-memoria: `adminRequestLimiter` 120 req/min por IP + `adminAuthFailLimiter` 10 fallos auth / 5 min por IP (bloqueo bruta fuerza) → respuestas `429` con `Retry-After`; `getClientIp` respeta `X-Forwarded-For` (Render/proxy) — `src/utils/rateLimiter.js` |
 | OAuth ML | `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`; tokens por cuenta en `ml_accounts` |
 | DB | `DATABASE_URL` (obligatoria) |
 | Webhooks | `WEBHOOK_SAVE_DB`, `ML_WEBHOOK_FETCH_RESOURCE`, `ML_WEBHOOK_FETCH_VENTAS_DETALLE` |
@@ -166,7 +168,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Calificación C | `ML_RATING_REQUEST_ENABLED`, `ML_RATING_REQUEST_LOOKBACK_DAYS`, …; hora diaria = **cron** en `rating-request-daily.yml` |
 | FileMaker | `FILEMAKER_TIPO_G_SECRET`, `FILEMAKER_INVENTARIO_PRODUCTOS_SECRET` |
 | API pública catálogo | `FRONTEND_API_KEY`, `FRONTEND_CORS_ORIGINS`, rate limit |
-| Ventas globales / import ML | `SALES_ML_IMPORT_ENABLED`, `SALES_ML_IMPORT_LOYALTY` (opcional); migraciones `db:sales-all`; HTTP: `SALES_IMPORT_BASE_URL` / `RENDER_URL`, `SALES_IMPORT_TIMEOUT_MS` para `import-ml-sales-http` |
+| Ventas globales / import ML | `SALES_ML_IMPORT_ENABLED`, `SALES_ML_IMPORT_LOYALTY` (opcional), `SALES_CURRENCY_COMPANY_ID` (default `1`, tasa al importar órdenes ML); migraciones `db:sales-all` + `db:sales-rate-snapshot`; HTTP: `SALES_IMPORT_BASE_URL` / `RENDER_URL`, `SALES_IMPORT_TIMEOUT_MS` para `import-ml-sales-http` |
 | Banesco (monitor + CSV) | `BANESCO_MONITOR_ENABLED`, `BANESCO_USER`, `BANESCO_PASS`, `BANK_ACCOUNT_ID`; intervalo `BANESCO_MONITOR_INTERVAL_SEC`; ventana horaria portal `BANESCO_MONITOR_WINDOW_ENABLED`, `BANESCO_MONITOR_WINDOW_START` / `END` (ej. 05:00–23:00), `BANESCO_MONITOR_WINDOW_TZ` (default `America/Caracas`); Playwright: `PLAYWRIGHT_BROWSERS_PATH=0`, `postinstall` = `playwright install chromium`; local opcional `BANESCO_HEADLESS=0`; en Render sin X11 el código fuerza headless aunque `BANESCO_HEADLESS=0` |
 
 **Producción (p. ej. Render):** replicar las mismas claves que en local para el comportamiento esperado; el servidor no lee `oauth-env.json` en el cloud salvo que se suba (no recomendado).
@@ -217,9 +219,11 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Reservas ML ↔ bin_stock | `src/services/reservationService.js`, `sql/ml-reservations.sql`, enganche en `server.js` (topic `orders_v2` + fetch) |
 | Orden de migración SQL | `sql/run-migrations.md` |
 | Banesco monitor / CSV / statements | `src/services/banescoService.js`, `src/jobs/banescoMonitor.js`, `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`, `src/services/bankStatementsService.js`, `sql/bank-reconciliation.sql` |
-| Ventas globales + import ML | `src/services/salesService.js`, `src/handlers/salesApiHandler.js`, `scripts/importMlOrdersToSales.js`, `scripts/import-ml-sales-http.js`, `sql/20260408_sales_orders*.sql`, `20260409_sales_global.sql`; kits/bundles (`npm run db:kits-bundles`, `sql/20260417_kits_bundles_productos.sql`, `/api/bundles`, `/api/price-review`) |
+| Ventas globales + import ML | `src/services/salesService.js`, `src/handlers/salesApiHandler.js`, `scripts/importMlOrdersToSales.js`, `scripts/import-ml-sales-http.js`, `sql/20260408_sales_orders*.sql`, `20260409_sales_global.sql`, `sql/20260411_sales_orders_rate_snapshot.sql`; kits/bundles (`npm run db:kits-bundles`, `sql/20260417_kits_bundles_productos.sql`, `/api/bundles`, `/api/price-review`) |
+| POS ventas + compras | `src/services/posSalesService.js`, `src/routes/posSales.js`, `sql/exchange-rates.sql`; compras: `GET /api/pos/purchases`, `GET /api/pos/purchases/:id`, `POST /api/pos/purchases` (con `rate_snapshot`) |
+| Seguridad / rate limiting | `src/utils/rateLimiter.js` (`rateLimit`, `getClientIp`, `adminRequestLimiter`, `adminAuthFailLimiter`); `src/middleware/adminAuth.js` (`ensureAdmin` con rate limiting); `server.js` → `rejectAdminSecret` con rate limiting |
 | WhatsApp hub inbound + Tipo M | `src/whatsapp/hookRouter.js`, `src/whatsapp/processors/messages.js`, `src/services/aiResponder.js`, `src/workers/aiResponderWorker.js`, `src/handlers/aiResponderApiHandler.js`, `sql/20260411_ai_responder.sql` |
 
 ---
 
-*Última revisión: 2026-04-11 — Tipo M (log HTML con teléfono, purge error log, config plantilla/prompt); Wasender 429 reintentos + `WA_DAILY_CAP` / `wa-throttle-reset`; inventario `endpoints-cubiertos-hasta-hoy.md` + export `data/BANESCO/`; Banesco; convención LATAM B/D; `package.json` y workflows.*
+*Última revisión: 2026-04-11 — Rate limiting + timingSafeCompare en todos los endpoints admin (`rateLimiter.js`, `adminAuth.js`, `rejectAdminSecret`; 429 con Retry-After, bloqueo por IP en fallos de auth); POS purchases GET (listado paginado + por id) + `rate_snapshot` override en POST; `sales_orders` triplete de tasa completo (`rate_type`, `rate_date`) + import ML rellena Bs/tasa desde `daily_exchange_rates`; migración `db:sales-rate-snapshot`.*

@@ -1,5 +1,5 @@
 -- WMS — estructura física de almacén (ubicaciones + stock por bin + auditoría)
--- Requiere tabla productos(sku). precio_usd en vistas de lectura.
+-- Requiere tabla products(sku). precio_usd / unit_price_usd en vistas de lectura.
 -- set_updated_at() suele existir por shipping-providers.sql; se recrea idempotente.
 
 CREATE OR REPLACE FUNCTION set_updated_at()
@@ -123,14 +123,14 @@ CREATE TRIGGER trg_warehouse_bins_set_code
 CREATE TABLE IF NOT EXISTS bin_stock (
   id              BIGSERIAL PRIMARY KEY,
   bin_id          BIGINT NOT NULL REFERENCES warehouse_bins(id) ON DELETE CASCADE,
-  producto_sku    TEXT NOT NULL REFERENCES productos(sku) ON DELETE RESTRICT,
+  product_sku     TEXT NOT NULL REFERENCES products(sku) ON DELETE RESTRICT,
   qty_available   NUMERIC(18,4) NOT NULL DEFAULT 0 CHECK (qty_available >= 0),
   qty_reserved    NUMERIC(18,4) NOT NULL DEFAULT 0 CHECK (qty_reserved >= 0),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT uq_bin_stock_bin_sku UNIQUE (bin_id, producto_sku)
+  CONSTRAINT uq_bin_stock_bin_sku UNIQUE (bin_id, product_sku)
 );
 
-CREATE INDEX IF NOT EXISTS idx_bin_stock_sku ON bin_stock (producto_sku);
+CREATE INDEX IF NOT EXISTS idx_bin_stock_sku ON bin_stock (product_sku);
 
 DROP TRIGGER IF EXISTS trg_bin_stock_updated_at ON bin_stock;
 CREATE TRIGGER trg_bin_stock_updated_at
@@ -141,7 +141,7 @@ CREATE TRIGGER trg_bin_stock_updated_at
 CREATE TABLE IF NOT EXISTS stock_movements_audit (
   id               BIGSERIAL PRIMARY KEY,
   bin_id           BIGINT NOT NULL REFERENCES warehouse_bins(id) ON DELETE CASCADE,
-  producto_sku     TEXT NOT NULL,
+  product_sku      TEXT NOT NULL,
   delta_available  NUMERIC(18,4) NOT NULL DEFAULT 0,
   delta_reserved   NUMERIC(18,4) NOT NULL DEFAULT 0,
   reason           TEXT,
@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS stock_movements_audit (
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_sma_sku ON stock_movements_audit (producto_sku, id DESC);
+CREATE INDEX IF NOT EXISTS idx_sma_sku ON stock_movements_audit (product_sku, id DESC);
 CREATE INDEX IF NOT EXISTS idx_sma_bin ON stock_movements_audit (bin_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_sma_ref ON stock_movements_audit (reference_id) WHERE reference_id IS NOT NULL;
 
@@ -210,10 +210,10 @@ BEGIN
   END;
 
   INSERT INTO stock_movements_audit (
-    bin_id, producto_sku, delta_available, delta_reserved,
+    bin_id, product_sku, delta_available, delta_reserved,
     reason, reference_id, reference_type, user_id, notes
   ) VALUES (
-    NEW.bin_id, NEW.producto_sku, d_avail, d_res,
+    NEW.bin_id, NEW.product_sku, d_avail, d_res,
     r_reason, r_ref_id, r_ref_type, r_user_id, r_notes
   );
 
@@ -227,36 +227,53 @@ CREATE TRIGGER trg_audit_bin_stock_change
   FOR EACH ROW EXECUTE FUNCTION audit_bin_stock_change();
 
 -- Vistas de lectura
+-- v_stock_by_sku — stock total por SKU y almacén
+-- Columnas que consume wmsService.js: product_sku, warehouse_id, qty_available_total, qty_reserved_total
 CREATE OR REPLACE VIEW v_stock_by_sku AS
 SELECT
-  bs.producto_sku,
+  bs.product_sku,
+  w.id    AS warehouse_id,
+  w.code  AS warehouse_code,
   COALESCE(SUM(bs.qty_available), 0)::NUMERIC(18,4) AS qty_available_total,
-  COALESCE(SUM(bs.qty_reserved), 0)::NUMERIC(18,4) AS qty_reserved_total,
-  MAX(p.precio_usd) AS precio_usd
+  COALESCE(SUM(bs.qty_reserved),  0)::NUMERIC(18,4) AS qty_reserved_total,
+  MAX(COALESCE(p.precio_usd, p.unit_price_usd)) AS precio_usd
 FROM bin_stock bs
-JOIN productos p ON p.sku = bs.producto_sku
-GROUP BY bs.producto_sku;
+JOIN warehouse_bins    wb ON wb.id = bs.bin_id
+JOIN warehouse_shelves ws ON ws.id = wb.shelf_id
+JOIN warehouse_aisles  wa ON wa.id = ws.aisle_id
+JOIN warehouses         w ON  w.id = wa.warehouse_id
+JOIN products           p ON  p.sku = bs.product_sku
+GROUP BY bs.product_sku, w.id, w.code;
 
+-- v_picking_route — orden serpentín para picking
+-- Columnas que consume wmsService.js: product_sku, warehouse_id, bin_id, bin_code,
+--   aisle_code, aisle_number, shelf_code, shelf_number, picking_order, qty_available
 CREATE OR REPLACE VIEW v_picking_route AS
 SELECT
-  bs.producto_sku,
-  w.id AS warehouse_id,
-  w.code AS warehouse_code,
-  wb.id AS bin_id,
+  bs.product_sku,
+  w.id        AS warehouse_id,
+  w.code      AS warehouse_code,
+  wb.id       AS bin_id,
   wb.bin_code,
+  wb.level,
+  wa.aisle_code,
+  wa.aisle_number,
+  ws.shelf_code,
+  ws.shelf_number,
   (
     COALESCE(wa.aisle_number, 0) * 100000
     + COALESCE(ws.shelf_number, 0) * 1000
     + COALESCE(wb.level, 0)
-  )::INTEGER AS pick_sort_order,
+  )::INTEGER  AS picking_order,
   bs.qty_available,
-  p.precio_usd
+  bs.qty_reserved,
+  COALESCE(p.precio_usd, p.unit_price_usd) AS precio_usd
 FROM bin_stock bs
-JOIN warehouse_bins wb ON wb.id = bs.bin_id
+JOIN warehouse_bins    wb ON wb.id = bs.bin_id
 JOIN warehouse_shelves ws ON ws.id = wb.shelf_id
-JOIN warehouse_aisles wa ON wa.id = ws.aisle_id
-JOIN warehouses w ON w.id = wa.warehouse_id
-JOIN productos p ON p.sku = bs.producto_sku
+JOIN warehouse_aisles  wa ON wa.id = ws.aisle_id
+JOIN warehouses         w ON  w.id = wa.warehouse_id
+JOIN products           p ON  p.sku = bs.product_sku
 WHERE bs.qty_available > 0;
 
 -- Verificación post-deploy (ejemplos):

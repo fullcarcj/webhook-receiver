@@ -229,6 +229,10 @@ CREATE TRIGGER trg_audit_bin_stock
   EXECUTE FUNCTION audit_bin_stock_change();
 
 -- ── Vistas lectura: products (no productos) ────────────────────────────────
+-- DROP + recreación porque wms-bins.sql puede haberlas creado con columnas distintas.
+DROP VIEW IF EXISTS v_picking_route CASCADE;
+DROP VIEW IF EXISTS v_stock_by_sku  CASCADE;
+
 CREATE OR REPLACE VIEW v_stock_by_sku AS
 SELECT
   bs.product_sku,

@@ -3,7 +3,7 @@
 **Actualizado:** 2026-04-11  
 **Copia de trabajo Banesco (local, no versionada):** `data/BANESCO/endpoints-cubiertos-hasta-hoy.md` — misma versión que este archivo al generar/exportar.
 
-**Nota:** Rutas admin usan `X-Admin-Secret` o `?k=` / `?secret=` (ver `src/middleware/adminAuth.js`). Rate limiting: 120 req/min por IP (general) + bloqueo por 5 min tras 10 fallos de auth — `src/utils/rateLimiter.js`. API pública catálogo: `FRONTEND_API_KEY` en `/api/v1/*`.
+**Nota:** Rutas admin aceptan `X-Admin-Secret` o `?k=` / `?secret=` (legado) **o** JWT Bearer/Cookie (nuevo — ver `/api/auth`). Rate limiting: 120 req/min por IP (general) + bloqueo por 5 min tras 10 fallos de auth — `src/utils/rateLimiter.js`. API pública catálogo: `FRONTEND_API_KEY` en `/api/v1/*`.
 
 ---
 
@@ -11,6 +11,8 @@
 
 | Prefijo / área | Handler principal | Cobertura |
 |----------------|-------------------|-----------|
+| `/api/auth/*` | `server.js` + `src/utils/authMiddleware.js` | Login JWT, logout, me, change-password |
+| `/api/users/*` | `server.js` + `src/services/authService.js` | Gestión usuarios + roles + sesiones |
 | `/api/v1/*` | `public-frontend-api.js` | Catálogo, health, compat motor |
 | `/api/currency/*` | `src/routes/currency.js` | Tasas, override, fetch BCV |
 | `/api/pos/*` | `src/routes/posSales.js` | Ventas POS + Compras POS (snapshot tasa + landed) |
@@ -42,6 +44,37 @@
 | `/api/vehicle/*` | `vehicleApiHandler.js` | Catálogo vehículos / compat |
 | `/api/purchase/*` | `purchaseApiHandler.js` | Órdenes de compra |
 | `/api/provider/*` | `providerApiHandler.js` | Proveedores IA / ajustes |
+| `/api/auth/*` | `src/services/authService.js` + `src/utils/authMiddleware.js` | Login JWT, logout, change-password, me |
+| `/api/users/*` | `src/services/authService.js` | Gestión de usuarios, roles, sesiones |
+
+---
+
+## Autenticación (`/api/auth`) y Usuarios (`/api/users`)
+
+### Auth — sin autenticación previa
+
+| Endpoint | Método | Auth | Descripción |
+|----------|--------|------|-------------|
+| `/api/auth/login` | POST | — | Login. Body: `{ username, password }`. Responde con JWT en body **y** `Set-Cookie: token=<jwt> HttpOnly`. Lockout a 5 intentos fallidos → `ACCOUNT_LOCKED`. |
+| `/api/auth/logout` | POST | JWT/Cookie | Revoca el `jti` en `user_sessions`. Borra la cookie (`Max-Age=0`). |
+| `/api/auth/me` | GET | JWT/Cookie | Usuario actual con array de permisos del rol. |
+| `/api/auth/change-password` | POST | JWT/Cookie | Cambia contraseña. Body: `{ current_password, new_password }`. Revoca todas las sesiones activas. |
+
+### Usuarios — requieren ADMIN o superior
+
+| Endpoint | Método | Auth | Descripción |
+|----------|--------|------|-------------|
+| `/api/users` | GET | JWT/Secret (ADMIN+) | Lista usuarios. Query: `?role=`, `?status=`. Nunca retorna `password_hash`. |
+| `/api/users` | POST | JWT/Secret (ADMIN+) | Crea usuario. Body: `{ username, email, full_name, role, password }`. ADMIN no puede crear SUPERUSER. |
+| `/api/users/role-permissions` | GET | Cualquier auth | Permisos fijos por rol agrupados: `{ SUPERUSER:[…], ADMIN:[…], OPERATOR:[…] }`. |
+| `/api/users/:id` | GET | JWT/Secret (ADMIN+) | Usuario por ID con `permissions[]`. |
+| `/api/users/:id` | PATCH | JWT/Secret (ADMIN+) | Actualiza `full_name`, `email`, `role`, `status`. Cambio de `role` revoca sesiones. |
+| `/api/users/:id/reset-password` | POST | JWT/Secret (SUPERUSER) | Reset forzado. Body: `{ new_password }`. Revoca sesiones y desbloquea cuenta. |
+| `/api/users/:id/unlock` | POST | JWT/Secret (ADMIN+) | Desbloquea cuenta bloqueada por intentos fallidos. |
+| `/api/users/:id/sessions` | GET | ADMIN+ o propio | Sesiones JWT activas del usuario. |
+| `/api/users/:id/revoke-sessions` | POST | JWT/Secret (ADMIN+) | Revoca todas las sesiones activas. |
+
+**Tablas:** `users`, `user_sessions`, `role_permissions`. **Roles:** `SUPERUSER(3) > ADMIN(2) > OPERATOR(1)`. **Módulos en permisos:** `wms | ventas | crm | catalog | settings | fiscal`. **Auth dual:** Bearer token + Cookie HttpOnly `SameSite=Strict` (Secure en producción). `checkAdminSecretOrJwt()` acepta ambos + `X-Admin-Secret` / `?k=` (legado). **Migración:** `npm run db:users`.
 
 ---
 
@@ -255,6 +288,38 @@ Código: `src/handlers/aiResponderApiHandler.js`, `src/services/aiResponder.js`,
 
 ---
 
+## Autenticación JWT (`/api/auth`)
+
+| Endpoint | Método | Auth | Descripción |
+|----------|--------|------|-------------|
+| `/api/auth/login` | POST | — | Login. Body: `{ username, password }`. Responde `{ token, expiresIn, user }` + `Set-Cookie: token=…; HttpOnly; SameSite=Strict`. |
+| `/api/auth/logout` | POST | JWT/Cookie | Revoca `jti` en BD + limpia Cookie (`Max-Age=0`). |
+| `/api/auth/me` | GET | JWT/Cookie | Usuario actual con permisos del rol. |
+| `/api/auth/change-password` | POST | JWT/Cookie | Body: `{ current_password, new_password }`. Revoca todas las sesiones activas. |
+
+---
+
+## Gestión de usuarios (`/api/users`)
+
+| Endpoint | Método | Auth | Descripción |
+|----------|--------|------|-------------|
+| `/api/users` | GET | JWT/Secret (ADMIN+) | Listado. Query: `?role=`, `?status=`. |
+| `/api/users/role-permissions` | GET | JWT/Secret (cualquier rol) | Permisos fijos por rol agrupados. |
+| `/api/users` | POST | JWT/Secret (ADMIN+) | Crear usuario. Body: `username, email, full_name, role, password`. ADMIN no puede crear SUPERUSER. |
+| `/api/users/:id` | GET | JWT/Secret (ADMIN+) | Usuario por ID con permisos del rol. |
+| `/api/users/:id` | PATCH | JWT/Secret (ADMIN+) | Actualizar `full_name`, `email`, `role`, `status`. Cambio de rol revoca sesiones. |
+| `/api/users/:id/reset-password` | POST | JWT/Secret (SUPERUSER) | Fuerza nueva contraseña y revoca sesiones. |
+| `/api/users/:id/unlock` | POST | JWT/Secret (ADMIN+) | Desbloquea cuenta con `status=LOCKED`. |
+| `/api/users/:id/sessions` | GET | JWT/Secret (ADMIN+ o propio) | Sesiones activas del usuario. |
+| `/api/users/:id/revoke-sessions` | POST | JWT/Secret (ADMIN+) | Revoca todas las sesiones activas. |
+
+**Roles:** `SUPERUSER` (18 permisos) / `ADMIN` (16) / `OPERATOR` (8). Módulos: `wms`, `ventas`, `crm`, `catalog`, `settings`, `fiscal`.  
+**Auth dual:** JWT `Authorization: Bearer <token>` **o** Cookie `HttpOnly` (browser) **o** `X-Admin-Secret` (legado).  
+**Lockout:** 5 intentos fallidos → `status=LOCKED`. Desbloquear con `/unlock`.  
+**Migración:** `npm run db:users`. Contraseña inicial superuser: `Ferrari2026!`.
+
+---
+
 ## Downtime — ventana de mantenimiento
 
 **23:30 → 05:00 VET** (UTC-4, Venezuela no tiene DST). Durante downtime:
@@ -286,6 +351,11 @@ Aplicado en: `src/middleware/adminAuth.js` (`ensureAdmin`) + `server.js` (`rejec
 | `npm run wa-throttle-reset` | Reset contador diario `wa_throttle` por número o `--all` |
 | `npm run purge:ai-responder-error-log` | Borrar filas `ai_response_log` con `action_taken=error` (requiere `CONFIRM_PURGE_AI_ERROR_LOGS=1`) |
 | `npm run test-wasender-text` | Prueba envío texto Wasender (`RUN_WA_TEST_CONFIRM=1`) |
+| `npm run db:users` | Tablas `users`, `user_sessions`, `role_permissions`; SUPERUSER inicial |
+| `npm run db:wms` | WMS base: warehouses, aisles, shelves, bins, bin_stock, audit |
+| `npm run db:wms-audit` | ENUM `movement_reason` + trigger auditoría v2 |
+| `npm run db:wms-products-canonical` | Funciones atómicas stock + vistas canónicas sobre `products` |
+| `npm run db:wms-all` | Los tres pasos WMS en orden (recomendado en entornos nuevos) |
 | `npm run db:exchange-rates` | Migración POS sales/purchases con snapshot de tasa |
 | `npm run db:sales-rate-snapshot` | Agrega `rate_type` + `rate_date` a `sales_orders`; backfill desde `daily_exchange_rates` |
 | `npm run db:sales-all` | Todas las migraciones de ventas globales |

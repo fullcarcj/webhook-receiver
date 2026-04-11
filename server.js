@@ -2310,6 +2310,7 @@ const server = http.createServer(async (req, res) => {
   // ── /api/catalog/* ─────────────────────────────────────────────────────────
   // GET endpoints: públicos (sin auth). POST/DELETE: requieren admin secret.
   if (url.pathname.startsWith("/api/catalog")) {
+    if (req.method !== "GET" && rejectDuringDowntime(req, res)) return;
     const pn = url.pathname;
     const q  = url.searchParams;
 
@@ -7342,6 +7343,7 @@ const server = http.createServer(async (req, res) => {
 
   // ─── Users endpoints (/api/users) ───────────────────────────────────────────
   if (url.pathname.startsWith("/api/users")) {
+    if (req.method !== "GET" && rejectDuringDowntime(req, res)) return;
     const pathname = url.pathname.replace(/\/+$/, "");
 
     // GET /api/users/role-permissions — cualquier usuario autenticado puede verlo
@@ -7378,6 +7380,7 @@ const server = http.createServer(async (req, res) => {
 
     // POST /api/users
     if (req.method === "POST" && pathname === "/api/users") {
+      if (rejectDuringDowntime(req, res)) return;
       const user = await checkAdminSecretOrJwt(req, res);
       if (!user) return;
       if (!requireRole(user, "ADMIN", res)) return;
@@ -7428,6 +7431,7 @@ const server = http.createServer(async (req, res) => {
     // POST /api/users/:id/revoke-sessions
     const mRevoke = pathname.match(/^\/api\/users\/(\d+)\/revoke-sessions$/);
     if (req.method === "POST" && mRevoke) {
+      if (rejectDuringDowntime(req, res)) return;
       const user = await checkAdminSecretOrJwt(req, res);
       if (!user) return;
       if (!requireRole(user, "ADMIN", res)) return;
@@ -7440,6 +7444,7 @@ const server = http.createServer(async (req, res) => {
     // POST /api/users/:id/reset-password
     const mReset = pathname.match(/^\/api\/users\/(\d+)\/reset-password$/);
     if (req.method === "POST" && mReset) {
+      if (rejectDuringDowntime(req, res)) return;
       const user = await checkAdminSecretOrJwt(req, res);
       if (!user) return;
       if (!requireRole(user, "SUPERUSER", res)) return;
@@ -7468,6 +7473,7 @@ const server = http.createServer(async (req, res) => {
     // POST /api/users/:id/unlock
     const mUnlock = pathname.match(/^\/api\/users\/(\d+)\/unlock$/);
     if (req.method === "POST" && mUnlock) {
+      if (rejectDuringDowntime(req, res)) return;
       const user = await checkAdminSecretOrJwt(req, res);
       if (!user) return;
       if (!requireRole(user, "ADMIN", res)) return;
@@ -7502,6 +7508,7 @@ const server = http.createServer(async (req, res) => {
     // PATCH /api/users/:id
     const mPatch = pathname.match(/^\/api\/users\/(\d+)$/);
     if (req.method === "PATCH" && mPatch) {
+      if (rejectDuringDowntime(req, res)) return;
       const user = await checkAdminSecretOrJwt(req, res);
       if (!user) return;
       if (!requireRole(user, "ADMIN", res)) return;

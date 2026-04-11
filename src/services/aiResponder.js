@@ -3,7 +3,8 @@
 /**
  * Piloto Tipo M: respuesta **siempre** desde plantilla (`AI_RESPONDER_GENERIC_TEMPLATE`) +
  * un solo fragmento contextual generado por IA (`context_line`). La IA **no elige flujo**
- * (no hay needs_human / confianza para ramificar); si falla el modelo, se usa un fallback de contexto.
+ * (needsHuman en false); la revisión **antes de Wasender** la define solo `AI_RESPONDER_FORCE_SEND`
+ * (apagado = cola `needs_human_review` con sugerencia, sin POST Wasender hasta approve en el handler).
  * Cola: crm_messages.ai_reply_status — worker (SKIP LOCKED). Ver `MESSAGE_TYPE_M` en ml-message-types.js.
  */
 
@@ -559,7 +560,8 @@ async function processOneMessage(message) {
     return;
   }
 
-  if (result.needsHuman && !isForceSend()) {
+  // Tipo M: `needsHuman` suele ir en false; la cola previa a Wasender la gobierna **solo** `AI_RESPONDER_FORCE_SEND`.
+  if (isHumanReviewGateOn()) {
     await pool.query(
       `UPDATE crm_messages
        SET ai_reply_status = 'needs_human_review',
@@ -594,6 +596,10 @@ async function processOneMessage(message) {
       confidence: result.confidence,
       reasoning: result.reasoning,
     });
+    log.info(
+      { messageId },
+      "ai_responder: revisión humana ON (FORCE apagado) — sugerencia guardada, sin envío Wasender hasta approve"
+    );
     return;
   }
 

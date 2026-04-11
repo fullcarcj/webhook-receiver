@@ -73,7 +73,7 @@ Piloto: respuesta rápida contextualizada con plantilla `AI_RESPONDER_GENERIC_TE
 
 **Cola y worker:** `maybeQueueInboundText` en `src/services/aiResponder.js`. Con `AI_RESPONDER_ENABLED=1`, `src/workers/aiResponderWorker.js` cada `AI_RESPONDER_INTERVAL_MS` (default 8s) reclama un mensaje con `UPDATE … FOR UPDATE SKIP LOCKED`, pasa a `processing`, ejecuta `processOneMessage` (requiere `GROQ_API_KEY` en env).
 
-**`processOneMessage`:** texto vacío → `skipped`; teléfono ausente en `crm_chats` → `skipped_inbound`; genera respuesta (plantilla Tipo M); **`AI_RESPONDER_FORCE_SEND`** = interruptor **revisión humana**: valores “sin cola humana” `1`/`true`/`yes`/`on`; “con cola” `0`/`false`/`no`/`off`/vacío; antes de Wasender, `SELECT` con `ai_reply_status = ai_replied` evita **doble envío**; éxito → `ai_replied` + `ai_response_log.sent`; fallo API → `needs_human_review` + log `error`.
+**`processOneMessage`:** texto vacío → `skipped`; teléfono ausente en `crm_chats` → `skipped_inbound`; genera respuesta (plantilla Tipo M); **`AI_RESPONDER_FORCE_SEND`**: encendido (`1`/`true`/`yes`/`on`) = envío automático a Wasender si hay texto (tras anti‑duplicado); apagado (`0`/`false`/`no`/`off`/vacío) = **`needs_human_review`** con sugerencia en `ai_reply_text`, **sin** POST a Wasender hasta `POST /api/ai-responder/:id/approve`; antes de Wasender (solo rama auto), `SELECT` con `ai_reply_status = ai_replied` evita **doble envío**; éxito → `ai_replied` + `ai_response_log.sent`; fallo API → `needs_human_review` + log `error`.
 
 **Limpieza:** `cleanStuckProcessing` en el worker: `processing` colgado &gt; 10 min → `needs_human_review` (no reenvía WA automáticamente por eso).
 

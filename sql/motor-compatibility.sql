@@ -29,11 +29,19 @@ END;
 $$;
 
 -- ─────────────────────────────────────────────────────
--- products: landed_cost_usd (si no existe)
--- (landed-cost.sql lo agrega; esto es safety-net)
+-- products: columnas requeridas por las vistas del catálogo.
+-- Idempotente — solo agrega si no existen.
+-- landed-cost.sql y la migración de inventario pueden
+-- haberlas agregado ya; ADD COLUMN IF NOT EXISTS es seguro.
 -- ─────────────────────────────────────────────────────
 ALTER TABLE products
-  ADD COLUMN IF NOT EXISTS landed_cost_usd NUMERIC(15,6);
+  ADD COLUMN IF NOT EXISTS landed_cost_usd NUMERIC(15,6),
+  ADD COLUMN IF NOT EXISTS precio_usd      NUMERIC(15,6);
+
+-- Inicializar precio_usd desde unit_price_usd si no tiene valor
+UPDATE products
+  SET precio_usd = unit_price_usd
+  WHERE precio_usd IS NULL AND unit_price_usd IS NOT NULL;
 
 -- ─────────────────────────────────────────────────────
 -- vehicle_makes
@@ -417,7 +425,7 @@ CREATE TRIGGER trg_vs_updated_at
 CREATE OR REPLACE VIEW v_catalog_compatibility AS
 SELECT
   mc.product_sku,
-  p.descripcion,
+  p.description AS descripcion,
   p.precio_usd,
   p.landed_cost_usd,
   e.engine_code,
@@ -458,7 +466,7 @@ CREATE OR REPLACE VIEW v_valve_equivalences AS
 SELECT
   v1.product_sku                              AS sku_original,
   v2.product_sku                              AS sku_equivalente,
-  p2.descripcion                              AS desc_equivalente,
+  p2.description                              AS desc_equivalente,
   p2.precio_usd,
   ABS(v1.head_diameter_mm  - v2.head_diameter_mm)  AS diff_head_mm,
   ABS(v1.stem_diameter_mm  - v2.stem_diameter_mm)  AS diff_stem_mm,

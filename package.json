@@ -84,6 +84,7 @@
     "db:wms-products-canonical": "node scripts/run-wms-products-canonical-migration.js",
     "db:ml-orders": "node scripts/run-ml-orders-migration.js",
     "db:catalog": "node scripts/run-motor-compatibility-migration.js",
+    "db:crm-customers": "node scripts/run-crm-customers-migration.js",
     "db:search-indexes": "node scripts/run-search-indexes-migration.js",
     "db:lots-management": "node scripts/run-lot-management-migration.js",
     "db:lots-management-products-patch": "node scripts/run-lot-management-products-patch.js",

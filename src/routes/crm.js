@@ -6,6 +6,7 @@ const { routeWebhook } = require("../whatsapp/hookRouter");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const { ensureAdmin } = require("../middleware/adminAuth");
 const { pool } = require("../../db");
+const crmService = require("../services/crmService");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -145,6 +146,149 @@ async function handleCrmApiRequest(req, res, url) {
       });
       writeJson(res, 200, data);
       return true;
+    }
+
+    // ── Migración masiva ml_buyers → customers ──────────────────────────────
+    if (req.method === "POST" && pathname === "/api/crm/migrate") {
+      const result = await crmService.runMigration(1);
+      writeJson(res, 200, { ok: true, ...result });
+      return true;
+    }
+
+    // ── Convertir buyer ML en customer CRM ─────────────────────────────────
+    // POST /api/crm/buyers/:mlBuyerId/customer
+    const buyerCustomerMatch = pathname.match(/^\/api\/crm\/buyers\/(\d+)\/customer$/);
+    if (req.method === "POST" && buyerCustomerMatch) {
+      const mlBuyerId = Number(buyerCustomerMatch[1]);
+      const result = await crmService.findOrCreateFromBuyer(mlBuyerId);
+      writeJson(res, result.created ? 201 : 200, { ok: true, ...result });
+      return true;
+    }
+
+    // ── /api/crm/customers ──────────────────────────────────────────────────
+
+    // GET /api/crm/customers
+    if (req.method === "GET" && pathname === "/api/crm/customers") {
+      const data = await crmService.searchCustomers({
+        q:            url.searchParams.get("q")             || undefined,
+        customerType: url.searchParams.get("customer_type") || undefined,
+        isActive:     url.searchParams.has("is_active")
+                        ? url.searchParams.get("is_active")
+                        : undefined,
+        limit:        url.searchParams.get("limit"),
+        offset:       url.searchParams.get("offset"),
+      });
+      writeJson(res, 200, { ok: true, ...data });
+      return true;
+    }
+
+    // POST /api/crm/customers
+    if (req.method === "POST" && pathname === "/api/crm/customers") {
+      const body = await parseJsonBody(req);
+      if (!body.full_name && !body.fullName) {
+        writeJson(res, 400, { ok: false, error: "full_name es obligatorio" });
+        return true;
+      }
+      const row = await crmService.createCustomer(body);
+      writeJson(res, 201, { ok: true, data: row });
+      return true;
+    }
+
+    // Rutas con /:id
+    const custIdMatch = pathname.match(/^\/api\/crm\/customers\/(\d+)(\/.*)?$/);
+    if (custIdMatch) {
+      const customerId = Number(custIdMatch[1]);
+      const subpath    = custIdMatch[2] || "";
+
+      // GET /api/crm/customers/:id
+      if (req.method === "GET" && subpath === "") {
+        const row = await crmService.getCustomer(customerId);
+        if (!row) {
+          writeJson(res, 404, { ok: false, error: "not_found" });
+          return true;
+        }
+        writeJson(res, 200, { ok: true, data: row });
+        return true;
+      }
+
+      // PATCH /api/crm/customers/:id
+      if (req.method === "PATCH" && subpath === "") {
+        const body = await parseJsonBody(req);
+        const row = await crmService.updateCustomer({ customerId, ...body });
+        writeJson(res, 200, { ok: true, data: row });
+        return true;
+      }
+
+      // GET /api/crm/customers/:id/ml-buyers
+      if (req.method === "GET" && subpath === "/ml-buyers") {
+        const rows = await crmService.getMlBuyersForCustomer(customerId);
+        writeJson(res, 200, { ok: true, items: rows });
+        return true;
+      }
+
+      // POST /api/crm/customers/:id/ml-buyers
+      if (req.method === "POST" && subpath === "/ml-buyers") {
+        const body = await parseJsonBody(req);
+        if (!body.ml_buyer_id) {
+          writeJson(res, 400, { ok: false, error: "ml_buyer_id es obligatorio" });
+          return true;
+        }
+        const row = await crmService.linkMlBuyer({
+          customerId,
+          mlBuyerId:  body.ml_buyer_id,
+          isPrimary:  body.is_primary === true || body.is_primary === "true",
+          notes:      body.notes    || null,
+          linkedBy:   body.linked_by || null,
+        });
+        writeJson(res, 200, { ok: true, data: row });
+        return true;
+      }
+
+      // GET /api/crm/customers/:id/wallet
+      if (req.method === "GET" && subpath === "/wallet") {
+        const data = await crmService.getWalletBalance(customerId);
+        writeJson(res, 200, { ok: true, ...data });
+        return true;
+      }
+
+      // GET /api/crm/customers/:id/wallet/history
+      if (req.method === "GET" && subpath === "/wallet/history") {
+        const data = await crmService.getWalletHistory({
+          customerId,
+          limit:  url.searchParams.get("limit"),
+          offset: url.searchParams.get("offset"),
+        });
+        writeJson(res, 200, { ok: true, ...data });
+        return true;
+      }
+
+      // POST /api/crm/customers/:id/wallet
+      if (req.method === "POST" && subpath === "/wallet") {
+        const body = await parseJsonBody(req);
+        const amt = Number(body.amount_usd);
+        if (!Number.isFinite(amt) || amt === 0) {
+          writeJson(res, 400, { ok: false, error: "amount_usd debe ser distinto de cero" });
+          return true;
+        }
+        if (!body.tx_type) {
+          writeJson(res, 400, {
+            ok: false,
+            error: `tx_type requerido: ${crmService.VALID_CRM_TX_TYPES.join("|")}`,
+          });
+          return true;
+        }
+        const result = await crmService.addWalletTransaction({
+          customerId,
+          amountUsd:     amt,
+          txType:        body.tx_type,
+          referenceType: body.reference_type || null,
+          referenceId:   body.reference_id   || null,
+          notes:         body.notes          || null,
+          createdBy:     body.created_by     || null,
+        });
+        writeJson(res, 201, { ok: true, ...result });
+        return true;
+      }
     }
 
     writeJson(res, 404, { error: "not_found" });

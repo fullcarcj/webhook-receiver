@@ -471,8 +471,8 @@ async function searchByText({ q, limit = 20 } = {}) {
   const { rows } = await pool.query(
     `SELECT DISTINCT
        mc.product_sku,
-       p.descripcion,
-       p.precio_usd,
+       p.description AS descripcion,
+       COALESCE(p.precio_usd, p.unit_price_usd, 0) AS precio_usd,
        p.landed_cost_usd,
        e.engine_code,
        e.displacement_cc,
@@ -493,7 +493,7 @@ async function searchByText({ q, limit = 20 } = {}) {
      LEFT JOIN vehicle_makes    vma ON vma.id   = vm.make_id
      WHERE mc.is_active = TRUE
        AND (
-         p.descripcion ILIKE '%' || $1 || '%'
+         p.description ILIKE '%' || $1 || '%'
          OR p.sku         ILIKE '%' || $1 || '%'
          OR e.engine_code ILIKE '%' || $1 || '%'
          OR vma.name      ILIKE '%' || $1 || '%'
@@ -501,7 +501,7 @@ async function searchByText({ q, limit = 20 } = {}) {
        )
      ORDER BY
        CASE WHEN p.sku ILIKE $1 THEN 0 ELSE 1 END,
-       p.descripcion
+       p.description
      LIMIT $2`,
     [term, lim]
   );

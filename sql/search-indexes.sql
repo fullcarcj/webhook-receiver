@@ -14,8 +14,8 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- ─────────────────────────────────────────────────────
 -- products — búsqueda por descripción y SKU
 -- ─────────────────────────────────────────────────────
-CREATE INDEX IF NOT EXISTS idx_gin_products_descripcion
-  ON products USING GIN (descripcion gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_gin_products_description
+  ON products USING GIN (description gin_trgm_ops);
 
 CREATE INDEX IF NOT EXISTS idx_gin_products_sku
   ON products USING GIN (sku gin_trgm_ops);

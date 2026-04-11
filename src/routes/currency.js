@@ -6,9 +6,7 @@ const {
   getProductPrices,
   timingSafeCompare,
 } = require("../services/currencyService");
-const { rateLimit } = require("../utils/rateLimiter");
-
-const adminLimiter = rateLimit({ maxRequests: 10, windowMs: 60_000 });
+const { getClientIp, adminRequestLimiter, adminAuthFailLimiter } = require("../utils/rateLimiter");
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -95,14 +93,14 @@ async function handleCurrencyApiRequest(req, res, url) {
 
     if (req.method === "POST" && url.pathname === "/api/currency/override") {
       if (!ensureAdminAuth(req, res)) return true;
-      const ip = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "unknown";
-      const lim = adminLimiter(ip, "/override");
+      const ip = getClientIp(req);
+      const lim = adminRequestLimiter(ip, "currency_override");
       if (!lim.allowed) {
         res.writeHead(429, {
           "Content-Type": "application/json; charset=utf-8",
-          "Retry-After": String(Math.ceil((lim.retryAfterMs || 0) / 1000)),
+          "Retry-After": String(lim.retryAfterSec),
         });
-        res.end(JSON.stringify({ ok: false, error: "rate_limit_exceeded" }));
+        res.end(JSON.stringify({ ok: false, error: "rate_limit_exceeded", retryAfterSeconds: lim.retryAfterSec }));
         return true;
       }
       let body;
@@ -125,14 +123,14 @@ async function handleCurrencyApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/currency/fetch") {
-      const ip = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "unknown";
-      const lim = adminLimiter(ip, "/fetch");
+      const ip = getClientIp(req);
+      const lim = adminRequestLimiter(ip, "currency_fetch");
       if (!lim.allowed) {
         res.writeHead(429, {
           "Content-Type": "application/json; charset=utf-8",
-          "Retry-After": String(Math.ceil((lim.retryAfterMs || 0) / 1000)),
+          "Retry-After": String(lim.retryAfterSec),
         });
-        res.end(JSON.stringify({ ok: false, error: "rate_limit_exceeded" }));
+        res.end(JSON.stringify({ ok: false, error: "rate_limit_exceeded", retryAfterSeconds: lim.retryAfterSec }));
         return true;
       }
       const byAdmin = validAdminSecret(req);

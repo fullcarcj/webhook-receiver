@@ -247,6 +247,7 @@ const {
   mapOrderItemsForWms,
 } = require("./src/services/reservationService");
 const { timingSafeCompare } = require("./src/services/currencyService");
+const { getClientIp, adminRequestLimiter, adminAuthFailLimiter } = require("./src/utils/rateLimiter");
 
 const PORT = process.env.PORT || 3001;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
@@ -422,18 +423,57 @@ function rejectIngestSecret(req, res) {
 }
 
 function rejectAdminSecret(req, res) {
+  const ip = getClientIp(req);
+
+  // Rate limit general: 120 peticiones/min por IP
+  const generalCheck = adminRequestLimiter(ip, "admin_general");
+  if (!generalCheck.allowed) {
+    res.writeHead(429, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Retry-After":  String(generalCheck.retryAfterSec),
+    });
+    res.end(JSON.stringify({
+      ok: false,
+      error:             "rate_limit_exceeded",
+      message:           "Demasiadas peticiones. Intenta más tarde.",
+      retryAfterSeconds: generalCheck.retryAfterSec,
+    }));
+    return true;
+  }
+
   const secret = process.env.ADMIN_SECRET;
   if (!secret) {
     res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: false, error: "define ADMIN_SECRET en el servidor" }));
     return true;
   }
-  if (!timingSafeCompare(req.headers["x-admin-secret"], secret)) {
-    res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+
+  const provided =
+    req.headers["x-admin-secret"] ||
+    (process.env.ADMIN_SECRET_QUERY_AUTH !== "0" &&
+      (new URLSearchParams(req.url && req.url.includes("?") ? req.url.split("?")[1] : "")).get("k"));
+
+  if (timingSafeCompare(provided, secret)) return false;
+
+  // Auth fallida → contar intento por IP
+  const failCheck = adminAuthFailLimiter(ip, "admin_auth_fail");
+  if (!failCheck.allowed) {
+    res.writeHead(429, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Retry-After":  String(failCheck.retryAfterSec),
+    });
+    res.end(JSON.stringify({
+      ok: false,
+      error:             "too_many_auth_failures",
+      message:           "Demasiados intentos fallidos. IP bloqueada temporalmente.",
+      retryAfterSeconds: failCheck.retryAfterSec,
+    }));
     return true;
   }
-  return false;
+
+  res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+  return true;
 }
 
 /** Secreto POST FileMaker (`/filemaker/tipo-g`, `/mensajes-tipo-g`, `/filemaker/inventario-productos`, `/mensajes-inventario-productos`): `Authorization: Bearer`, `X-Filemaker-Secret` o `?secret=`. */

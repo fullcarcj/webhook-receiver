@@ -1,12 +1,12 @@
 -- Reservas de stock por órdenes ML (WMS)
--- Prerequisitos: productos(sku), warehouse_bins(id), sql/wms-bins.sql
+-- Prerequisitos: products(sku), warehouse_bins(id), sql/wms-bins.sql
 -- Nota: no existe `producto_bins` en este repo; la prioridad de bin se resuelve en SQL en reservationService.js (is_primary + qty).
 
 CREATE TABLE IF NOT EXISTS ml_order_reservations (
   id               BIGSERIAL PRIMARY KEY,
   ml_order_id      BIGINT    NOT NULL,
   ml_resource_url  TEXT,
-  producto_sku     TEXT      NOT NULL REFERENCES productos(sku),
+  producto_sku     TEXT      NOT NULL REFERENCES products(sku),
   bin_id           BIGINT    NOT NULL REFERENCES warehouse_bins(id),
   qty_reserved     NUMERIC(18,4) NOT NULL,
   status           TEXT      NOT NULL DEFAULT 'ACTIVE',

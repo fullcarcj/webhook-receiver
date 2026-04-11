@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS lot_bin_stock (
   id            BIGSERIAL PRIMARY KEY,
   lot_id        BIGINT        NOT NULL REFERENCES product_lots(id),
   bin_id        BIGINT        NOT NULL REFERENCES warehouse_bins(id),
-  producto_sku  TEXT          NOT NULL REFERENCES productos(sku),
+  producto_sku  TEXT          NOT NULL REFERENCES products(sku),
   qty_available NUMERIC(18,4) NOT NULL DEFAULT 0,
   qty_reserved  NUMERIC(18,4) NOT NULL DEFAULT 0,
   qty_total     NUMERIC(18,4) GENERATED ALWAYS AS

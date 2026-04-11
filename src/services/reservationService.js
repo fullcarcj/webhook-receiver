@@ -101,7 +101,7 @@ async function reserveForOrder({ mlOrderId, mlResourceUrl, items, userId }) {
     const selections = [];
 
     for (const { sku, quantity } of merged) {
-      const { rows: prod } = await client.query(`SELECT 1 FROM productos WHERE sku = $1 LIMIT 1`, [
+      const { rows: prod } = await client.query(`SELECT 1 FROM products WHERE sku = $1 LIMIT 1`, [
         sku,
       ]);
       if (prod.length === 0) {

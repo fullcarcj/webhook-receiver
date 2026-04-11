@@ -411,7 +411,7 @@ async function getOrder(mlOrderId) {
 
   const [{ rows: items }, { rows: alerts }] = await Promise.all([
     pool.query(
-      `SELECT moi.*, p.descripcion
+      `SELECT moi.*, p.description AS descripcion
        FROM ml_order_items moi
        LEFT JOIN products p ON p.sku = moi.product_sku
        WHERE moi.order_id = $1 ORDER BY moi.id`,
@@ -522,7 +522,7 @@ async function addSkuMap({ mlItemId, mlVariationId, productSku, noStockAction, c
 async function listSkuMaps({ companyId = 1, limit = 100, offset = 0 } = {}) {
   const [{ rows }, { rows: [{ count }] }] = await Promise.all([
     pool.query(
-      `SELECT m.*, p.descripcion
+      `SELECT m.*, p.description AS descripcion
        FROM ml_item_sku_map m
        LEFT JOIN products p ON p.sku = m.product_sku
        WHERE m.company_id = $1 AND m.is_active = TRUE

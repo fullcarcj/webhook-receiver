@@ -6,13 +6,21 @@
 -- psql $DATABASE_URL -f sql/landed-cost.sql
 
 -- ── Parche histórico shipping (no quitar; otros scripts lo asumen) ─────────
-ALTER TABLE import_shipment_lines
-  ADD COLUMN IF NOT EXISTS shipping_category_id BIGINT
-    REFERENCES shipping_categories(id),
-  ADD COLUMN IF NOT EXISTS volume_cbm_used NUMERIC(10,6),
-  ADD COLUMN IF NOT EXISTS freight_line_usd NUMERIC(15,4),
-  ADD COLUMN IF NOT EXISTS rate_snapshot_cbm NUMERIC(12,4),
-  ADD COLUMN IF NOT EXISTS freight_source TEXT;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'import_shipment_lines'
+  ) THEN
+    ALTER TABLE import_shipment_lines
+      ADD COLUMN IF NOT EXISTS shipping_category_id BIGINT
+        REFERENCES shipping_categories(id),
+      ADD COLUMN IF NOT EXISTS volume_cbm_used NUMERIC(10,6),
+      ADD COLUMN IF NOT EXISTS freight_line_usd NUMERIC(15,4),
+      ADD COLUMN IF NOT EXISTS rate_snapshot_cbm NUMERIC(12,4),
+      ADD COLUMN IF NOT EXISTS freight_source TEXT;
+  END IF;
+END $$;
 
 -- ─────────────────────────────────────────────────────
 -- ENUM estado embarque
@@ -108,6 +116,11 @@ ALTER TABLE import_shipment_lines ADD COLUMN IF NOT EXISTS allocated_expense_usd
 ALTER TABLE import_shipment_lines ADD COLUMN IF NOT EXISTS landed_cost_usd NUMERIC(15,6);
 ALTER TABLE import_shipment_lines ADD COLUMN IF NOT EXISTS applied_to_product BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE import_shipment_lines ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ;
+ALTER TABLE import_shipment_lines ADD COLUMN IF NOT EXISTS shipping_category_id BIGINT REFERENCES shipping_categories(id);
+ALTER TABLE import_shipment_lines ADD COLUMN IF NOT EXISTS volume_cbm_used NUMERIC(10,6);
+ALTER TABLE import_shipment_lines ADD COLUMN IF NOT EXISTS freight_line_usd NUMERIC(15,4);
+ALTER TABLE import_shipment_lines ADD COLUMN IF NOT EXISTS rate_snapshot_cbm NUMERIC(12,4);
+ALTER TABLE import_shipment_lines ADD COLUMN IF NOT EXISTS freight_source TEXT;
 
 -- line_fob_usd generada: si la columna ya existía sin GENERATED, PG no permite ADD así — crear solo en tablas nuevas arriba.
 DO $$

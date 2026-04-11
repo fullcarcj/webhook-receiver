@@ -106,7 +106,7 @@ async function getSessionDetail(sessionId) {
     throw Object.assign(new Error("Sesión no encontrada"), { code: "SESSION_NOT_FOUND" });
   }
   const { rows: lines } = await pool.query(
-    `SELECT cl.*, wb.bin_code, p.descripcion AS descripcion
+    `SELECT cl.*, wb.bin_code, p.description AS descripcion
      FROM count_lines cl
      JOIN warehouse_bins wb ON wb.id = cl.bin_id
      LEFT JOIN products p ON p.sku = cl.product_sku

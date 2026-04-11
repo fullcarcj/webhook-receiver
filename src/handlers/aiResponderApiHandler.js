@@ -45,6 +45,8 @@ async function getStats() {
     SELECT
       COUNT(*) FILTER (WHERE ai_reply_status = 'ai_replied') AS auto_sent,
       COUNT(*) FILTER (WHERE ai_reply_status = 'needs_human_review') AS needs_review,
+      COUNT(*) FILTER (WHERE ai_reply_status = 'needs_human_review' AND COALESCE(TRIM(ai_reply_text), '') <> '') AS needs_review_post_wa_fail,
+      COUNT(*) FILTER (WHERE ai_reply_status = 'needs_human_review' AND COALESCE(TRIM(ai_reply_text), '') = '') AS needs_review_pre_send,
       COUNT(*) FILTER (WHERE ai_reply_status = 'processing') AS processing,
       COUNT(*) FILTER (WHERE ai_reply_status IN ('pending_ai_reply','pending_receipt_confirm')) AS pending,
       COUNT(*) FILTER (WHERE ai_reply_status = 'skipped') AS skipped
@@ -306,8 +308,10 @@ td.msg{max-width:22rem;word-break:break-word}
       <td style="border:none;font-weight:700;color:#00d395">${stats.today_messages.auto_sent ?? 0}</td>
       <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b">Pendientes cola</td>
       <td style="border:none;font-weight:700;color:#c5cae9">${stats.today_messages.pending ?? 0}</td>
-      <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b">Rev. humana</td>
-      <td style="border:none;font-weight:700;color:#c5cae9">${stats.today_messages.needs_review ?? 0}</td>
+      <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b" title="needs_human_review: cola previa envío (sin FORCE) o post-fallo Wasender">Rev. humana</td>
+      <td style="border:none;font-weight:700;color:#c5cae9">${stats.today_messages.needs_review ?? 0}
+        <span class="muted" style="font-weight:400;font-size:.72rem"><br/>↳ post-WA: ${stats.today_messages.needs_review_post_wa_fail ?? 0} · pre-envío: ${stats.today_messages.needs_review_pre_send ?? 0}</span>
+      </td>
       <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b">Error / fallo WA</td>
       <td style="border:none;font-weight:700;color:#f4212e">${stats.today_log_by_action.error ?? 0}</td>
       <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b">Saltados</td>

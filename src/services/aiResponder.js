@@ -652,6 +652,9 @@ async function processOneMessage(message) {
     return;
   }
 
+  // AI_RESPONDER_FORCE_SEND solo omite la cola *antes* de enviar (needsHuman / sin reply_text).
+  // Si Wasender rechaza o falla el POST, igual marcamos needs_human_review para reintento manual
+  // y queda action_taken=error en ai_response_log (no es "revisión" previa a la IA).
   const errDetail = formatTipoMOutboundError(sendRes);
   const reasoningShort = `Envío falló (ver error_message en log). ${String(errDetail).split("\n")[0]}`.slice(0, 500);
 

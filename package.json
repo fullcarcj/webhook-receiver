@@ -106,6 +106,7 @@
     "db:pos-financial": "npm run db:exchange-rates && npm run db:igtf && npm run db:tax-retentions",
     "db:fiscal-periods": "node scripts/run-fiscal-periods-migration.js",
     "db:fiscal-numbering": "node scripts/run-fiscal-numbering-migration.js",
+    "db:fiscal-all": "node scripts/run-fiscal-periods-migration.js && node scripts/run-fiscal-numbering-migration.js",
     "db:inventory": "node scripts/run-inventory-migration.js",
     "migrate:inventory": "node scripts/migrateInventory.js"
   },

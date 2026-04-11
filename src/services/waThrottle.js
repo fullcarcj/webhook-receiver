@@ -3,10 +3,16 @@
 /**
  * Throttle global de mensajes WhatsApp salientes.
  *
- * Límite: WA_DAILY_CAP (default 5) mensajes por número de teléfono por día calendario
- * en la zona horaria de Venezuela (America/Caracas).
+ * Límite: `WA_DAILY_CAP` mensajes por número de teléfono por día calendario
+ * (zona horaria America/Caracas). **Default: 5 en producción.**
  *
- * Aplica a TODOS los tipos: A, B, C, E, F, G, H, recordatorios de conciliación, etc.
+ * Para pruebas/desarrollo: subir `WA_DAILY_CAP=999` (o cualquier número alto).
+ * En producción: bajar a 5-10 según política.
+ *
+ * Reset manual del contador de un número sin esperar a mañana:
+ *   `npm run wa-throttle-reset -- +584242701513`
+ *
+ * Aplica a TODOS los tipos de mensaje salientes (A, B, C, E, F, G, M, etc.).
  * Se llama desde wasender-client.js antes de cada envío.
  *
  * Tabla: wa_throttle (phone_e164, sent_date DATE, daily_count INT)

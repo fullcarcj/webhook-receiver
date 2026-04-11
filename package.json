@@ -34,6 +34,7 @@
     "whatsapp-tipo-f": "node ml-whatsapp-tipo-ef.js --tipo-f",
     "test-wasender-hook": "node scripts/test-wasender-webhook.js",
     "test-wasender-text": "node scripts/send-wasender-test-text.js",
+    "wa-throttle-reset": "node scripts/wa-throttle-reset.js",
     "process-lote-images": "node scripts/process-lote-imagenes-solomotor.js",
     "upload-firebase-webp": "node scripts/upload-firebase-webp.js",
     "sync-imagenes-cantidad-json": "node scripts/sync-imagenes-cantidad-from-json.js",

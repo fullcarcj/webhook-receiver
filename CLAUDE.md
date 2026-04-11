@@ -11,6 +11,11 @@ Receptor HTTP de webhooks de Mercado Libre (órdenes, mensajes, preguntas, ítem
 - **Base de datos:** solo **PostgreSQL** en producción (`db.js` → `db-postgres.js`). Existe código SQLite histórico (`db-sqlite.js`) pero **no** se usa en runtime si `DATABASE_URL` apunta a Postgres.
 - **Carga de entorno:** `load-env-local.js` lee `oauth-env.json` si existe (solo claves no ya definidas en `process.env`). **`oauth-env.json` está en `.gitignore`** — no versionar secretos.
 
+## Inventario HTTP (endpoints)
+
+- **Raíz del repo (versionado):** `endpoints-cubiertos-hasta-hoy.md` — resumen por prefijo (`/api/*`), páginas HTML admin, Banesco, **AI Responder Tipo M** (`/ai-responder`, `/api/ai-responder/*`), scripts npm operativos.
+- **Copia local para carpeta Banesco (no en git):** `data/BANESCO/endpoints-cubiertos-hasta-hoy.md` — la carpeta `data/` está en `.gitignore`; regenerar copiando desde la raíz cuando se actualice el inventario.
+
 ## Archivos de entrada y scripts útiles
 
 | Comando | Uso |
@@ -72,7 +77,7 @@ Piloto: respuesta rápida contextualizada con plantilla `AI_RESPONDER_GENERIC_TE
 
 **Limpieza:** `cleanStuckProcessing` en el worker: `processing` colgado &gt; 10 min → `needs_human_review` (no reenvía WA automáticamente por eso).
 
-**Monitoreo / SQL:** `GET /ai-responder?k=ADMIN_SECRET`, `/api/ai-responder/stats|log|pending`; migración `npm run db:ai-responder`; tablas `crm_messages` (columnas `ai_*`), `ai_response_log`. En fallos de envío, `ai_response_log.error_message` guarda texto multilínea con `[origen=WASENDER_API]` (HTTP + JSON + body) o `[origen=APP_*]` si no hubo POST; errores de `context_line` (GROQ) van en `reasoning` como `[origen=GROQ_LLAMA: …]` si aplica.
+**Monitoreo / SQL:** `GET /ai-responder?k=ADMIN_SECRET` (tabla “Log completo” con columna **teléfono (chat)** vía `crm_chats`), `/api/ai-responder/stats|log|pending` (el JSON de `log` incluye `chat_phone`); migración `npm run db:ai-responder`; tablas `crm_messages` (columnas `ai_*`), `ai_response_log`. En fallos de envío, `ai_response_log.error_message` guarda texto multilínea con `[origen=WASENDER_API]` (HTTP + JSON + body) o `[origen=APP_*]` si no hubo POST; errores de `context_line` (GROQ) van en `reasoning` como `[origen=GROQ_LLAMA: …]` si aplica. **Configuración del “tono” Tipo M:** plantilla `AI_RESPONDER_GENERIC_TEMPLATE` (placeholders `{{CONTEXTO_IA}}`, `{{NOMBRE}}`, `{{NOMBRE_SALUDO}}`); el prompt de `context_line` vive en `src/services/aiResponder.js` (`PROMPT_CONTEXT_LINE`); modelo GROQ vía `provider_settings` / `GROQ_API_KEY` (`callChatBasic` en `aiGateway.js`).
 
 **Anti-spam / deduplicación (Tipo M + Wasender):**
 
@@ -183,6 +188,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
   - `GET /api/bank/statements` — listado JSON (`bank_account_id`, `from`, `to`, `reconciliation_status`, `limit`, `offset`).
   - `GET /statements?k=…` — tabla HTML; `?format=json` mismo listado.
 - Handlers en `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`; consulta en `src/services/bankStatementsService.js`.
+- **Inventario HTTP (incl. estas rutas):** ver `endpoints-cubiertos-hasta-hoy.md` en la raíz; copia local opcional bajo `data/BANESCO/endpoints-cubiertos-hasta-hoy.md` (carpeta `data/` ignorada por git).
 
 ## Directrices para cambios de código
 
@@ -196,7 +202,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 
 | Tema | Archivos |
 |------|----------|
-| Rutas HTTP y webhooks | `server.js` |
+| Rutas HTTP y webhooks | `server.js`; inventario resumido `endpoints-cubiertos-hasta-hoy.md` |
 | OAuth y llamadas ML API | `oauth-token.js` |
 | Preguntas pending/answered | `ml-question-sync.js`, `ml-question-refresh.js`, `db-postgres.js` |
 | IA automática preguntas | `ml-questions-ia-auto.js` |
@@ -215,4 +221,4 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 
 ---
 
-*Última revisión: 2026-04 — Tipo M AI Responder (flujo `messages.received`, anti-spam, `AI_RESPONDER_FORCE_SEND`, worker GROQ por env); ventas globales; Render; Banesco; convención LATAM B/D; `package.json` y workflows.*
+*Última revisión: 2026-04-11 — Tipo M (log HTML con teléfono, purge error log, config plantilla/prompt); Wasender 429 reintentos + `WA_DAILY_CAP` / `wa-throttle-reset`; inventario `endpoints-cubiertos-hasta-hoy.md` + export `data/BANESCO/`; Banesco; convención LATAM B/D; `package.json` y workflows.*

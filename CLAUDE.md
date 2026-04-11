@@ -37,6 +37,7 @@ Definida en `ml-message-types.js` (tags lógicos, no campos de ML):
 - **D:** Respuestas automáticas a preguntas (`POST /answers`) — `ml-questions-ia-auto.js`.
 - **E/F:** WhatsApp Wasender — `ml-whatsapp-tipo-ef.js`; **F** ligado a `ml_question_id`, **E** a orden o seguimiento.
 - **G:** FileMaker → buyer + intento tipo E — `ml-filemaker-tipo-g.js`.
+- **M:** Respuesta automática piloto CRM WhatsApp (plantilla + `context_line` GROQ) — `src/services/aiResponder.js`, worker `src/workers/aiResponderWorker.js`, convención `MESSAGE_TYPE_M` en `ml-message-types.js`. Ver flujo detallado más abajo.
 
 Convención de redacción vigente:
 - Mantener mensajes automáticos en **español latinoamericano neutral** (evitar voseo/rioplatense: “podés”, “buscás”, “pasá”, etc.).
@@ -51,6 +52,39 @@ Con `ML_WEBHOOK_FETCH_RESOURCE=1` se hace GET del recurso y se actualizan tablas
 ### WhatsApp tipo F (pregunta)
 
 En `server.js`, solo si **`ML_WHATSAPP_TIPO_F_ENABLED === "1"`** se llama `trySendWhatsappTipoFForQuestion` (vía `setImmediate`). Requiere Wasender habilitado + `WASENDER_API_KEY`, fila de comprador en `ml_buyers` con teléfono normalizable. Log en `ml_whatsapp_wasender_log`. Dedup: éxito previo por pregunta salvo `ML_WHATSAPP_TIPO_F_SKIP_IF_SENT=0`.
+
+### AI Responder — Tipo M (CRM WhatsApp, `messages.received`)
+
+Piloto: respuesta rápida contextualizada con plantilla `AI_RESPONDER_GENERIC_TEMPLATE` y fragmento `context_line` vía GROQ (`callChatBasic`). El envío a Wasender usa **`crm_chats.phone`** (número del webhook), no `customers.phone` para decidir el destino.
+
+**Entrada:** `POST` Wasender → `handleWasenderWebhookPost` (`server.js`) → si `WA_CRM_HUB_FROM_WASENDER` ≠ `0`, `routeWhatsappHubFromBody` → `src/whatsapp/hookRouter.js` → `src/whatsapp/processors/messages.js` → `handle(normalized)`.
+
+**Ramas en `messages.js` (resumen):**
+
+1. **CASO 1** — `fromPhone` ya está en `customers.phone`: `resolveCustomerId`, `upsertChat`, `saveMessageAndUpdateChat`; texto entrante → `maybeQueueInboundText` (marca `crm_messages.ai_reply_status = pending_ai_reply` si `AI_RESPONDER_ENABLED=1` y el estado IA era `NULL`). Post-commit: bienvenidas CRM (`crmWaWelcome`).
+2. **CASO 2** — Sin customer pero `crm_chat_states = AWAITING_NAME` y el texto es **nombre válido**: crea/actualiza customer, borra estado, `upsertChat`, `saveMessageAndUpdateChat`, `maybeQueueInboundText`. Post-commit: confirmación de nombre.
+3. **AWAITING_NAME + texto que no es nombre válido** (frase, una palabra tipo apellido pendiente, etc.): `upsertChat` con **`customer_id` NULL** y `phone = fromPhone`, mensaje en `crm_messages` con `customer_id` NULL, `maybeQueueInboundText` (**Tipo M sin customer**). El estado `AWAITING_NAME` **permanece** hasta un nombre válido (CASO 2).
+4. **CASO 3** — Contacto nuevo (sin customer y sin estado / replay del trigger): solo `upsertCrmChatStateAwaitingName` + post-commit pedir nombre; **no** crea `crm_chats`/`crm_messages` en ese paso.
+
+**Cola y worker:** `maybeQueueInboundText` en `src/services/aiResponder.js`. Con `AI_RESPONDER_ENABLED=1`, `src/workers/aiResponderWorker.js` cada `AI_RESPONDER_INTERVAL_MS` (default 8s) reclama un mensaje con `UPDATE … FOR UPDATE SKIP LOCKED`, pasa a `processing`, ejecuta `processOneMessage` (requiere `GROQ_API_KEY` en env).
+
+**`processOneMessage`:** texto vacío → `skipped`; teléfono ausente en `crm_chats` → `skipped_inbound`; genera respuesta (plantilla Tipo M); **`AI_RESPONDER_FORCE_SEND`** = interruptor **revisión humana**: valores “sin cola humana” `1`/`true`/`yes`/`on`; “con cola” `0`/`false`/`no`/`off`/vacío; antes de Wasender, `SELECT` con `ai_reply_status = ai_replied` evita **doble envío**; éxito → `ai_replied` + `ai_response_log.sent`; fallo API → `needs_human_review` + log `error`.
+
+**Limpieza:** `cleanStuckProcessing` en el worker: `processing` colgado &gt; 10 min → `needs_human_review` (no reenvía WA automáticamente por eso).
+
+**Monitoreo / SQL:** `GET /ai-responder?k=ADMIN_SECRET`, `/api/ai-responder/stats|log|pending`; migración `npm run db:ai-responder`; tablas `crm_messages` (columnas `ai_*`), `ai_response_log`.
+
+**Anti-spam / deduplicación (Tipo M + Wasender):**
+
+| Capa | Dónde / qué |
+|------|-------------|
+| Webhook dedup | `crm_messages` `ON CONFLICT (external_message_id) DO NOTHING` al insertar. |
+| Cola IA | `maybeQueueInboundText` solo si `ai_reply_status IS NULL`. |
+| Un ciclo a la vez | Flag `isRunning` en el worker. |
+| Multi-instancia | `FOR UPDATE SKIP LOCKED` al reclamar la siguiente fila `pending_*`. |
+| Pre-envío WA | Consulta explícita: si el mensaje ya está `ai_replied`, no llama otra vez a Wasender. |
+| Wasender común | `wasender-client.js`: quiet hours si aplica; `runAntiSpamBeforeSend` / throttle según `messageType` y env (`WA_PREVENT_DUPLICATES`, etc.); Tipo M usa `messageType` `CHAT`. |
+| Proveedor | Rate limits / “Account protection” de Wasender; fallos → estado revisión + log, no bucle de reintento en el mismo flujo por ese solo mecanismo. |
 
 ### Post-venta tipo A
 
@@ -120,6 +154,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Currency | `CRON_SECRET` (`Authorization: Bearer` en `POST /api/currency/fetch`), `ADMIN_SECRET` vía `X-Admin-Secret` en el mismo endpoint; `BCV_URL`, `BCV_FETCH_TIMEOUT_MS`, `BCV_TLS_INSECURE`; en GitHub Actions: secrets `RENDER_URL`, `CRON_SECRET`, `DATABASE_URL` (`daily-rates.yml`); `CURRENCY_COMPANY_IDS` opcional |
 | Preguntas IA | `ML_QUESTIONS_IA_AUTO_ENABLED`, ventana/horario en `ML_QUESTIONS_IA_AUTO_*` |
 | WhatsApp | `WASENDER_ENABLED`, `WASENDER_API_KEY`, `WASENDER_API_BASE_URL`, `ML_WHATSAPP_TIPO_F_ENABLED`, plantillas E/F en BD o env; ventana silenciosa: `WA_QUIET_HOURS_*`, `WA_QUIET_HOURS_BLOCK_SEND` (`waQuietHours.js`); anti-spam: `WA_PREVENT_DUPLICATES`, `WA_MAX_REMINDERS_PER_DAY`, tabla `wa_sent_messages_log` (`npm run db:wa-anti-spam`, `waAntiSpam.js`) — `messageType` en `wasender-client` (`CHAT`/`REMINDER`/`MARKETING`/`CRITICAL`) |
+| AI Responder Tipo M | `AI_RESPONDER_ENABLED=1` (cola + worker), `GROQ_API_KEY`, `AI_RESPONDER_INTERVAL_MS` (opcional), `AI_RESPONDER_GENERIC_TEMPLATE`, `AI_RESPONDER_FORCE_SEND` (switch revisión humana: `1`/`true`/`yes`/`on` = sin cola; `0`/`false`/`no`/`off`/vacío = con cola), `WASENDER_API_KEY`; migración `npm run db:ai-responder`, verificación `npm run verify:ai-responder`; hub CRM: `WA_CRM_HUB_FROM_WASENDER` |
 | Post-venta A | `ML_AUTO_SEND_POST_SALE`, `ML_AUTO_SEND_TOPICS`, `ML_POST_SALE_*` |
 | Retiro B | `ML_RETIRO_ENABLED`, `ML_RETIRO_SLOT`, `ML_RETIRO_TIMEZONE`, `ML_RETIRO_LOOKBACK_DAYS`, `ML_RETIRO_MORNING_SEND_AT` / `ML_RETIRO_AFTERNOON_SEND_AT` (referencia HH:MM local), `ML_RETIRO_ENFORCE_SEND_AT`, `ML_RETIRO_SEND_AT_WINDOW_MINUTES`; hora real de ejecución = **cron UTC** en los workflows |
 | Calificación C | `ML_RATING_REQUEST_ENABLED`, `ML_RATING_REQUEST_LOOKBACK_DAYS`, …; hora diaria = **cron** en `rating-request-daily.yml` |
@@ -176,7 +211,8 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Orden de migración SQL | `sql/run-migrations.md` |
 | Banesco monitor / CSV / statements | `src/services/banescoService.js`, `src/jobs/banescoMonitor.js`, `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`, `src/services/bankStatementsService.js`, `sql/bank-reconciliation.sql` |
 | Ventas globales + import ML | `src/services/salesService.js`, `src/handlers/salesApiHandler.js`, `scripts/importMlOrdersToSales.js`, `scripts/import-ml-sales-http.js`, `sql/20260408_sales_orders*.sql`, `20260409_sales_global.sql`; kits/bundles (`npm run db:kits-bundles`, `sql/20260417_kits_bundles_productos.sql`, `/api/bundles`, `/api/price-review`) |
+| WhatsApp hub inbound + Tipo M | `src/whatsapp/hookRouter.js`, `src/whatsapp/processors/messages.js`, `src/services/aiResponder.js`, `src/workers/aiResponderWorker.js`, `src/handlers/aiResponderApiHandler.js`, `sql/20260411_ai_responder.sql` |
 
 ---
 
-*Última revisión: 2026-04 — Ventas globales (import ML, `ml_feedback_filter`, scripts HTTP), Render (`render.yaml`, Playwright), Banesco (ventana horaria, `/banesco-connection`, `/statements`, `bank_statements`), convención de redacción LATAM para tipos B/D, alineado con `package.json` y workflows.*
+*Última revisión: 2026-04 — Tipo M AI Responder (flujo `messages.received`, anti-spam, `AI_RESPONDER_FORCE_SEND`, worker GROQ por env); ventas globales; Render; Banesco; convención LATAM B/D; `package.json` y workflows.*

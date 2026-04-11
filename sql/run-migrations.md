@@ -22,6 +22,9 @@ psql $DATABASE_URL -f sql/wms-audit-v2.sql
 # 6. Reservas de stock por órdenes ML (tabla ml_order_reservations)
 psql $DATABASE_URL -f sql/ml-reservations.sql
 
+# 6b. Lotes y shelf-life (product_lots, lot_bin_stock, lot_movements; requiere productos + import_shipments + WMS)
+npm run db:lots-management
+
 # 7. Catálogo técnico — compatibilidad motores/válvulas (vehicle_makes, engines, valve_specs, vistas)
 psql $DATABASE_URL -f sql/catalog-motor-compatibility.sql
 

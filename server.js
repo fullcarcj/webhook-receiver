@@ -175,6 +175,7 @@ const { handlePublicFrontendRequest } = require("./public-frontend-api");
 const { handleCurrencyApiRequest } = require("./src/routes/currency");
 const { handleShippingApiRequest } = require("./src/routes/shipping");
 const { handleWmsApiRequest } = require("./src/routes/wms");
+const { handleLotsApiRequest } = require("./src/routes/lots");
 const { handleWalletApiRequest } = require("./src/routes/wallet");
 const { handleCrmApiPreflight } = require("./src/middleware/crmApiCors");
 const { handleVehicleApiRequest } = require("./src/handlers/vehicleApiHandler");
@@ -2001,6 +2002,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleWmsApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleLotsApiRequest(req, res, url)) {
     return;
   }
 

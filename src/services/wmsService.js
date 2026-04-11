@@ -6,6 +6,7 @@ const { pool } = require("../../db-postgres");
  * @param {import('pg').PoolClient} client
  * @param {object} p
  */
+/** Exportado para `lotService` (misma transacción que movimientos de lote). */
 async function setMovementSessionVars(client, p) {
   const reason = p.reason != null ? String(p.reason) : "";
   const refId = p.referenceId != null ? String(p.referenceId) : "";
@@ -133,7 +134,7 @@ async function reserveStock({ sku, quantity, referenceId, referenceType, userId 
   }
 
   const binId = candidates[0].bin_id;
-  return adjustStock({
+  const out = await adjustStock({
     binId,
     sku,
     deltaAvailable: -q,
@@ -144,6 +145,27 @@ async function reserveStock({ sku, quantity, referenceId, referenceType, userId 
     userId,
     notes: null,
   });
+
+  try {
+    const { rows: prodRows } = await pool.query(
+      `SELECT COALESCE(requires_lot_tracking, FALSE) AS r FROM productos WHERE sku = $1`,
+      [String(sku || "").trim()]
+    );
+    if (prodRows[0]?.r === true) {
+      console.warn(
+        `[wms] SKU ${String(sku).trim()} requiere control de lote. ` +
+          `Confirmar lote antes del despacho físico vía POST /api/lots/dispatch`
+      );
+    }
+  } catch (e) {
+    if (e && e.code === "42703") {
+      /* columna requires_lot_tracking ausente hasta migración lot-management */
+    } else {
+      console.warn("[wms] reserveStock lot-tracking check:", e.message || e);
+    }
+  }
+
+  return out;
 }
 
 async function releaseReservation({ sku, quantity, referenceId, userId }) {
@@ -370,6 +392,7 @@ async function createBin({ shelfId, level, maxWeightKg, maxVolumeCbm, notes }) {
 }
 
 module.exports = {
+  setMovementSessionVars,
   adjustStock,
   reserveStock,
   releaseReservation,

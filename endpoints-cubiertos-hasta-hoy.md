@@ -15,6 +15,7 @@
 | `/api/currency/*` | `src/routes/currency.js` | Tasas, override, fetch BCV |
 | `/api/shipping/*` | `src/routes/shipping.js` | Flete, categorías |
 | `/api/wms/*` | `src/routes/wms.js` | Bins, stock, picking, reservas ML |
+| `/api/lots/*` | `src/routes/lots.js` | Lotes / shelf-life (recepción, despacho, alertas, expire diario) |
 | `/api/wallet/*` | `src/routes/wallet.js` | Billetera cliente |
 | `/api/sales/*` | `salesApiHandler.js` | Ventas globales, import ML, quotes, alerts |
 | `/api/bundles/*`, `/api/price-review/*` | `bundleApiHandler.js` | Kits, alternativas, cola revisión precios |

@@ -353,8 +353,16 @@ async function processOneMessage(message) {
     return;
   }
 
-  const { rows: cust } = await pool.query(`SELECT phone FROM customers WHERE id = $1`, [customerId]);
-  const phone = cust[0]?.phone;
+  // Prioridad 1: customers.phone. Fallback: crm_chats.phone (siempre tiene el número del remitente WA).
+  let phone = null;
+  {
+    const { rows: cust } = await pool.query(`SELECT phone FROM customers WHERE id = $1`, [customerId]);
+    phone = cust[0]?.phone || null;
+    if (!phone && chatId) {
+      const { rows: chatRow } = await pool.query(`SELECT phone FROM crm_chats WHERE id = $1`, [chatId]);
+      phone = chatRow[0]?.phone || null;
+    }
+  }
   if (!phone) {
     await pool.query(
       `UPDATE crm_messages SET ai_reply_status = 'skipped', ai_processed_at = NOW() WHERE id = $1`,
@@ -368,7 +376,7 @@ async function processOneMessage(message) {
       receipt_data: receiptDataRaw,
       reply_text: null,
       confidence: null,
-      reasoning: "Sin teléfono en customers",
+      reasoning: "Sin teléfono en customers ni crm_chats",
       provider_used: providerAuditTipoM("sin_gateway"),
       tokens_used: 0,
       action_taken: "skipped_inbound",

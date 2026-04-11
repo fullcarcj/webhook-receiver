@@ -57,7 +57,7 @@ En `server.js`, solo si **`ML_WHATSAPP_TIPO_F_ENABLED === "1"`** se llama `trySe
 
 Piloto: respuesta rápida contextualizada con plantilla `AI_RESPONDER_GENERIC_TEMPLATE` y fragmento `context_line` vía GROQ (`callChatBasic`). El envío a Wasender usa **`crm_chats.phone`** (número del webhook), no `customers.phone` para decidir el destino.
 
-**Entrada:** `POST` Wasender → `handleWasenderWebhookPost` (`server.js`) → si `WA_CRM_HUB_FROM_WASENDER` ≠ `0`, `routeWhatsappHubFromBody` → `src/whatsapp/hookRouter.js` → `src/whatsapp/processors/messages.js` → `handle(normalized)`.
+**Entrada:** `POST` Wasender → `handleWasenderWebhookPost` (`server.js`) → si `WA_CRM_HUB_FROM_WASENDER` ≠ `0`, `routeWhatsappHubFromBody` → `src/whatsapp/hookRouter.js` → `src/whatsapp/processors/messages.js` → `handle(normalized)`. Wasender puede enviar **`messages.received`**, **`messages-personal.received`** o **`message.received`** (a veces en `body.type`); `payloadParser` los unifica a `messages.received` y el hub los trata igual (incl. media inbound).
 
 **Ramas en `messages.js` (resumen):**
 

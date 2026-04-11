@@ -301,12 +301,13 @@ function parseWebhookJobs(body) {
     return jobs;
   }
 
-  const ev = String(body.event || "messages.received");
+  const evRaw = String(body.event || body.type || "messages.received").trim();
+  const ev = evRaw.toLowerCase();
   const dataTop = body && body.data != null ? body.data : body;
   const norm = normalizeBaileysEnvelope(body);
-  let evOut = ev;
+  let evOut = evRaw;
 
-  if (ev === "message.sent") {
+  if (ev === "message.sent" || ev === "messages.sent") {
     evOut = "messages.sent";
   } else if (ev === "messages.upsert") {
     const explicitFromMe =
@@ -330,7 +331,7 @@ function parseWebhookJobs(body) {
     ev === "message.received" ||
     ev === "messages-personal.received"
   ) {
-    /** Wasender a veces usa `message.received`; sin esto no hay processor → no bienvenida CRM. */
+    /** Wasender: `message.received` / `messages-personal.received` → misma cola que `messages.received`. */
     evOut = "messages.received";
   }
 
@@ -339,11 +340,11 @@ function parseWebhookJobs(body) {
   }
   norm.eventType = evOut;
   // Preservar el evento original de Wasender para que hookRouter pueda filtrar duplicados
-  norm.__originalEvent = ev;
+  norm.__originalEvent = evRaw;
 
   console.log(
     "[parser] rawEvent=%s → evOut=%s fromPhone=%s toPhone=%s msgId=%s type=%s",
-    ev,
+    evRaw,
     evOut,
     norm.fromPhone || "-",
     norm.toPhone || "-",

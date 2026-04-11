@@ -10,6 +10,8 @@ const logger = pino({
 
 const processors = {
   "messages.received": require("./processors/messages"),
+  /** Alias Wasender: mismo handler que `messages.received` (por si el evento llega sin normalizar). */
+  "messages-personal.received": require("./processors/messages"),
   "messages.update": require("./processors/messages"),
   "message-receipt.update": require("./processors/receipts"),
   "reactions.received": require("./processors/reactions"),
@@ -24,6 +26,28 @@ const processors = {
 const MEDIA_TYPES = new Set(["image", "audio", "video", "document", "sticker"]);
 const mediaProcessor = require("./processors/media");
 const { detectMedia, extractRawMessage } = require("./media/mediaDetector");
+
+/** Entrantes de chat: Wasender puede mandar `messages.received` o `messages-personal.received` (misma lógica). */
+function isInboundMessagesJob(eventType, normalized) {
+  if (normalized && normalized.type === "reaction") return false;
+  const e = String(eventType || "").trim().toLowerCase();
+  return (
+    e === "messages.received" ||
+    e === "messages-personal.received" ||
+    e === "message.received"
+  );
+}
+
+/** Media inbound: mismo mensaje puede venir como personal o canónico — tratar igual. */
+function isCanonicalInboundForMedia(eventType, originalEv) {
+  if (String(eventType || "").trim().toLowerCase() !== "messages.received") return false;
+  const o = String(originalEv || "").trim().toLowerCase();
+  return (
+    o === "messages.received" ||
+    o === "messages-personal.received" ||
+    o === "message.received"
+  );
+}
 
 async function runProcessor(eventType, normalized) {
   const mod = processors[eventType];
@@ -49,7 +73,7 @@ async function routeWebhook(body) {
     const eventType = job.eventType || "messages.received";
     const normalized = { ...(job.normalized || {}), eventType };
 
-    if (eventType === "messages.received" && normalized.type !== "reaction") {
+    if (isInboundMessagesJob(eventType, normalized)) {
       if (!firstInbound && normalized.fromPhone) {
         firstInbound = normalized;
       }
@@ -57,10 +81,10 @@ async function routeWebhook(body) {
 
     try {
       await runProcessor(eventType, normalized);
-      // Media entrante: solo para el evento canónico messages.received
-      // messages.upsert y messages-personal.received traen el mismo mensaje → evitar triple proceso
+      // Media entrante: entrantes canónicos y `messages-personal.received` se tratan igual;
+      // messages.upsert puede duplicar el mismo mensaje → evitar triple proceso con originalEv.
       const originalEv = normalized.__originalEvent || eventType;
-      const isCanonicalReceived = eventType === "messages.received" && originalEv === "messages.received";
+      const isCanonicalReceived = isCanonicalInboundForMedia(eventType, originalEv);
       const hasMediaByType = MEDIA_TYPES.has(normalized.type);
       const hasMediaInRawPayload = !!detectMedia(extractRawMessage(normalized));
       if (isCanonicalReceived && (hasMediaByType || hasMediaInRawPayload)) {

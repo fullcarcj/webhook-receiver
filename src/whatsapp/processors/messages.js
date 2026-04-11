@@ -46,6 +46,16 @@ const { maybeQueueInboundText } = require("../../services/aiResponder");
 
 const msgLog = pino({ level: process.env.LOG_LEVEL || "info", name: "whatsapp_messages" });
 
+/** Wasender: `messages.received`, `messages-personal.received` y `message.received` comparten lógica CRM/Tipo M. */
+function isInboundMessagesReceived(eventType) {
+  const e = String(eventType || "").trim().toLowerCase();
+  return (
+    e === "messages.received" ||
+    e === "messages-personal.received" ||
+    e === "message.received"
+  );
+}
+
 let _nameSuggestedColumnWarned = false;
 
 function isPriority(normalized) {
@@ -207,7 +217,7 @@ async function saveMessageAndUpdateChat(client, { chatId, customerId, normalized
   // `processors/media.js` + mediaSaver (URL Firebase, transcripción, etc.).
   // Si insertáramos aquí un stub con el mismo external_message_id, el media processor
   // haría already_saved_dedup y no descargaría ni transcribiría (2.º, 3.er mensaje, …).
-  if (eventType === "messages.received") {
+  if (isInboundMessagesReceived(eventType)) {
     const t = String(normalized.type || "text").toLowerCase();
     if (["image", "audio", "video", "document", "sticker"].includes(t)) {
       return;
@@ -235,7 +245,7 @@ async function saveMessageAndUpdateChat(client, { chatId, customerId, normalized
       [chatId]
     );
     const t = String(normalized.type || "text").toLowerCase();
-    if (eventType === "messages.received" && t === "text") {
+    if (isInboundMessagesReceived(eventType) && t === "text") {
       await maybeQueueInboundText(client, ins.rows[0].id);
     }
   }
@@ -351,7 +361,7 @@ async function handle(normalized) {
       // isValidFullName es async: valida con IA para 2-4 palabras; fallback estático si IA falla.
       // Retorna: true | false | 'ASK_SURNAME'
       let nameValidationResult = false;
-      if (eventType === "messages.received" && (normalized.type || "text") !== "reaction" && messageText.length > 0) {
+      if (isInboundMessagesReceived(eventType) && (normalized.type || "text") !== "reaction" && messageText.length > 0) {
         nameValidationResult = await isValidFullName(messageText);
       }
       const isInboundText = nameValidationResult === true;
@@ -463,7 +473,7 @@ async function handle(normalized) {
         chatState &&
         chatState.status === "AWAITING_NAME" &&
         !isTriggerReplay &&
-        eventType === "messages.received" &&
+        isInboundMessagesReceived(eventType) &&
         (normalized.type || "text") === "text" &&
         messageText.length > 0 &&
         !isInboundTextFinal
@@ -500,7 +510,7 @@ async function handle(normalized) {
         // CASO 3: Contacto completamente nuevo (o mismo trigger replay)
         // NO tocar customers, crm_chats ni crm_messages.
         // ══════════════════════════════════════════════════════════════
-        if (eventType === "messages.received" && (normalized.type || "text") !== "reaction") {
+        if (isInboundMessagesReceived(eventType) && (normalized.type || "text") !== "reaction") {
           await upsertCrmChatStateAwaitingName(
             client,
             normalized.fromPhone,
@@ -518,7 +528,7 @@ async function handle(normalized) {
 
     // ── Post-commit ──────────────────────────────────────────────────
     if (postAction === "existing_welcome") {
-      if (eventType === "messages.received" && (normalized.type || "text") !== "reaction") {
+      if (isInboundMessagesReceived(eventType) && (normalized.type || "text") !== "reaction") {
         setImmediate(() => {
           const ctx = { chatId: postChatId, customerId: postCustomerId, phoneRaw: normalized.fromPhone };
           const logSkip = (step, r) => {

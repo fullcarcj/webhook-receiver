@@ -39,4 +39,14 @@ const bodySingular = { ...body, event: "message.received" };
 const jobsSingular = parseWebhookJobs(bodySingular);
 assert.strictEqual(jobsSingular[0].eventType, "messages.received");
 
+const bodyPersonal = { ...body, event: "messages-personal.received" };
+const jobsPersonal = parseWebhookJobs(bodyPersonal);
+assert.strictEqual(jobsPersonal[0].eventType, "messages.received");
+assert.strictEqual(jobsPersonal[0].normalized.__originalEvent, "messages-personal.received");
+
+const bodyTypeOnly = { type: "messages-personal.received", data: body.data };
+const jobsType = parseWebhookJobs(bodyTypeOnly);
+assert.strictEqual(jobsType[0].eventType, "messages.received");
+assert.strictEqual(jobsType[0].normalized.__originalEvent, "messages-personal.received");
+
 console.log("wasender-payload-parser: OK");

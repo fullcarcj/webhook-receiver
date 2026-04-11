@@ -224,13 +224,13 @@ async function handleAiResponderRequest(req, res, url) {
         `SELECT id, crm_message_id, action_taken, confidence,
                 COALESCE(provider_used, '') AS provider_used,
                 LEFT(COALESCE(reasoning, ''), 160) AS evidencia_razon,
-                LEFT(COALESCE(error_message, ''), 140) AS evidencia_error,
-                LEFT(COALESCE(input_text, ''), 72) AS input_prev,
-                LEFT(COALESCE(reply_text, ''), 72) AS reply_preview,
+                LEFT(COALESCE(error_message, ''), 200) AS evidencia_error,
+                LEFT(COALESCE(input_text, ''), 100) AS input_prev,
+                LEFT(COALESCE(reply_text, ''), 120) AS reply_preview,
                 created_at
          FROM ai_response_log
          ORDER BY created_at DESC
-         LIMIT 40`
+         LIMIT 80`
       );
       recentLog = lg.rows;
     } catch (e) {
@@ -261,84 +261,119 @@ async function handleAiResponderRequest(req, res, url) {
 <html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>AI Responder — Tipo M (piloto)</title>
 <style>
-body{font-family:system-ui,sans-serif;background:#0f1419;color:#e7e9ea;margin:2rem;max-width:1200px}
-h1{font-size:1.1rem}a{color:#1d9bf0}.card{background:#15202b;border:1px solid #38444d;border-radius:8px;padding:1rem;margin:1rem 0}
-.muted{color:#71767b;font-size:.85rem} table{border-collapse:collapse;width:100%;font-size:.72rem}
-th,td{border:1px solid #38444d;padding:.35rem;text-align:left;vertical-align:top}
-th{background:#1e2732}.badge{padding:.1rem .35rem;border-radius:4px;font-size:.72rem}
+body{font-family:system-ui,sans-serif;background:#0f1419;color:#e7e9ea;margin:2rem;max-width:1300px}
+h1,h2{font-size:1rem}h2{margin-top:1.6rem}a{color:#1d9bf0}
+.card{background:#15202b;border:1px solid #38444d;border-radius:8px;padding:1rem;margin:1rem 0}
+.muted{color:#71767b;font-size:.82rem} table{border-collapse:collapse;width:100%;font-size:.72rem}
+th,td{border:1px solid #38444d;padding:.3rem .4rem;text-align:left;vertical-align:top}
+th{background:#1e2732;white-space:nowrap}
+.badge{padding:.1rem .35rem;border-radius:4px;font-size:.72rem}
 .badge.on{background:#003920;color:#00d395}.badge.off{background:#3b1219;color:#f4212e}
 .badge.m{background:#1a237e;color:#c5cae9}
+.badge.sent{background:#003920;color:#00d395;font-weight:700}
+.badge.error{background:#3b1219;color:#f4212e;font-weight:700}
+.badge.skip{background:#2d2200;color:#f0b429}
+.badge.review{background:#1a237e;color:#c5cae9}
+.badge.pend{background:#1e2732;color:#71767b}
 tr.row-fail{background:#2a1515}
-td.evid{font-size:.68rem;max-width:14rem;word-break:break-word}
+tr.row-ok{background:#061a0e}
+td.evid{font-size:.66rem;max-width:18rem;word-break:break-word}
+td.msg{max-width:22rem;word-break:break-word}
+.pill{display:inline-block;padding:.05rem .3rem;border-radius:3px;font-size:.65rem}
 </style></head><body>
 <h1>🤖 AI Responder — <span class="badge m">Tipo M</span></h1>
-<p class="muted">Mensajes automáticos CRM del piloto IA (convención interna <code>prompt_ai_responder_pilot</code> en código). Worker: <code>AI_RESPONDER_ENABLED=1</code> · umbral <code>AI_RESPONDER_CONFIDENCE_MIN</code> (default 85).</p>
 <p>
-  <span class="badge ${stats.ai_responder_enabled ? "on" : "off"}">${stats.ai_responder_enabled ? "WORKER HABILITADO" : "WORKER OFF"}</span>
-  <span class="badge m" title="Tipo M">${escapeHtml(stats.tipo_m_mode)}</span>
-  <span class="badge ${stats.force_send ? "off" : "on"}" title="AI_RESPONDER_FORCE_SEND=1">${stats.force_send ? "AI_RESPONDER_FORCE_SEND=1 (omite solo revisión humana)" : "revisión humana si aplica"}</span>
-  · Plantilla: <code>AI_RESPONDER_GENERIC_TEMPLATE</code> (placeholders <code>{{CONTEXTO_IA}}</code>, <code>{{NOMBRE}}</code>, <code>{{NOMBRE_SALUDO}}</code>)
-  · Migración: <code>npm run db:ai-responder</code> · Log: <code>ai_responder: mensaje procesado tipo M</code>
+  <span class="badge ${stats.ai_responder_enabled ? "on" : "off"}">${stats.ai_responder_enabled ? "WORKER ON" : "WORKER OFF"}</span>
+  <span class="badge ${stats.force_send ? "off" : "on"}" title="AI_RESPONDER_FORCE_SEND">${stats.force_send ? "⚠ FORCE_SEND=1" : "revisión humana si aplica"}</span>
 </p>
+
 <div class="card">
-  <strong>Hoy (crm_messages con estado IA)</strong>
-  <pre class="muted">${escapeHtml(JSON.stringify(stats.today_messages, null, 2))}</pre>
-  <strong>Log acciones hoy (ai_response_log)</strong>
-  <pre class="muted">${escapeHtml(JSON.stringify(stats.today_log_by_action, null, 2))}</pre>
-  <p class="muted">Filas Tipo M llevan <code>provider_used</code> con prefijo <code>tipo_m_ai_responder_pilot|</code> (auditoría / SQL).</p>
+  <table style="width:auto;font-size:.8rem;border:none">
+    <tr>
+      <td style="border:none;padding:.15rem .6rem .15rem 0;color:#71767b">Enviados hoy</td>
+      <td style="border:none;font-weight:700;color:#00d395">${stats.today_messages.auto_sent ?? 0}</td>
+      <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b">Pendientes cola</td>
+      <td style="border:none;font-weight:700;color:#c5cae9">${stats.today_messages.pending ?? 0}</td>
+      <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b">Rev. humana</td>
+      <td style="border:none;font-weight:700;color:#c5cae9">${stats.today_messages.needs_review ?? 0}</td>
+      <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b">Error / fallo WA</td>
+      <td style="border:none;font-weight:700;color:#f4212e">${stats.today_log_by_action.error ?? 0}</td>
+      <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b">Saltados</td>
+      <td style="border:none;color:#71767b">${stats.today_messages.skipped ?? 0}</td>
+    </tr>
+  </table>
+  <p class="muted" style="margin-top:.5rem">
+    Plantilla: <code>AI_RESPONDER_GENERIC_TEMPLATE</code> · placeholders <code>{{CONTEXTO_IA}}</code> <code>{{NOMBRE}}</code> <code>{{NOMBRE_SALUDO}}</code>
+    · <a href="/api/ai-responder/stats?k=${kEnc}">stats JSON</a>
+    · <a href="/api/ai-responder/log?k=${kEnc}">log JSON</a>
+    · <a href="/api/ai-responder/pending?k=${kEnc}">pending JSON</a>
+  </p>
 </div>
-<div class="card">
-  <strong>Otros monitores HTML</strong> (misma clave <code>?k=</code> / <code>ADMIN_SECRET</code>)
-  <ul class="muted" style="margin:0.5rem 0 0 1rem;line-height:1.5">${monitoresHtml}</ul>
-</div>
-<h2>API JSON (este módulo)</h2>
-<ul>
-  <li><a href="/api/ai-responder/stats?k=${kEnc}">GET /api/ai-responder/stats</a></li>
-  <li><a href="/api/ai-responder/pending?k=${kEnc}">GET /api/ai-responder/pending</a></li>
-  <li><a href="/api/ai-responder/log?k=${kEnc}">GET /api/ai-responder/log</a></li>
-</ul>
-<h2>Revisión humana pendiente</h2>
-<p class="muted">Columnas <strong>evidencia</strong> y <strong>modelo</strong> ayudan a ver por qué quedó en revisión o falló el envío previo.</p>
-<table><thead><tr><th>id</th><th>chat</th><th>estado</th><th>conf</th><th>vista</th><th class="evid">evidencia / fallo</th><th>modelo</th><th>creado</th><th>aprobar</th></tr></thead><tbody>
-${pending
-  .map(
-    (r) => `<tr>
-  <td>${r.id}</td>
-  <td>${escapeHtml(String(r.chat_id))}</td>
-  <td>${escapeHtml(String(r.ai_reply_status))}</td>
-  <td>${r.ai_confidence ?? "—"}</td>
-  <td>${escapeHtml(r.preview || "")}</td>
-  <td class="evid">${escapeHtml(r.evidencia_proceso || "—")}</td>
-  <td>${escapeHtml(r.modelo_gateway || "—")}</td>
-  <td>${escapeHtml(String(r.created_at))}</td>
-  <td><button type="button" onclick="approve(${r.id})">Enviar sugerencia IA</button></td>
-</tr>`
-  )
-  .join("")}
-</tbody></table>
-<h2>Último log IA (Tipo M y acciones)</h2>
-<p class="muted">Filas con error API / envío resaltadas. Columnas de evidencia para depuración.</p>
-<table><thead><tr><th>id</th><th>msg</th><th>acción</th><th>conf</th><th>provider</th><th>entrada</th><th>respuesta</th><th class="evid">razón IA</th><th class="evid">error / API</th><th>hora</th></tr></thead><tbody>
+
+<h2>📋 Log completo de mensajes automáticos (últimos 80)</h2>
+<p class="muted">
+  <span class="pill" style="background:#003920;color:#00d395">✔ sent</span> = enviado OK a Wasender ·
+  <span class="pill" style="background:#3b1219;color:#f4212e">✖ error</span> = fallo al enviar (Wasender rechazó o sin respuesta) ·
+  <span class="pill" style="background:#1a237e;color:#c5cae9">⏳ queued_review</span> = en cola revisión humana ·
+  <span class="pill" style="background:#2d2200;color:#f0b429">skip</span> = saltado (sin texto, sin teléfono, etc.)
+</p>
+<table>
+  <thead><tr>
+    <th>#log</th><th>#msg</th>
+    <th>resultado</th>
+    <th>conf</th>
+    <th class="msg">mensaje del cliente</th>
+    <th class="msg">respuesta enviada / sugerida</th>
+    <th class="evid">razón / contexto IA</th>
+    <th class="evid">error API / detalle</th>
+    <th>hora</th>
+  </tr></thead>
+  <tbody>
 ${recentLog
   .map((r) => {
-    const fail =
-      String(r.action_taken || "") === "error" ||
-      (r.evidencia_error && String(r.evidencia_error).trim() !== "");
-    return `<tr class="${fail ? "row-fail" : ""}">
+    const act = String(r.action_taken || "");
+    const isSent = act === "sent";
+    const isError = act === "error" || (r.evidencia_error && String(r.evidencia_error).trim() !== "");
+    const isReview = act === "queued_review" || act === "approved_by_human" || act === "overridden";
+    const isSkip = act.startsWith("skipped");
+    const rowClass = isSent ? "row-ok" : isError ? "row-fail" : "";
+    const badgeCls = isSent ? "sent" : isError ? "error" : isReview ? "review" : isSkip ? "skip" : "pend";
+    const badgeTxt = isSent ? "✔ enviado" : isError ? "✖ error WA" : isReview ? "⏳ rev. humana" : isSkip ? "⬜ skip" : escapeHtml(act);
+    return `<tr class="${rowClass}">
   <td>${r.id}</td>
   <td>${r.crm_message_id ?? "—"}</td>
-  <td>${escapeHtml(String(r.action_taken))}</td>
+  <td><span class="badge ${badgeCls}">${badgeTxt}</span></td>
   <td>${r.confidence ?? "—"}</td>
-  <td class="evid">${escapeHtml(r.provider_used || "—")}</td>
-  <td class="evid">${escapeHtml(r.input_prev || "—")}</td>
-  <td class="evid">${escapeHtml(r.reply_preview || "—")}</td>
+  <td class="msg">${escapeHtml(r.input_prev || "—")}</td>
+  <td class="msg">${escapeHtml(r.reply_preview || "—")}</td>
   <td class="evid">${escapeHtml(r.evidencia_razon || "—")}</td>
   <td class="evid">${escapeHtml(r.evidencia_error || "—")}</td>
   <td>${escapeHtml(String(r.created_at))}</td>
 </tr>`;
   })
   .join("")}
-</tbody></table>
+  </tbody>
+</table>
+
+<h2>🔍 Revisión humana pendiente</h2>
+${pending.length === 0
+  ? `<p class="muted">Sin mensajes en revisión humana actualmente.</p>`
+  : `<table><thead><tr><th>id</th><th>chat</th><th>conf</th><th class="msg">vista</th><th class="evid">motivo / evidencia</th><th>creado</th><th>aprobar</th></tr></thead><tbody>
+${pending.map((r) => `<tr>
+  <td>${r.id}</td>
+  <td>${escapeHtml(String(r.chat_id))}</td>
+  <td>${r.ai_confidence ?? "—"}</td>
+  <td class="msg">${escapeHtml(r.preview || "")}</td>
+  <td class="evid">${escapeHtml(r.evidencia_proceso || "—")}</td>
+  <td>${escapeHtml(String(r.created_at))}</td>
+  <td><button type="button" onclick="approve(${r.id})">Enviar sugerencia IA</button></td>
+</tr>`).join("")}
+</tbody></table>`}
+
+<div class="card" style="margin-top:1.5rem">
+  <strong>Otros monitores HTML</strong> (misma clave <code>?k=</code>)
+  <ul class="muted" style="margin:.4rem 0 0 1rem;line-height:1.6">${monitoresHtml}</ul>
+</div>
 <script>
 const _k = ${JSON.stringify(k)};
 async function approve(mid) {

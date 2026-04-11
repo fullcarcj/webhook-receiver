@@ -88,6 +88,7 @@
     "db:financial-tables": "node scripts/run-financial-tables-migration.js",
     "db:cash-approval": "node scripts/run-cash-approval-migration.js",
     "db:exchange-rates": "node scripts/run-exchange-rates-migration.js",
+    "db:landed-cost": "node scripts/run-landed-cost-migration.js",
     "db:inventory": "node scripts/run-inventory-migration.js",
     "migrate:inventory": "node scripts/migrateInventory.js"
   },

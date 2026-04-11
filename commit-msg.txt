@@ -1,5 +1,17 @@
-feat: columna statement en payment-attempts + fix badge no_match rojo
+fix(ronda4): corrige v_catalog_compatibility y agrega db:customer-wallet
 
-- Columna "statement" muestra bank_statement_id via reconciliation_log
-  (solo cuando la conciliacion real lo vinculo, no por referencia suelta)
-- Badge no_match ahora es rojo con emoji como matched/pending/manual_review
+sql/motor-compatibility.sql:
+  - motor_compatibility: ADD COLUMN is_oem BOOLEAN DEFAULT FALSE,
+    qty_per_engine INTEGER DEFAULT 1
+  - engines: ADD COLUMN valves_per_cyl SMALLINT
+  - valve_specs: ADD COLUMN valve_type TEXT DEFAULT 'UNIVERSAL'
+  - v_catalog_compatibility reescrita con DROP/CREATE para exponer las
+    11 columnas que espera catalogMotorService.js:
+      compat_id, producto_sku (alias), stock_available, stock_reserved,
+      displacement_l (calculado), is_oem, qty_per_engine, valves_per_cyl,
+      valve_type, total_length_mm (alias), seat_angle_deg (alias)
+    La vista ahora une con bin_stock directamente para stock_available/reserved
+    y mantiene catalog_get_stock() como fallback WMS-tolerante en total_stock
+
+scripts/run-customer-wallet-migration.js: nuevo script (tablas existian en BD)
+package.json: agrega db:customer-wallet

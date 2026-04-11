@@ -2,12 +2,14 @@
 
 const pino = require('pino');
 const { pool } = require('../../db');
+const { getAccessTokenForMlUser } = require('../../oauth-token');
 
 const log = pino({ level: process.env.LOG_LEVEL || 'info', name: 'ml_service' });
-const ML_BASE = 'https://api.mercadolibre.com';
+const ML_BASE = process.env.ML_API_BASE || 'https://api.mercadolibre.com';
 
 async function writeApiLog({
   mlItemId = null,
+  mlUserId = null,
   action,
   requestBody = null,
   responseCode = null,
@@ -36,19 +38,20 @@ async function writeApiLog({
   }
 }
 
-function ensureToken() {
-  const token = String(process.env.ML_ACCESS_TOKEN || '').trim();
-  if (!token) {
-    const err = new Error('ML_ACCESS_TOKEN no definido');
-    err.code = 'MISSING_ML_ACCESS_TOKEN';
-    err.status = 503;
+/**
+ * HTTP PUT/POST/GET autenticado contra la API de ML usando OAuth multi-cuenta.
+ * @param {{ method: string, path: string, body?: object|null, mlItemId?: string|null,
+ *           mlUserId: number, action: string, executedBy?: string }} opts
+ */
+async function mlRequest({ method, path, body = null, mlItemId = null, mlUserId, action, executedBy = 'system' }) {
+  if (!mlUserId) {
+    const err = new Error('mlUserId requerido para llamadas a la API de ML');
+    err.code = 'MISSING_ML_USER_ID';
+    err.status = 400;
     throw err;
   }
-  return token;
-}
 
-async function mlRequest({ method, path, body = null, mlItemId = null, action, executedBy = 'system' }) {
-  const token = ensureToken();
+  const token = await getAccessTokenForMlUser(Number(mlUserId));
   const url = `${ML_BASE}${path}`;
   const headers = {
     Authorization: `Bearer ${token}`,
@@ -90,6 +93,7 @@ async function mlRequest({ method, path, body = null, mlItemId = null, action, e
     if (!errorMessage) errorMessage = err.message || 'error desconocido';
     await writeApiLog({
       mlItemId,
+      mlUserId,
       action,
       requestBody: body,
       responseCode: response?.status || null,
@@ -103,6 +107,7 @@ async function mlRequest({ method, path, body = null, mlItemId = null, action, e
 
   await writeApiLog({
     mlItemId,
+    mlUserId,
     action,
     requestBody: body,
     responseCode: response?.status || null,
@@ -114,85 +119,111 @@ async function mlRequest({ method, path, body = null, mlItemId = null, action, e
   return responseBody;
 }
 
-async function pauseItem(mlItemId, executedBy = 'system') {
+async function pauseItem(mlItemId, mlUserId, executedBy = 'system') {
   return mlRequest({
     method: 'PUT',
     path: `/items/${encodeURIComponent(mlItemId)}`,
     body: { status: 'paused' },
     mlItemId,
+    mlUserId,
     action: 'pause',
     executedBy,
   });
 }
 
-async function activateItem(mlItemId, executedBy = 'system') {
+async function activateItem(mlItemId, mlUserId, executedBy = 'system') {
   return mlRequest({
     method: 'PUT',
     path: `/items/${encodeURIComponent(mlItemId)}`,
     body: { status: 'active' },
     mlItemId,
+    mlUserId,
     action: 'activate',
     executedBy,
   });
 }
 
-async function updatePrice(mlItemId, priceUsd, executedBy = 'system') {
+async function updatePrice(mlItemId, priceUsd, mlUserId, executedBy = 'system') {
   return mlRequest({
     method: 'PUT',
     path: `/items/${encodeURIComponent(mlItemId)}`,
     body: { price: Number(priceUsd) },
     mlItemId,
+    mlUserId,
     action: 'price_update',
     executedBy,
   });
 }
 
-async function updateStock(mlItemId, availableQuantity, executedBy = 'system') {
+async function updateStock(mlItemId, availableQuantity, mlUserId, executedBy = 'system') {
   return mlRequest({
     method: 'PUT',
     path: `/items/${encodeURIComponent(mlItemId)}`,
     body: { available_quantity: Number(availableQuantity) },
     mlItemId,
+    mlUserId,
     action: 'stock_update',
     executedBy,
   });
 }
 
-async function closeItem(mlItemId, executedBy = 'system') {
+async function closeItem(mlItemId, mlUserId, executedBy = 'system') {
   return mlRequest({
     method: 'PUT',
     path: `/items/${encodeURIComponent(mlItemId)}`,
     body: { status: 'closed' },
     mlItemId,
+    mlUserId,
     action: 'close',
     executedBy,
   });
 }
 
-async function getItem(mlItemId, executedBy = 'system') {
+async function getItem(mlItemId, mlUserId, executedBy = 'system') {
   return mlRequest({
     method: 'GET',
     path: `/items/${encodeURIComponent(mlItemId)}`,
     mlItemId,
+    mlUserId,
     action: 'get_item',
     executedBy,
   });
 }
 
-async function getSellerItems(offset = 0, limit = 100, executedBy = 'system') {
-  const userId = String(process.env.ML_USER_ID || '').trim();
-  if (!userId) {
-    const err = new Error('ML_USER_ID no definido');
-    err.code = 'MISSING_ML_USER_ID';
-    err.status = 503;
-    throw err;
+/**
+ * Lista los items de la cuenta mlUserId en la API de ML.
+ * Usa scroll_id si está disponible; fallback a offset/limit.
+ */
+async function getSellerItems(mlUserId, { offset = 0, limit = 100, scrollId = null } = {}, executedBy = 'system') {
+  const uid = encodeURIComponent(String(mlUserId));
+  const lim = Math.min(100, Math.max(1, Number(limit) || 100));
+  const p = new URLSearchParams();
+  p.set('limit', String(lim));
+  if (scrollId) {
+    p.set('search_type', 'scan');
+    p.set('scroll_id', scrollId);
+  } else {
+    p.set('offset', String(Math.max(0, Number(offset) || 0)));
   }
   return mlRequest({
     method: 'GET',
-    path: `/users/${encodeURIComponent(userId)}/items/search?offset=${offset}&limit=${limit}`,
+    path: `/users/${uid}/items/search?${p.toString()}`,
+    mlUserId,
     action: 'list_items',
     executedBy,
   });
+}
+
+/**
+ * Resuelve el ml_user_id de una publicación a partir de su ml_item_id.
+ * Devuelve null si no está registrada.
+ */
+async function resolveUserIdForItem(mlItemId) {
+  const { rows } = await pool.query(
+    `SELECT ml_user_id FROM ml_publications WHERE ml_item_id = $1 LIMIT 1`,
+    [mlItemId]
+  );
+  return rows[0]?.ml_user_id ? Number(rows[0].ml_user_id) : null;
 }
 
 module.exports = {
@@ -203,4 +234,5 @@ module.exports = {
   closeItem,
   getItem,
   getSellerItems,
+  resolveUserIdForItem,
 };

@@ -87,6 +87,7 @@
     "db:wms-audit": "node scripts/run-wms-audit-v2-migration.js",
     "db:wms-products-canonical": "node scripts/run-wms-products-canonical-migration.js",
     "db:wms-all": "node scripts/run-wms-migration.js && node scripts/run-wms-audit-v2-migration.js && node scripts/run-wms-products-canonical-migration.js",
+    "db:ml-publications": "node scripts/run-ml-publications-migration.js",
     "db:ml-orders": "node scripts/run-ml-orders-migration.js",
     "db:ml-reservations": "node scripts/run-ml-reservations-migration.js",
     "db:catalog": "node scripts/run-motor-compatibility-migration.js",

@@ -13,8 +13,22 @@ function parsePayload(payload) {
   try { return JSON.parse(payload); } catch (_) { return {}; }
 }
 
-async function listPublications({ status, localStatus, search, onlyZeroStock, limit = 100, offset = 0 } = {}) {
-  const params = [status || null, localStatus || null, search || null, !!onlyZeroStock, limit, offset];
+/**
+ * Resuelve ml_user_id de una publicación y lanza si no está definido
+ * (protege contra llamadas de mlService sin cuenta asignada).
+ */
+function requireMlUserId(pub) {
+  if (!pub.ml_user_id) {
+    const err = new Error(`La publicación ${pub.ml_item_id} no tiene ml_user_id asignado. Asignar la cuenta ML antes de operar.`);
+    err.code = 'MISSING_ML_USER_ID';
+    err.status = 409;
+    throw err;
+  }
+  return Number(pub.ml_user_id);
+}
+
+async function listPublications({ status, localStatus, search, onlyZeroStock, mlUserId, limit = 100, offset = 0 } = {}) {
+  const params = [status || null, localStatus || null, search || null, !!onlyZeroStock, mlUserId ? Number(mlUserId) : null, limit, offset];
   const { rows } = await pool.query(`
     SELECT
       mp.*,
@@ -24,8 +38,9 @@ async function listPublications({ status, localStatus, search, onlyZeroStock, li
       AND ($2::text IS NULL OR mp.local_status = $2)
       AND ($3::text IS NULL OR mp.sku ILIKE '%' || $3 || '%' OR mp.ml_item_id ILIKE '%' || $3 || '%' OR COALESCE(mp.ml_title,'') ILIKE '%' || $3 || '%')
       AND ($4::boolean = FALSE OR mp.stock_qty <= 0)
+      AND ($5::bigint IS NULL OR mp.ml_user_id = $5)
     ORDER BY mp.updated_at DESC
-    LIMIT $5 OFFSET $6
+    LIMIT $6 OFFSET $7
   `, params);
 
   const total = rows.length ? Number(rows[0].total_count) : 0;
@@ -58,6 +73,7 @@ async function getPausedPublications({ limit = 100, offset = 0 } = {}) {
       mp.ml_status,
       mp.local_status,
       mp.stock_qty,
+      mp.ml_user_id,
       mpp.pause_type,
       mpp.pause_reason,
       mpp.paused_by,
@@ -100,6 +116,7 @@ async function getZeroStockPublications({ limit = 100, offset = 0 } = {}) {
       mp.stock_qty,
       mp.auto_pause_enabled,
       mp.last_synced_at,
+      mp.ml_user_id,
       COALESCE(
         EXTRACT(DAY FROM (NOW() - z.paused_at))::int,
         EXTRACT(DAY FROM (NOW() - mp.updated_at))::int,
@@ -181,7 +198,7 @@ async function triggerAutoPause(productId) {
       AND ml_status = 'active'
       AND local_status <> 'pending_pause'
       AND COALESCE(ml_item_id, '') <> ''
-    RETURNING id, product_id, sku, ml_item_id, stock_qty
+    RETURNING id, product_id, sku, ml_item_id, stock_qty, ml_user_id
   `, [productId]);
 
   if (!rows.length) return { paused: 0, skipped: 0 };
@@ -190,7 +207,8 @@ async function triggerAutoPause(productId) {
   let skipped = 0;
   for (const pub of rows) {
     try {
-      await mlService.pauseItem(pub.ml_item_id, 'system');
+      const mlUserId = requireMlUserId(pub);
+      await mlService.pauseItem(pub.ml_item_id, mlUserId, 'system');
       await pool.query(`
         UPDATE ml_publications
         SET ml_status = 'paused',
@@ -244,7 +262,7 @@ async function triggerAutoActivate(productId, newStock) {
           AND mpp.pause_type = 'auto'
           AND mpp.reactivated_at IS NULL
       )
-    RETURNING id, product_id, sku, ml_item_id
+    RETURNING id, product_id, sku, ml_item_id, ml_user_id
   `, [productId]);
 
   if (!rows.length) return { activated: 0, skipped: 0 };
@@ -253,8 +271,9 @@ async function triggerAutoActivate(productId, newStock) {
   let skipped = 0;
   for (const pub of rows) {
     try {
-      await mlService.updateStock(pub.ml_item_id, Math.max(0, Math.floor(Number(newStock || 0))), 'system');
-      await mlService.activateItem(pub.ml_item_id, 'system');
+      const mlUserId = requireMlUserId(pub);
+      await mlService.updateStock(pub.ml_item_id, Math.max(0, Math.floor(Number(newStock || 0))), mlUserId, 'system');
+      await mlService.activateItem(pub.ml_item_id, mlUserId, 'system');
       await pool.query(`
         UPDATE ml_publications
         SET ml_status = 'active',
@@ -290,9 +309,10 @@ async function triggerAutoActivate(productId, newStock) {
 
 async function syncPublicationsStatus(limit = 50) {
   const { rows } = await pool.query(`
-    SELECT id, ml_item_id
+    SELECT id, ml_item_id, ml_user_id
     FROM ml_publications
     WHERE COALESCE(ml_item_id, '') <> ''
+      AND ml_user_id IS NOT NULL
       AND (last_synced_at IS NULL OR last_synced_at < NOW() - INTERVAL '1 hour')
     ORDER BY last_synced_at ASC NULLS FIRST
     LIMIT $1
@@ -302,7 +322,8 @@ async function syncPublicationsStatus(limit = 50) {
   let errors = 0;
   for (const pub of rows) {
     try {
-      const item = await mlService.getItem(pub.ml_item_id, 'system');
+      const mlUserId = Number(pub.ml_user_id);
+      const item = await mlService.getItem(pub.ml_item_id, mlUserId, 'system');
       await pool.query(`
         UPDATE ml_publications
         SET ml_status = $1,
@@ -331,7 +352,7 @@ async function syncPublicationsStatus(limit = 50) {
 
 async function requestManualAction({ mlItemId, actionType, reason, requestedBy, payload = {} }) {
   const { rows: pubs } = await pool.query(`
-    SELECT id, sku, ml_item_id
+    SELECT id, sku, ml_item_id, ml_user_id
     FROM ml_publications
     WHERE ml_item_id = $1
     LIMIT 1
@@ -387,8 +408,22 @@ async function listPendingActions({ limit = 100, offset = 0 } = {}) {
 }
 
 async function runApprovedAction(client, action, reviewedBy) {
+  const { rows: pubRows } = await client.query(
+    `SELECT ml_user_id, stock_qty FROM ml_publications WHERE id = $1`,
+    [action.ml_publication_id]
+  );
+  const pub = pubRows[0] || {};
+  const mlUserId = pub.ml_user_id ? Number(pub.ml_user_id) : null;
+
+  if (!mlUserId) {
+    const err = new Error(`Publicación sin ml_user_id — asignar cuenta ML antes de ejecutar acciones`);
+    err.code = 'MISSING_ML_USER_ID';
+    err.status = 409;
+    throw err;
+  }
+
   if (action.action_type === 'pause') {
-    await mlService.pauseItem(action.ml_item_id, reviewedBy);
+    await mlService.pauseItem(action.ml_item_id, mlUserId, reviewedBy);
     await client.query(`
       UPDATE ml_publications
       SET ml_status = 'paused',
@@ -396,11 +431,7 @@ async function runApprovedAction(client, action, reviewedBy) {
           updated_at = NOW()
       WHERE id = $1
     `, [action.ml_publication_id]);
-    const { rows: pubRows } = await client.query(
-      `SELECT stock_qty FROM ml_publications WHERE id = $1`,
-      [action.ml_publication_id]
-    );
-    const stockAtPause = Number(pubRows[0]?.stock_qty || 0);
+    const stockAtPause = Number(pub.stock_qty || 0);
     await client.query(`
       INSERT INTO ml_paused_publications
         (ml_publication_id, ml_item_id, sku, pause_type, pause_reason, paused_by, approved_by, stock_at_pause)
@@ -421,7 +452,7 @@ async function runApprovedAction(client, action, reviewedBy) {
       stockAtPause,
     ]);
   } else if (action.action_type === 'activate') {
-    await mlService.activateItem(action.ml_item_id, reviewedBy);
+    await mlService.activateItem(action.ml_item_id, mlUserId, reviewedBy);
     await client.query(`
       UPDATE ml_publications
       SET ml_status = 'active',
@@ -438,14 +469,14 @@ async function runApprovedAction(client, action, reviewedBy) {
     `, [action.ml_publication_id, reviewedBy]);
   } else if (action.action_type === 'price_update') {
     const payload = parsePayload(action.payload);
-    await mlService.updatePrice(action.ml_item_id, Number(payload.new_price_usd), reviewedBy);
+    await mlService.updatePrice(action.ml_item_id, Number(payload.new_price_usd), mlUserId, reviewedBy);
     await client.query(`
       UPDATE ml_publications
       SET price_usd = $2, updated_at = NOW()
       WHERE id = $1
     `, [action.ml_publication_id, Number(payload.new_price_usd)]);
   } else if (action.action_type === 'close') {
-    await mlService.closeItem(action.ml_item_id, reviewedBy);
+    await mlService.closeItem(action.ml_item_id, mlUserId, reviewedBy);
     await client.query(`
       UPDATE ml_publications
       SET ml_status = 'closed',
@@ -599,6 +630,106 @@ async function setAutoPauseConfig({ mlItemId, autoPauseEnabled, updatedBy }) {
   return rows[0];
 }
 
+/**
+ * Registra una publicación de ML en la BD local.
+ * Hace upsert por ml_item_id.
+ */
+async function upsertPublication({ productId, sku, mlItemId, mlUserId, mlTitle, mlStatus, stockQty, priceUsd, priceBs, autoPauseEnabled }) {
+  const { rows } = await pool.query(`
+    INSERT INTO ml_publications
+      (product_id, sku, ml_item_id, ml_user_id, ml_title, ml_status, stock_qty, price_usd, price_bs, auto_pause_enabled)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    ON CONFLICT (ml_item_id) DO UPDATE SET
+      product_id         = EXCLUDED.product_id,
+      sku                = EXCLUDED.sku,
+      ml_user_id         = EXCLUDED.ml_user_id,
+      ml_title           = COALESCE(EXCLUDED.ml_title, ml_publications.ml_title),
+      ml_status          = EXCLUDED.ml_status,
+      stock_qty          = EXCLUDED.stock_qty,
+      price_usd          = COALESCE(EXCLUDED.price_usd, ml_publications.price_usd),
+      price_bs           = COALESCE(EXCLUDED.price_bs, ml_publications.price_bs),
+      auto_pause_enabled = EXCLUDED.auto_pause_enabled,
+      updated_at         = NOW()
+    RETURNING *
+  `, [
+    productId,
+    sku,
+    mlItemId,
+    mlUserId,
+    mlTitle || null,
+    mlStatus || 'active',
+    stockQty != null ? Number(stockQty) : 0,
+    priceUsd != null ? Number(priceUsd) : null,
+    priceBs != null ? Number(priceBs) : null,
+    autoPauseEnabled !== false,
+  ]);
+  return rows[0];
+}
+
+/**
+ * Actualiza stock en BD local y en ML.
+ */
+async function updateStockForPublication({ mlItemId, newStock, updatedBy }) {
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id FROM ml_publications WHERE ml_item_id = $1`,
+    [mlItemId]
+  );
+  if (!rows.length) {
+    const err = new Error('Publicación no encontrada');
+    err.code = 'PUBLICATION_NOT_FOUND';
+    err.status = 404;
+    throw err;
+  }
+  const pub = rows[0];
+  const mlUserId = requireMlUserId(pub);
+  const qty = Math.max(0, Math.floor(Number(newStock || 0)));
+
+  await mlService.updateStock(mlItemId, qty, mlUserId, updatedBy || 'admin');
+  await pool.query(`
+    UPDATE ml_publications
+    SET stock_qty = $1, updated_at = NOW()
+    WHERE id = $2
+  `, [qty, pub.id]);
+
+  emit('ml_stock_updated', { ml_item_id: mlItemId, new_stock: qty, updated_by: updatedBy });
+  return { ml_item_id: mlItemId, stock_qty: qty };
+}
+
+/**
+ * Actualiza precio en BD local y en ML.
+ */
+async function updatePriceForPublication({ mlItemId, newPriceUsd, updatedBy }) {
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id FROM ml_publications WHERE ml_item_id = $1`,
+    [mlItemId]
+  );
+  if (!rows.length) {
+    const err = new Error('Publicación no encontrada');
+    err.code = 'PUBLICATION_NOT_FOUND';
+    err.status = 404;
+    throw err;
+  }
+  const pub = rows[0];
+  const mlUserId = requireMlUserId(pub);
+  const price = Number(newPriceUsd);
+  if (!Number.isFinite(price) || price <= 0) {
+    const err = new Error('Precio inválido');
+    err.code = 'INVALID_PRICE';
+    err.status = 400;
+    throw err;
+  }
+
+  await mlService.updatePrice(mlItemId, price, mlUserId, updatedBy || 'admin');
+  await pool.query(`
+    UPDATE ml_publications
+    SET price_usd = $1, updated_at = NOW()
+    WHERE id = $2
+  `, [price, pub.id]);
+
+  emit('ml_price_updated', { ml_item_id: mlItemId, new_price_usd: price, updated_by: updatedBy });
+  return { ml_item_id: mlItemId, price_usd: price };
+}
+
 module.exports = {
   listPublications,
   getPublicationByItemId,
@@ -613,4 +744,7 @@ module.exports = {
   listPausedHistory,
   listApiLog,
   setAutoPauseConfig,
+  upsertPublication,
+  updateStockForPublication,
+  updatePriceForPublication,
 };

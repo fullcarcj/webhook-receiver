@@ -248,6 +248,26 @@ const {
 } = require("./src/services/reservationService");
 const { timingSafeCompare } = require("./src/services/currencyService");
 const { getClientIp, adminRequestLimiter, adminAuthFailLimiter } = require("./src/utils/rateLimiter");
+const {
+  extractToken,
+  requireAuth,
+  requirePermission,
+  requireRole,
+  checkAdminSecretOrJwt,
+} = require("./src/utils/authMiddleware");
+const {
+  login,
+  logout,
+  changePassword,
+  createUser,
+  updateUser,
+  resetPassword,
+  unlockUser,
+  listUsers,
+  getUser,
+  getActiveSessions,
+  revokeAllSessions,
+} = require("./src/services/authService");
 
 const PORT = process.env.PORT || 3001;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH || "/webhook";
@@ -7207,6 +7227,314 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (handleAdminPanel(req, res, url)) {
+    return;
+  }
+
+  // ─── Auth endpoints (/api/auth) ─────────────────────────────────────────────
+  if (url.pathname.startsWith("/api/auth")) {
+    const pathname = url.pathname.replace(/\/+$/, "");
+
+    // POST /api/auth/login — sin autenticación previa
+    if (req.method === "POST" && pathname === "/api/auth/login") {
+      let body;
+      try {
+        body = await parseJsonBody(req);
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+        return;
+      }
+      const { username, password } = body || {};
+      if (!username || !password) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "username y password son obligatorios" }));
+        return;
+      }
+      const ip = getClientIp(req);
+      const ua = req.headers["user-agent"] || "unknown";
+      try {
+        const result = await login({ username, password, ipAddress: ip, userAgent: ua });
+        const maxAge = (() => {
+          const m = String(process.env.JWT_EXPIRES_IN || "8h").match(/^(\d+)([hmd])$/);
+          if (!m) return 8 * 3600;
+          const n = +m[1];
+          return m[2] === "h" ? n * 3600 : m[2] === "d" ? n * 86400 : n * 60;
+        })();
+        const cookieParts = [`token=${result.token}`, "HttpOnly", "SameSite=Strict", "Path=/", `Max-Age=${maxAge}`];
+        if (process.env.NODE_ENV === "production") cookieParts.push("Secure");
+        res.writeHead(200, {
+          "Content-Type":  "application/json; charset=utf-8",
+          "Set-Cookie":    cookieParts.join("; "),
+          "Cache-Control": "no-store",
+          "Pragma":        "no-cache",
+        });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (e) {
+        const status = e.status || 500;
+        res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.code || "LOGIN_ERROR", message: e.message }));
+      }
+      return;
+    }
+
+    // POST /api/auth/logout
+    if (req.method === "POST" && pathname === "/api/auth/logout") {
+      const user = await requireAuth(req, res);
+      if (!user) return;
+      await logout({ jti: user.jti });
+      res.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Set-Cookie":   "token=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict",
+      });
+      res.end(JSON.stringify({ ok: true, success: true }));
+      return;
+    }
+
+    // GET /api/auth/me
+    if (req.method === "GET" && pathname === "/api/auth/me") {
+      const user = await requireAuth(req, res);
+      if (!user) return;
+      const data = await getUser(user.userId);
+      if (!data) {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "Usuario no encontrado" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, user: data }));
+      return;
+    }
+
+    // POST /api/auth/change-password
+    if (req.method === "POST" && pathname === "/api/auth/change-password") {
+      const user = await requireAuth(req, res);
+      if (!user) return;
+      let body;
+      try { body = await parseJsonBody(req); } catch {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+        return;
+      }
+      if (!body.current_password || !body.new_password) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "current_password y new_password son obligatorios" }));
+        return;
+      }
+      try {
+        const result = await changePassword({
+          userId:          user.userId,
+          currentPassword: body.current_password,
+          newPassword:     body.new_password,
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (e) {
+        res.writeHead(e.status || 400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.code || "ERROR", message: e.message }));
+      }
+      return;
+    }
+
+    res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "no encontrado" }));
+    return;
+  }
+
+  // ─── Users endpoints (/api/users) ───────────────────────────────────────────
+  if (url.pathname.startsWith("/api/users")) {
+    const pathname = url.pathname.replace(/\/+$/, "");
+
+    // GET /api/users/role-permissions — cualquier usuario autenticado puede verlo
+    if (req.method === "GET" && pathname === "/api/users/role-permissions") {
+      const user = await checkAdminSecretOrJwt(req, res);
+      if (!user) return;
+      const { rows } = await pool.query(
+        `SELECT role::text AS role, module, action FROM role_permissions ORDER BY role, module, action`
+      );
+      const grouped = {};
+      for (const r of rows) {
+        if (!grouped[r.role]) grouped[r.role] = [];
+        grouped[r.role].push({ module: r.module, action: r.action });
+      }
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, data: grouped }));
+      return;
+    }
+
+    // GET /api/users
+    if (req.method === "GET" && pathname === "/api/users") {
+      const user = await checkAdminSecretOrJwt(req, res);
+      if (!user) return;
+      if (!requireRole(user, "ADMIN", res)) return;
+      const data = await listUsers({
+        companyId: user.companyId || 1,
+        role:      url.searchParams.get("role")   || null,
+        status:    url.searchParams.get("status") || null,
+      });
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, data }));
+      return;
+    }
+
+    // POST /api/users
+    if (req.method === "POST" && pathname === "/api/users") {
+      const user = await checkAdminSecretOrJwt(req, res);
+      if (!user) return;
+      if (!requireRole(user, "ADMIN", res)) return;
+      let body;
+      try { body = await parseJsonBody(req); } catch {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+        return;
+      }
+      const { username, email, full_name, role: bodyRole, password } = body || {};
+      if (!username || !email || !full_name || !bodyRole || !password) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "username, email, full_name, role y password son obligatorios" }));
+        return;
+      }
+      if (user.role === "ADMIN" && String(bodyRole).toUpperCase() === "SUPERUSER") {
+        res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "Un ADMIN no puede crear SUPERUSER" }));
+        return;
+      }
+      try {
+        const data = await createUser({
+          username, email, fullName: full_name, role: bodyRole, password,
+          createdBy: user.userId || null,
+        });
+        res.writeHead(201, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, data }));
+      } catch (e) {
+        res.writeHead(e.status || 500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.code || "ERROR", message: e.message }));
+      }
+      return;
+    }
+
+    // GET /api/users/:id/sessions
+    const mSessions = pathname.match(/^\/api\/users\/(\d+)\/sessions$/);
+    if (req.method === "GET" && mSessions) {
+      const user = await checkAdminSecretOrJwt(req, res);
+      if (!user) return;
+      const targetId = +mSessions[1];
+      if (user.userId !== targetId && !requireRole(user, "ADMIN", res)) return;
+      const data = await getActiveSessions(targetId);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, data }));
+      return;
+    }
+
+    // POST /api/users/:id/revoke-sessions
+    const mRevoke = pathname.match(/^\/api\/users\/(\d+)\/revoke-sessions$/);
+    if (req.method === "POST" && mRevoke) {
+      const user = await checkAdminSecretOrJwt(req, res);
+      if (!user) return;
+      if (!requireRole(user, "ADMIN", res)) return;
+      const result = await revokeAllSessions(+mRevoke[1], user.userId || null);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, ...result }));
+      return;
+    }
+
+    // POST /api/users/:id/reset-password
+    const mReset = pathname.match(/^\/api\/users\/(\d+)\/reset-password$/);
+    if (req.method === "POST" && mReset) {
+      const user = await checkAdminSecretOrJwt(req, res);
+      if (!user) return;
+      if (!requireRole(user, "SUPERUSER", res)) return;
+      let body;
+      try { body = await parseJsonBody(req); } catch {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+        return;
+      }
+      if (!body.new_password) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "new_password es obligatorio" }));
+        return;
+      }
+      try {
+        const result = await resetPassword({ userId: +mReset[1], newPassword: body.new_password, resetBy: user.userId || null });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (e) {
+        res.writeHead(e.status || 500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.code || "ERROR", message: e.message }));
+      }
+      return;
+    }
+
+    // POST /api/users/:id/unlock
+    const mUnlock = pathname.match(/^\/api\/users\/(\d+)\/unlock$/);
+    if (req.method === "POST" && mUnlock) {
+      const user = await checkAdminSecretOrJwt(req, res);
+      if (!user) return;
+      if (!requireRole(user, "ADMIN", res)) return;
+      const data = await unlockUser(+mUnlock[1]);
+      if (!data) {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "Usuario no encontrado o no estaba bloqueado" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, data }));
+      return;
+    }
+
+    // GET /api/users/:id
+    const mGetUser = pathname.match(/^\/api\/users\/(\d+)$/);
+    if (req.method === "GET" && mGetUser) {
+      const user = await checkAdminSecretOrJwt(req, res);
+      if (!user) return;
+      if (!requireRole(user, "ADMIN", res)) return;
+      const data = await getUser(+mGetUser[1]);
+      if (!data) {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "Usuario no encontrado" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, data }));
+      return;
+    }
+
+    // PATCH /api/users/:id
+    const mPatch = pathname.match(/^\/api\/users\/(\d+)$/);
+    if (req.method === "PATCH" && mPatch) {
+      const user = await checkAdminSecretOrJwt(req, res);
+      if (!user) return;
+      if (!requireRole(user, "ADMIN", res)) return;
+      let body;
+      try { body = await parseJsonBody(req); } catch {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+        return;
+      }
+      if (user.role === "ADMIN" && body.role && String(body.role).toUpperCase() === "SUPERUSER") {
+        res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "Un ADMIN no puede asignar rol SUPERUSER" }));
+        return;
+      }
+      try {
+        const data = await updateUser({
+          userId:   +mPatch[1],
+          fullName: body.full_name || null,
+          email:    body.email     || null,
+          role:     body.role      || null,
+          status:   body.status    || null,
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, data }));
+      } catch (e) {
+        res.writeHead(e.status || 500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.code || "ERROR", message: e.message }));
+      }
+      return;
+    }
+
+    res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "no encontrado" }));
     return;
   }
 

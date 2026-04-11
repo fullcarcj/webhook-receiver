@@ -51,6 +51,7 @@
     "db:sales-ml": "node scripts/run-sales-ml-migration.js",
     "db:sales-global": "node scripts/run-sales-global-migration.js",
     "db:sales-rate-snapshot": "node scripts/run-sales-rate-snapshot-migration.js",
+    "db:users": "node scripts/run-users-migration.js",
     "db:sales-completed": "node scripts/run-sales-completed-migration.js",
     "db:customers-phone2": "node scripts/run-customers-phone2-migration.js",
     "db:customers-name-suggested": "node scripts/run-customers-name-suggested-migration.js",
@@ -108,8 +109,10 @@
     "node": ">=18"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.7.0",
     "firebase-admin": "^13.0.2",
+    "jsonwebtoken": "^9.0.3",
     "node-cron": "^4.2.1",
     "p-limit": "^6.2.0",
     "pg": "^8.13.1",

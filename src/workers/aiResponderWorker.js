@@ -106,8 +106,15 @@ async function responderCycle() {
 }
 
 function startAiResponderWorker() {
-  log.info("AI Responder Worker DESACTIVADO temporalmente");
-  // DECISIÓN: desactivado hasta resolver doble envío
+  if (!isEnabled()) {
+    log.info("ai_responder worker: AI_RESPONDER_ENABLED != 1 — sin iniciar");
+    return;
+  }
+  const CYCLE_MS = parseInt(process.env.AI_RESPONDER_INTERVAL_MS || "8000", 10);
+  const STUCK_MS = 5 * 60 * 1000;
+  workerHandle = setInterval(responderCycle, CYCLE_MS);
+  stuckHandle = setInterval(cleanStuckProcessing, STUCK_MS);
+  log.info({ intervalMs: CYCLE_MS }, "ai_responder worker iniciado");
 }
 
 function stopAiResponderWorker() {

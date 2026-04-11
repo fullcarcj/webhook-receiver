@@ -29,6 +29,11 @@ function confidenceMin() {
   return Number.isFinite(n) ? n : 85;
 }
 
+/** Si =1, no se encola **revisión humana** por decisión de flujo (solo eso; fallos de envío Wasender siguen yendo a revisión). */
+function isForceSend() {
+  return String(process.env.AI_RESPONDER_FORCE_SEND || "").trim() === "1";
+}
+
 /** Respuesta fija negocio; placeholders: {{CONTEXTO_IA}}, {{NOMBRE}} (opcional). */
 function defaultGenericTemplate() {
   const env = process.env.AI_RESPONDER_GENERIC_TEMPLATE;
@@ -530,6 +535,7 @@ async function processOneMessage(message) {
 module.exports = {
   isEnabled,
   confidenceMin,
+  isForceSend,
   maybeQueueInboundText,
   generateResponse,
   processOneMessage,

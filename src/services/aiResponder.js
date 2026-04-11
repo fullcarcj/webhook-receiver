@@ -191,6 +191,7 @@ async function generateResponse({ messageId, customerId, chatId, inputText, rece
     .replace("{USER_MESSAGE}", userMessage || "(vacío)");
 
   let contextLine = "";
+  let groqContextError = "";
   try {
     const raw = await callChatBasic({
       systemPrompt: sys,
@@ -204,7 +205,8 @@ async function generateResponse({ messageId, customerId, chatId, inputText, rece
       contextLine = String(parsed.context_line || "").trim();
     }
   } catch (e) {
-    log.warn({ err: e.message, messageId }, "tipo_m: context_line falló, usando fallback");
+    groqContextError = String(e && e.message ? e.message : e).slice(0, 400);
+    log.warn({ err: groqContextError, messageId }, "tipo_m: context_line falló, usando fallback");
   }
 
   if (!contextLine) {
@@ -219,10 +221,13 @@ async function generateResponse({ messageId, customerId, chatId, inputText, rece
   const template = defaultGenericTemplate();
   const replyText = applyTipoMTemplate(template, { contextLine, nombre });
 
+  const groqNote = groqContextError
+    ? ` [origen=GROQ_LLAMA: context_line no generado — ${groqContextError}]`
+    : "";
   return {
     replyText: replyText || null,
     confidence: 100,
-    reasoning: `tipo_m_plantilla prompt_ai_responder_pilot ctx=${contextLine.slice(0, 100)}`,
+    reasoning: `tipo_m_plantilla prompt_ai_responder_pilot ctx=${contextLine.slice(0, 100)}${groqNote}`,
     needsHuman: false,
     provider: "GROQ_LLAMA",
     latencyMs: Date.now() - t0,
@@ -269,7 +274,7 @@ async function logAiResponse(poolOrClient, row) {
         row.provider_used || null,
         row.tokens_used || 0,
         row.action_taken,
-        row.error_message ? String(row.error_message).slice(0, 2000) : null,
+        row.error_message ? String(row.error_message).slice(0, MAX_AI_RESPONSE_ERROR_CHARS) : null,
       ]
     );
   } catch (e) {
@@ -284,12 +289,81 @@ function notifyHumanReview(payload) {
   } catch (_) {}
 }
 
+/** Tamaño máximo guardado en `ai_response_log.error_message` (TEXT en Postgres). */
+const MAX_AI_RESPONSE_ERROR_CHARS = 11000;
+
+/**
+ * Texto multilínea para auditoría: indica si el fallo fue antes del POST (app), en Wasender (HTTP/API) o config.
+ * @param {object|null} sendRes — retorno de `sendWasenderTextMessage` o objeto corto de `sendAiReplyToCustomer`
+ */
+function formatTipoMOutboundError(sendRes) {
+  if (!sendRes || typeof sendRes !== "object") {
+    return "[origen=DESCONOCIDO]\nSin objeto de respuesta tras intento de envío.";
+  }
+  if (sendRes.err === "missing_wasender_api_key") {
+    return "[origen=APP_CONFIG]\nWASENDER_API_KEY no definida — no se llamó a la API Wasender.";
+  }
+  if (sendRes.err === "missing_phone_digits") {
+    return "[origen=APP_DATOS]\nSin teléfono destino (crm_chats.phone vacío o inválido) — no se llamó a Wasender.";
+  }
+  if (sendRes.err === "missing_reply_text") {
+    return "[origen=APP_LOGIC]\nTexto de respuesta vacío — no se llamó a Wasender.";
+  }
+  const lines = ["[origen=WASENDER_API]"];
+  if (sendRes.quiet_hours === true) {
+    lines.push("bloqueo_previo=ventana_silenciosa (waQuietHours; sin POST a Wasender)");
+  } else if (sendRes.throttled === true) {
+    lines.push(
+      `bloqueo_previo=tope_diario_envios count=${sendRes.throttle_count ?? "?"} cap=${sendRes.throttle_cap ?? "?"}`
+    );
+  } else if (sendRes.status === "blocked" || sendRes.reason) {
+    lines.push(
+      `bloqueo_previo=politica_antispam_interna reason=${String(sendRes.reason || sendRes.status || "?")} (previo al POST)`
+    );
+  }
+  lines.push(`http_status=${sendRes.status != null ? sendRes.status : "?"}`);
+  const j = sendRes.json;
+  if (j && typeof j === "object") {
+    if (j.success != null) lines.push(`json.success=${j.success}`);
+    if (j.message != null) lines.push(`json.message=${String(j.message)}`);
+    if (j.retry_after != null) lines.push(`json.retry_after=${j.retry_after}`);
+    if (j.help != null) lines.push(`json.help=${String(j.help)}`);
+    if (j.error != null) {
+      lines.push(`json.error=${typeof j.error === "string" ? j.error : JSON.stringify(j.error)}`);
+    }
+    try {
+      const full = JSON.stringify(j);
+      if (full.length < 8000) lines.push(`json.completo=${full}`);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  const raw = sendRes.bodyText != null ? String(sendRes.bodyText).trim() : "";
+  if (raw) lines.push(`body_raw=${raw.slice(0, 7000)}`);
+  if (
+    lines.length === 1 &&
+    !raw &&
+    sendRes.quiet_hours !== true &&
+    sendRes.throttled !== true &&
+    sendRes.status !== "blocked"
+  ) {
+    lines.push("nota=sin body_raw útil; revisar http_status y logs del proceso.");
+  }
+  return lines.join("\n").slice(0, MAX_AI_RESPONSE_ERROR_CHARS);
+}
+
 async function sendAiReplyToCustomer({ phoneDigits, text, customerId }) {
   const { sendWasenderTextMessage } = require("../../wasender-client");
   const apiKey = process.env.WASENDER_API_KEY;
   const apiBaseUrl = process.env.WASENDER_API_BASE_URL || "https://www.wasenderapi.com";
-  if (!apiKey || !phoneDigits || !text) {
-    return { ok: false, err: "missing_config_or_phone" };
+  if (!apiKey) {
+    return { ok: false, status: 0, json: null, bodyText: "", err: "missing_wasender_api_key" };
+  }
+  if (!phoneDigits) {
+    return { ok: false, status: 0, json: null, bodyText: "", err: "missing_phone_digits" };
+  }
+  if (!text) {
+    return { ok: false, status: 0, json: null, bodyText: "", err: "missing_reply_text" };
   }
   const to = String(phoneDigits).startsWith("+") ? String(phoneDigits) : `+${String(phoneDigits).replace(/\D/g, "")}`;
   return sendWasenderTextMessage({
@@ -381,11 +455,17 @@ async function processOneMessage(message) {
       receipt_data: receiptDataRaw,
       reply_text: null,
       confidence: null,
-      reasoning: "Sin teléfono en crm_chats",
+      reasoning: "Sin teléfono en crm_chats (no se intentó Wasender ni GROQ de envío)",
       provider_used: providerAuditTipoM("sin_gateway"),
       tokens_used: 0,
       action_taken: "skipped_inbound",
-      error_message: null,
+      error_message: formatTipoMOutboundError({
+        ok: false,
+        status: 0,
+        json: null,
+        bodyText: "",
+        err: "missing_phone_digits",
+      }),
     });
     return;
   }
@@ -572,12 +652,8 @@ async function processOneMessage(message) {
     return;
   }
 
-  const errDetail =
-    sendRes && sendRes.reason
-      ? String(sendRes.reason)
-      : sendRes && sendRes.bodyText
-        ? String(sendRes.bodyText).slice(0, 500)
-        : "send_failed";
+  const errDetail = formatTipoMOutboundError(sendRes);
+  const reasoningShort = `Envío falló (ver error_message en log). ${String(errDetail).split("\n")[0]}`.slice(0, 500);
 
   await pool.query(
     `UPDATE crm_messages
@@ -588,13 +664,7 @@ async function processOneMessage(message) {
          ai_provider = $4,
          ai_processed_at = NOW()
      WHERE id = $5`,
-    [
-      result.replyText,
-      result.confidence,
-      `Envío falló: ${errDetail}`,
-      result.provider,
-      messageId,
-    ]
+    [result.replyText, result.confidence, reasoningShort, result.provider, messageId]
   );
   await logAiResponse(pool, {
     crm_message_id: messageId,
@@ -617,7 +687,7 @@ async function processOneMessage(message) {
     input_preview: inputText.slice(0, 160),
     suggested_reply: result.replyText,
     confidence: result.confidence,
-    reasoning: `Envío bloqueado o falló: ${errDetail}`,
+    reasoning: `Envío bloqueado o falló. ${reasoningShort}`,
   });
 }
 

@@ -233,8 +233,8 @@ async function handleAiResponderRequest(req, res, url) {
       const lg = await pool.query(
         `SELECT id, crm_message_id, action_taken, confidence,
                 COALESCE(provider_used, '') AS provider_used,
-                LEFT(COALESCE(reasoning, ''), 160) AS evidencia_razon,
-                LEFT(COALESCE(error_message, ''), 200) AS evidencia_error,
+                LEFT(COALESCE(reasoning, ''), 400) AS evidencia_razon,
+                COALESCE(NULLIF(TRIM(error_message), ''), '') AS evidencia_error,
                 LEFT(COALESCE(input_text, ''), 100) AS input_prev,
                 LEFT(COALESCE(reply_text, ''), 120) AS reply_preview,
                 created_at
@@ -288,6 +288,7 @@ th{background:#1e2732;white-space:nowrap}
 tr.row-fail{background:#2a1515}
 tr.row-ok{background:#061a0e}
 td.evid{font-size:.66rem;max-width:18rem;word-break:break-word}
+td.errdetail{font-size:.62rem;max-width:42rem;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;line-height:1.35}
 td.msg{max-width:22rem;word-break:break-word}
 .pill{display:inline-block;padding:.05rem .3rem;border-radius:3px;font-size:.65rem}
 </style></head><body>
@@ -351,6 +352,11 @@ td.msg{max-width:22rem;word-break:break-word}
   <span class="pill" style="background:#1a237e;color:#c5cae9">⏳ queued_review</span> = en cola revisión humana ·
   <span class="pill" style="background:#2d2200;color:#f0b429">skip</span> = saltado (sin texto, sin teléfono, etc.)
 </p>
+<p class="muted" style="margin-top:.25rem;line-height:1.45">
+  Columna <strong>error / detalle</strong>: primera línea <code>[origen=…]</code> — <code>WASENDER_API</code> = respuesta HTTP/API de envío;
+  <code>APP_CONFIG</code> / <code>APP_DATOS</code> / <code>APP_LOGIC</code> = no se llegó a llamar a Wasender;
+  fallos del modelo para <code>context_line</code> van en <strong>razón / contexto IA</strong> como <code>[origen=GROQ_LLAMA: …]</code> (la plantilla igual se arma con fallback).
+</p>
 <table>
   <thead><tr>
     <th>#log</th><th>#msg</th>
@@ -359,7 +365,7 @@ td.msg{max-width:22rem;word-break:break-word}
     <th class="msg">mensaje del cliente</th>
     <th class="msg">respuesta enviada / sugerida</th>
     <th class="evid">razón / contexto IA</th>
-    <th class="evid">error API / detalle</th>
+    <th class="errdetail">error / detalle (origen + API)</th>
     <th>hora</th>
   </tr></thead>
   <tbody>
@@ -381,7 +387,7 @@ ${recentLog
   <td class="msg">${escapeHtml(r.input_prev || "—")}</td>
   <td class="msg">${escapeHtml(r.reply_preview || "—")}</td>
   <td class="evid">${escapeHtml(r.evidencia_razon || "—")}</td>
-  <td class="evid">${escapeHtml(r.evidencia_error || "—")}</td>
+  <td class="errdetail">${escapeHtml(r.evidencia_error || "—")}</td>
   <td>${escapeHtml(String(r.created_at))}</td>
 </tr>`;
   })

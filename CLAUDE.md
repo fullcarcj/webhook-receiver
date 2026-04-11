@@ -72,7 +72,7 @@ Piloto: respuesta rápida contextualizada con plantilla `AI_RESPONDER_GENERIC_TE
 
 **Limpieza:** `cleanStuckProcessing` en el worker: `processing` colgado &gt; 10 min → `needs_human_review` (no reenvía WA automáticamente por eso).
 
-**Monitoreo / SQL:** `GET /ai-responder?k=ADMIN_SECRET`, `/api/ai-responder/stats|log|pending`; migración `npm run db:ai-responder`; tablas `crm_messages` (columnas `ai_*`), `ai_response_log`.
+**Monitoreo / SQL:** `GET /ai-responder?k=ADMIN_SECRET`, `/api/ai-responder/stats|log|pending`; migración `npm run db:ai-responder`; tablas `crm_messages` (columnas `ai_*`), `ai_response_log`. En fallos de envío, `ai_response_log.error_message` guarda texto multilínea con `[origen=WASENDER_API]` (HTTP + JSON + body) o `[origen=APP_*]` si no hubo POST; errores de `context_line` (GROQ) van en `reasoning` como `[origen=GROQ_LLAMA: …]` si aplica.
 
 **Anti-spam / deduplicación (Tipo M + Wasender):**
 

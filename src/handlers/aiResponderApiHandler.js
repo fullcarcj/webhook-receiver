@@ -3,7 +3,7 @@
 const pino = require("pino");
 const { pool } = require("../../db");
 const { ensureAdmin } = require("../middleware/adminAuth");
-const { sendAiReplyToCustomer, logAiResponse, providerAuditTipoM } = require("../services/aiResponder");
+const { sendAiReplyToCustomer, logAiResponse, providerAuditTipoM, isForceSend } = require("../services/aiResponder");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder_api" });
 
@@ -65,7 +65,7 @@ async function getStats() {
     ok: true,
     ai_responder_enabled: String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1",
     confidence_min: parseInt(process.env.AI_RESPONDER_CONFIDENCE_MIN || "85", 10) || 85,
-    force_send: String(process.env.AI_RESPONDER_FORCE_SEND || "").trim() === "1",
+    force_send: isForceSend(),
     tipo_m_mode: "plantilla + context_line (IA no elige flujo)",
     today_messages: today.rows[0] || {},
     today_log_by_action: Object.fromEntries(logc.rows.map((r) => [r.action_taken, r.n])),
@@ -276,7 +276,7 @@ td.evid{font-size:.68rem;max-width:14rem;word-break:break-word}
 <p>
   <span class="badge ${stats.ai_responder_enabled ? "on" : "off"}">${stats.ai_responder_enabled ? "WORKER HABILITADO" : "WORKER OFF"}</span>
   <span class="badge m" title="Tipo M">${escapeHtml(stats.tipo_m_mode)}</span>
-  <span class="badge ${stats.force_send ? "off" : "on"}" title="AI_RESPONDER_FORCE_SEND">${stats.force_send ? "FORCE_SEND=1 (omite solo revisión humana)" : "revisión humana si aplica"}</span>
+  <span class="badge ${stats.force_send ? "off" : "on"}" title="AI_RESPONDER_FORCE_SEND=1">${stats.force_send ? "AI_RESPONDER_FORCE_SEND=1 (omite solo revisión humana)" : "revisión humana si aplica"}</span>
   · Plantilla: <code>AI_RESPONDER_GENERIC_TEMPLATE</code> (placeholders <code>{{CONTEXTO_IA}}</code>, <code>{{NOMBRE}}</code>, <code>{{NOMBRE_SALUDO}}</code>)
   · Migración: <code>npm run db:ai-responder</code> · Log: <code>ai_responder: mensaje procesado tipo M</code>
 </p>

@@ -29,7 +29,7 @@ function confidenceMin() {
   return Number.isFinite(n) ? n : 85;
 }
 
-/** Si =1, no se encola **revisión humana** por decisión de flujo (solo eso; fallos de envío Wasender siguen yendo a revisión). */
+/** Si =1, omite solo la cola de revisión humana (un nombre: `AI_RESPONDER_FORCE_SEND`). */
 function isForceSend() {
   return String(process.env.AI_RESPONDER_FORCE_SEND || "").trim() === "1";
 }
@@ -461,7 +461,7 @@ async function processOneMessage(message) {
       provider_used: providerAuditTipoM(result.provider),
       tokens_used: 0,
       action_taken: "skipped_empty",
-      error_message: "force_send_no_reply_text",
+      error_message: "ai_responder_force_send_no_reply_text",
     });
     return;
   }

@@ -90,6 +90,7 @@
     "db:ml-orders": "node scripts/run-ml-orders-migration.js",
     "db:ml-reservations": "node scripts/run-ml-reservations-migration.js",
     "db:catalog": "node scripts/run-motor-compatibility-migration.js",
+    "db:customer-wallet": "node scripts/run-customer-wallet-migration.js",
     "db:crm-customers": "node scripts/run-crm-customers-migration.js",
     "db:search-indexes": "node scripts/run-search-indexes-migration.js",
     "db:lots-management": "node scripts/run-lot-management-migration.js",

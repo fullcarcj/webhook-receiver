@@ -124,8 +124,9 @@ END $$;
 
 -- Agregar columnas nuevas si no existen
 ALTER TABLE engines
-  ADD COLUMN IF NOT EXISTS valve_config TEXT,
-  ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+  ADD COLUMN IF NOT EXISTS valve_config    TEXT,
+  ADD COLUMN IF NOT EXISTS is_active       BOOLEAN  NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS valves_per_cyl  SMALLINT;
 
 -- Índice parcial legacy (solo si engines tiene model_id de schema antiguo).
 -- Si la tabla es nueva (sin model_id) → el UNIQUE uq_engine_code del CREATE TABLE es suficiente.
@@ -281,8 +282,10 @@ END $$;
 
 -- Columnas nuevas
 ALTER TABLE motor_compatibility
-  ADD COLUMN IF NOT EXISTS is_active  BOOLEAN     NOT NULL DEFAULT TRUE,
-  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+  ADD COLUMN IF NOT EXISTS is_active      BOOLEAN     NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS is_oem         BOOLEAN     NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS qty_per_engine INTEGER     NOT NULL DEFAULT 1;
 
 -- Actualizar check de posición: aceptar INLET (nuevo) + INTAKE (legacy)
 DO $$
@@ -405,7 +408,8 @@ END $$;
 ALTER TABLE valve_specs
   ADD COLUMN IF NOT EXISTS stem_material     TEXT,
   ADD COLUMN IF NOT EXISTS margin_mm         NUMERIC(5,2),
-  ADD COLUMN IF NOT EXISTS updated_at        TIMESTAMPTZ NOT NULL DEFAULT now();
+  ADD COLUMN IF NOT EXISTS updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS valve_type        TEXT        NOT NULL DEFAULT 'UNIVERSAL';
 
 -- Índices B-Tree para búsqueda de equivalencias ±0.5mm
 CREATE INDEX IF NOT EXISTS idx_vs_head   ON valve_specs (head_diameter_mm);
@@ -420,43 +424,66 @@ CREATE TRIGGER trg_vs_updated_at
 -- ─────────────────────────────────────────────────────
 -- v_catalog_compatibility — catálogo técnico principal
 -- "¿Qué SKUs sirven para Toyota Corolla 2000?"
+-- Columnas compatibles con catalogMotorService.js:
+--   compat_id, producto_sku (alias), stock_available, stock_reserved,
+--   displacement_l, is_oem, qty_per_engine, valves_per_cyl, valve_type,
+--   total_length_mm (alias), seat_angle_deg (alias)
 -- Usa catalog_get_stock() para tolerar WMS no instalado.
 -- ─────────────────────────────────────────────────────
+DROP VIEW IF EXISTS v_catalog_compatibility CASCADE;
 CREATE OR REPLACE VIEW v_catalog_compatibility AS
 SELECT
+  mc.id                                                     AS compat_id,
+  mc.product_sku                                            AS producto_sku,
   mc.product_sku,
-  p.description AS descripcion,
+  p.description                                             AS descripcion,
   p.precio_usd,
   p.landed_cost_usd,
   e.engine_code,
   e.displacement_cc,
+  ROUND((e.displacement_cc / 1000.0)::numeric, 1)          AS displacement_l,
   e.cylinders,
   e.fuel_type,
   e.valve_config,
+  e.valves_per_cyl,
   mc.position,
-  mc.notes           AS compat_notes,
-  vm.name            AS model_name,
+  mc.is_oem,
+  mc.qty_per_engine,
+  mc.notes                                                  AS compat_notes,
+  vm.name                                                   AS model_name,
   vm.body_type,
-  vma.name           AS make_name,
-  vma.id             AS make_id,
-  vm.id              AS model_id,
-  e.id               AS engine_id,
+  vma.name                                                  AS make_name,
+  vma.id                                                    AS make_id,
+  vm.id                                                     AS model_id,
+  e.id                                                      AS engine_id,
   emy.year_from,
   emy.year_to,
-  catalog_get_stock(mc.product_sku) AS total_stock,
+  catalog_get_stock(mc.product_sku)                         AS total_stock,
+  COALESCE(bs.qty_available, 0)                             AS stock_available,
+  COALESCE(bs.qty_reserved,  0)                             AS stock_reserved,
   vs.head_diameter_mm,
   vs.stem_diameter_mm,
   vs.overall_length_mm,
+  vs.overall_length_mm                                      AS total_length_mm,
   vs.material,
+  vs.valve_type,
   vs.face_angle_deg,
+  vs.face_angle_deg                                         AS seat_angle_deg,
   mc.is_active
-FROM motor_compatibility   mc
-JOIN products              p   ON p.sku      = mc.product_sku
-JOIN engines               e   ON e.id       = mc.engine_id
-LEFT JOIN engine_model_years emy ON emy.engine_id = e.id
-LEFT JOIN vehicle_models   vm  ON vm.id      = emy.model_id
-LEFT JOIN vehicle_makes    vma ON vma.id     = vm.make_id
-LEFT JOIN valve_specs      vs  ON vs.product_sku = mc.product_sku
+FROM motor_compatibility         mc
+JOIN products                    p    ON p.sku       = mc.product_sku
+JOIN engines                     e    ON e.id        = mc.engine_id
+LEFT JOIN engine_model_years     emy  ON emy.engine_id = e.id
+LEFT JOIN vehicle_models         vm   ON vm.id       = emy.model_id
+LEFT JOIN vehicle_makes          vma  ON vma.id      = vm.make_id
+LEFT JOIN valve_specs            vs   ON vs.product_sku = mc.product_sku
+LEFT JOIN (
+  SELECT product_sku,
+         SUM(qty_available) AS qty_available,
+         SUM(qty_reserved)  AS qty_reserved
+  FROM bin_stock
+  GROUP BY product_sku
+) bs ON bs.product_sku = mc.product_sku
 WHERE mc.is_active = TRUE;
 
 -- ─────────────────────────────────────────────────────

@@ -52,15 +52,7 @@ async function getStats() {
     WHERE created_at >= CURRENT_DATE
     GROUP BY action_taken
   `);
-  let prov = null;
-  try {
-    const { rows } = await pool.query(
-      `SELECT provider_id, enabled, health_status FROM provider_settings WHERE provider_id = 'GROQ_LLAMA'`
-    );
-    prov = rows[0] || null;
-  } catch (_) {
-    prov = { provider_id: "GROQ_LLAMA", enabled: !!process.env.GROQ_API_KEY, health_status: "env" };
-  }
+  const groqKeyOk = !!process.env.GROQ_API_KEY;
   return {
     ok: true,
     ai_responder_enabled: String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1",
@@ -69,7 +61,7 @@ async function getStats() {
     tipo_m_mode: "plantilla + context_line (IA no elige flujo)",
     today_messages: today.rows[0] || {},
     today_log_by_action: Object.fromEntries(logc.rows.map((r) => [r.action_taken, r.n])),
-    provider: prov,
+    provider: { groq_key_ok: groqKeyOk },
   };
 }
 
@@ -294,7 +286,8 @@ td.msg{max-width:22rem;word-break:break-word}
 </style></head><body>
 <h1>🤖 AI Responder — <span class="badge m">Tipo M</span></h1>
 <p>
-  <span class="badge ${stats.ai_responder_enabled ? "on" : "off"}">${stats.ai_responder_enabled ? "WORKER ON" : "WORKER OFF"}</span>
+  <span class="badge ${stats.ai_responder_enabled ? "on" : "off"}">${stats.ai_responder_enabled ? "WORKER ON" : "WORKER OFF — falta AI_RESPONDER_ENABLED=1"}</span>
+  <span class="badge ${stats.provider && stats.provider.groq_key_ok ? "on" : "off"}">GROQ_API_KEY: ${stats.provider && stats.provider.groq_key_ok ? "OK" : "❌ FALTA"}</span>
   <span class="badge ${stats.force_send ? "off" : "on"}" title="AI_RESPONDER_FORCE_SEND">${stats.force_send ? "⚠ FORCE_SEND=1" : "revisión humana si aplica"}</span>
 </p>
 

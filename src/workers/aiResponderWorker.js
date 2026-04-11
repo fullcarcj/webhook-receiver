@@ -41,22 +41,10 @@ async function responderCycle() {
   isRunning = true;
 
   try {
-    let provOk = false;
-    try {
-      const { rows } = await pool.query(
-        `SELECT enabled FROM provider_settings WHERE provider_id = 'GROQ_LLAMA' LIMIT 1`
-      );
-      provOk = rows[0] && rows[0].enabled === true;
-    } catch (e) {
-      if (e && e.code === "42P01") {
-        const k = process.env.GROQ_API_KEY;
-        provOk = !!k;
-      } else {
-        throw e;
-      }
-    }
+    // GROQ_API_KEY en env es suficiente para operar — provider_settings es referencial.
+    const provOk = !!process.env.GROQ_API_KEY;
     if (!provOk) {
-      log.debug("ai_responder: GROQ_LLAMA desactivado o sin fallback — skip");
+      log.warn("ai_responder: GROQ_API_KEY no definida — skip ciclo");
       return;
     }
 

@@ -73,7 +73,7 @@ async function createLot(p) {
   }
 
   const { rows: prodRows } = await pool.query(
-    `SELECT COALESCE(requires_lot_tracking, FALSE) AS r FROM productos WHERE sku = $1`,
+    `SELECT COALESCE(requires_lot_tracking, FALSE) AS r FROM products WHERE sku = $1`,
     [sku]
   );
   if (!prodRows.length) throw Object.assign(new Error("SKU no existe"), { code: "SKU_NOT_FOUND" });

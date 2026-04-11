@@ -1,17 +1,20 @@
 -- Lotes y shelf-life (Ferrari ERP / Solomotor3k)
--- Prerrequisitos: productos(sku), bin_stock, warehouse_bins (+ jerarquía WMS), import_shipments(id), set_updated_at()
+-- Prerrequisitos: products(sku) — catálogo canónico; bin_stock, warehouse_bins (+ jerarquía WMS), import_shipments(id), set_updated_at()
+-- Nota: `productos` es legacy; FKs y flags de lote viven en `products`.
 -- Idempotente: IF NOT EXISTS, DO $$ para ENUMs.
+-- Si ya ejecutaste una versión anterior que referenciaba productos(sku), corre también:
+--   npm run db:lots-management-products-patch
 
 -- ─────────────────────────────────────────────────────
--- 1. Columnas nuevas en productos
+-- 1. Columnas nuevas en products
 -- ─────────────────────────────────────────────────────
-ALTER TABLE productos
+ALTER TABLE products
   ADD COLUMN IF NOT EXISTS requires_lot_tracking BOOLEAN
     NOT NULL DEFAULT FALSE,
   ADD COLUMN IF NOT EXISTS default_shelf_life_days INTEGER;
 
-COMMENT ON COLUMN productos.requires_lot_tracking IS 'TRUE = juntas/sellos/filtros; FALSE = válvulas acero (default)';
-COMMENT ON COLUMN productos.default_shelf_life_days IS 'Vida útil estándar del SKU en días (opcional)';
+COMMENT ON COLUMN products.requires_lot_tracking IS 'TRUE = juntas/sellos/filtros; FALSE = válvulas acero (default)';
+COMMENT ON COLUMN products.default_shelf_life_days IS 'Vida útil estándar del SKU en días (opcional)';
 
 -- ─────────────────────────────────────────────────────
 -- 2. ENUMs
@@ -48,7 +51,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE TABLE IF NOT EXISTS product_lots (
   id                   BIGSERIAL PRIMARY KEY,
   company_id           INTEGER    NOT NULL DEFAULT 1,
-  producto_sku         TEXT       NOT NULL REFERENCES productos(sku),
+  producto_sku         TEXT       NOT NULL REFERENCES products(sku),
 
   lot_number           TEXT       NOT NULL,
   supplier_lot_number  TEXT,
@@ -228,7 +231,7 @@ $$;
 CREATE OR REPLACE VIEW v_lots_fefo AS
 SELECT
   lbs.producto_sku,
-  p.descripcion,
+  COALESCE(NULLIF(TRIM(p.description), ''), p.sku) AS descripcion,
   l.lot_number,
   l.supplier_lot_number,
   l.expiration_date,
@@ -256,7 +259,7 @@ SELECT
   END AS expiry_alert
 FROM lot_bin_stock      lbs
 JOIN product_lots       l   ON l.id  = lbs.lot_id
-JOIN productos          p   ON p.sku = lbs.producto_sku
+JOIN products           p   ON p.sku = lbs.producto_sku
 JOIN warehouse_bins     wb  ON wb.id = lbs.bin_id
 JOIN warehouse_shelves  ws  ON ws.id = wb.shelf_id
 JOIN warehouse_aisles   wa  ON wa.id = ws.aisle_id
@@ -272,7 +275,7 @@ CREATE OR REPLACE VIEW v_expiry_alerts AS
 SELECT
   l.id AS lot_id,
   l.producto_sku,
-  p.descripcion,
+  COALESCE(NULLIF(TRIM(p.description), ''), p.sku) AS descripcion,
   l.lot_number,
   l.expiration_date,
   l.expiration_date - CURRENT_DATE AS days_remaining,
@@ -283,9 +286,9 @@ SELECT
     WHEN l.expiration_date <= CURRENT_DATE + 90 THEN 'WARNING'
   END AS alert_level
 FROM product_lots   l
-JOIN productos      p   ON p.sku = l.producto_sku
+JOIN products       p   ON p.sku = l.producto_sku
 LEFT JOIN lot_bin_stock lbs ON lbs.lot_id = l.id
 WHERE l.expiration_date IS NOT NULL
   AND l.expiration_date <= CURRENT_DATE + 90
   AND l.status IN ('ACTIVE'::lot_status,'EXPIRED'::lot_status)
-GROUP BY l.id, l.producto_sku, p.descripcion, l.lot_number, l.expiration_date, l.status;
+GROUP BY l.id, l.producto_sku, p.description, p.sku, l.lot_number, l.expiration_date, l.status;

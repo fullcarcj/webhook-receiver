@@ -7,6 +7,10 @@ Ejecutar EN ESTE ORDEN antes de activar las rutas /api/shipping y /api/landed-co
 # 1. Módulo de tasas de cambio (si no se ejecutó antes)
 psql $DATABASE_URL -f sql/currency-management.sql
 
+# 1b. Vista precios Bs sobre `products` + tablas POS `sales`/`sale_lines`/`purchases` con snapshot de tasa
+# psql $DATABASE_URL -f sql/exchange-rates.sql
+# npm run db:exchange-rates
+
 # 2. Módulo de costos de importación
 psql $DATABASE_URL -f sql/landed-cost.sql
 
@@ -22,8 +26,14 @@ psql $DATABASE_URL -f sql/wms-audit-v2.sql
 # 6. Reservas de stock por órdenes ML (tabla ml_order_reservations)
 psql $DATABASE_URL -f sql/ml-reservations.sql
 
-# 6b. Lotes y shelf-life (product_lots, lot_bin_stock, lot_movements; requiere productos + import_shipments + WMS)
+# 6b. Lotes y shelf-life (product_lots, lot_bin_stock, lot_movements; FK y flags en `products`; import_shipments + WMS)
 npm run db:lots-management
+# 6b′. Solo si antes corriste lot-management con FK a `productos`: pasar FK/vistas a `products`
+# npm run db:lots-management-products-patch
+
+# 6c. Conteo cíclico (count_sessions, count_lines; requiere WMS + auditoría v2)
+# psql $DATABASE_URL -f sql/cycle-count.sql
+# npm run db:cycle-count
 
 # 7. Catálogo técnico — compatibilidad motores/válvulas (vehicle_makes, engines, valve_specs, vistas)
 psql $DATABASE_URL -f sql/catalog-motor-compatibility.sql

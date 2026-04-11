@@ -115,6 +115,7 @@ Sin OAuth en el job, los POST a la API de ML pueden fallar al renovar token.
 - SQL: `sql/currency-management.sql` (+ optimización en `sql/currency-optimization.sql`).
 - Job/CI: `src/jobs/dailyRatesFetch.js`, workflow `.github/workflows/daily-rates.yml`.
 - **`POST /api/currency/fetch`:** en el servidor, auth con `Authorization: Bearer <CRON_SECRET>` **o** cabecera `X-Admin-Secret` (mismo valor que `ADMIN_SECRET`). `CRON_SECRET` debe existir en producción (p. ej. Render) y coincidir con el secret de GitHub si el workflow dispara el endpoint.
+- **POS (`sales` / `sale_lines`, snapshot de tasa):** `POST /api/pos/sales` y `GET /api/pos/sales/:id` (admin `X-Admin-Secret` o `?k=`); tasa por defecto desde `getTodayRate` / `daily_exchange_rates`; cuerpo opcional `rate_snapshot` para forzar `rate_applied` + `rate_type` + `rate_date`. Migración: `npm run db:exchange-rates`. No confundir con `GET /api/sales` (`sales_orders`).
 - **GitHub → tasas:** el workflow usa `secrets.RENDER_URL` (URL raíz del servicio, sin path), `secrets.CRON_SECRET` y comprueba `secrets.DATABASE_URL`; hace `GET /health` y luego `POST …/api/currency/fetch`. `RENDER_URL` no es variable del proceso Node en cloud; solo secret del repo para el `curl` desde Actions.
 - **BCV:** scrape con cliente **HTTPS nativo** (Node), timeout largo por defecto. URL por defecto: página de intervención cambiaria del BCV; override con `BCV_URL`. Opcionales: `BCV_FETCH_TIMEOUT_MS`, `BCV_TLS_INSECURE=1` si falla la verificación TLS del sitio (último recurso).
 - Regla operativa: precios en Bs se calculan en runtime (vista/queries), no se persisten por SKU.
@@ -209,10 +210,10 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Wasender E/F | `ml-whatsapp-tipo-ef.js`, `wasender-client.js` |
 | Post-venta A | `ml-post-sale-send.js` |
 | Retiro B / rating C | `ml-retiro-broadcast.js`, `ml-rating-request-daily.js` |
-| Currency (tasas) | `src/services/currencyService.js`, `src/routes/currency.js`, `sql/currency-management.sql` |
+| Currency (tasas) | `src/services/currencyService.js`, `src/routes/currency.js`, `sql/currency-management.sql`; vista `v_product_prices_bs` sobre **`products`** + POS `sales`/`sale_lines`/`purchases` (snapshot tasa): `sql/exchange-rates.sql`, `npm run db:exchange-rates` |
 | Shipping/flete | `src/services/shippingService.js`, `src/routes/shipping.js`, `src/scripts/bulkAssignShippingCategories.js`, `sql/shipping-providers.sql` |
 | Landed cost | `src/services/landedCostService.js`, `sql/landed-cost.sql` |
-| WMS (ubicaciones / stock) | `src/services/wmsService.js`, `src/routes/wms.js`, `sql/wms-bins.sql`; lotes / shelf-life: `sql/lot-management.sql`, `src/services/lotService.js`, `src/routes/lots.js` (`/api/lots`), `npm run db:lots-management` |
+| WMS (ubicaciones / stock) | `src/services/wmsService.js`, `src/routes/wms.js`, `sql/wms-bins.sql`; conteo cíclico: `sql/cycle-count.sql`, `cycleCountService.js`, `/api/count/*`, `npm run db:cycle-count`; lotes: `sql/lot-management.sql`, `lotService.js`, `/api/lots`, `npm run db:lots-management` (+ parche `npm run db:lots-management-products-patch`) |
 | Reservas ML ↔ bin_stock | `src/services/reservationService.js`, `sql/ml-reservations.sql`, enganche en `server.js` (topic `orders_v2` + fetch) |
 | Orden de migración SQL | `sql/run-migrations.md` |
 | Banesco monitor / CSV / statements | `src/services/banescoService.js`, `src/jobs/banescoMonitor.js`, `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`, `src/services/bankStatementsService.js`, `sql/bank-reconciliation.sql` |

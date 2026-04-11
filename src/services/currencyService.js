@@ -372,32 +372,40 @@ CREATE TABLE IF NOT EXISTS exchange_rate_audit_log (
   metadata JSONB
 );`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_eral_rate_id ON exchange_rate_audit_log (rate_id)`);
+    await pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_eral_action ON exchange_rate_audit_log (action, performed_at DESC)`
+    );
 
     try {
       await pool.query(`
+ALTER TABLE products ADD COLUMN IF NOT EXISTS company_id INTEGER NOT NULL DEFAULT 1`);
+      await pool.query(`
 CREATE OR REPLACE VIEW v_product_prices_bs AS
 SELECT
+  p.id,
   p.sku,
-  p.descripcion,
-  p.precio_usd AS price_usd,
-  last_rate.rate_date,
-  last_rate.active_rate_type,
-  last_rate.active_rate,
-  last_rate.spread_alert_triggered,
-  ROUND((p.precio_usd * last_rate.active_rate)::numeric, 2) AS price_bs,
-  ROUND((p.precio_usd * COALESCE(last_rate.bcv_rate, last_rate.active_rate))::numeric, 2) AS price_bs_bcv,
-  ROUND((p.precio_usd * COALESCE(last_rate.binance_rate, last_rate.active_rate))::numeric, 2) AS price_bs_binance,
-  ROUND((p.precio_usd * 1.03)::numeric, 4) AS price_usd_igtf
-FROM productos p
+  COALESCE(NULLIF(trim(p.description), ''), p.sku::text) AS descripcion,
+  COALESCE(p.unit_price_usd, 0::numeric) AS precio_usd,
+  p.company_id,
+  der.rate_date,
+  der.active_rate_type,
+  der.active_rate,
+  der.spread_alert_triggered,
+  ROUND(COALESCE(p.unit_price_usd, 0) * der.active_rate, 2) AS price_bs,
+  ROUND(COALESCE(p.unit_price_usd, 0) * COALESCE(der.bcv_rate, der.active_rate), 2) AS price_bs_bcv,
+  ROUND(COALESCE(p.unit_price_usd, 0) * COALESCE(der.binance_rate, der.active_rate), 2) AS price_bs_binance,
+  ROUND(COALESCE(p.unit_price_usd, 0) * COALESCE(der.adjusted_rate, der.active_rate), 2) AS price_bs_adjusted,
+  ROUND(COALESCE(p.unit_price_usd, 0) * 1.03, 4) AS price_usd_igtf
+FROM products p
 CROSS JOIN LATERAL (
-  SELECT rate_date, active_rate_type, active_rate, bcv_rate, binance_rate, spread_alert_triggered
+  SELECT rate_date, active_rate_type, active_rate, bcv_rate, binance_rate, adjusted_rate, spread_alert_triggered
   FROM daily_exchange_rates
-  WHERE company_id = 1
+  WHERE company_id = p.company_id
     AND rate_date <= CURRENT_DATE
     AND active_rate IS NOT NULL
   ORDER BY rate_date DESC
   LIMIT 1
-) last_rate`);
+) der`);
     } catch (e) {
       console.warn("[currency] v_product_prices_bs omitida:", e.message || e);
     }
@@ -406,12 +414,15 @@ CROSS JOIN LATERAL (
 }
 
 async function insertAuditLog(client, { rateId, action, fieldChanged, oldValue, newValue, userId, metadata }) {
+  if (rateId == null || !Number.isFinite(Number(rateId))) {
+    return;
+  }
   await client.query(
     `INSERT INTO exchange_rate_audit_log
        (rate_id, action, field_changed, old_value, new_value, performed_by, metadata)
      VALUES ($1::bigint, $2::text, $3::text, $4::numeric, $5::numeric, $6::integer, $7::jsonb)`,
     [
-      rateId ?? null,
+      Number(rateId),
       action,
       fieldChanged ?? null,
       oldValue ?? null,
@@ -626,29 +637,21 @@ async function getProductPrices({ companyId = 1, search = null, page = 1, limit 
   const offset = (Math.max(parseInt(page, 10) || 1, 1) - 1) * safeLimit;
   const { rows } = await pool.query(
     `SELECT
-       p.sku,
-       p.descripcion,
-       p.precio_usd AS price_usd,
-       der.rate_date,
-       der.active_rate_type,
-       der.active_rate,
-       der.spread_alert_triggered,
-       ROUND((p.precio_usd * der.active_rate)::numeric, 2) AS price_bs,
-       ROUND((p.precio_usd * 1.03)::numeric, 4) AS price_usd_igtf
-     FROM productos p
-     CROSS JOIN LATERAL (
-       SELECT rate_date, active_rate_type, active_rate, spread_alert_triggered
-       FROM daily_exchange_rates
-       WHERE company_id = $1
-         AND rate_date <= CURRENT_DATE
-         AND active_rate IS NOT NULL
-       ORDER BY rate_date DESC
-       LIMIT 1
-     ) der
-     WHERE ($2::text IS NULL
-        OR p.sku ILIKE '%' || $2 || '%'
-        OR p.descripcion ILIKE '%' || $2 || '%')
-     ORDER BY p.descripcion
+       v.sku,
+       v.descripcion,
+       v.precio_usd AS price_usd,
+       v.rate_date,
+       v.active_rate_type,
+       v.active_rate,
+       v.spread_alert_triggered,
+       v.price_bs,
+       v.price_usd_igtf
+     FROM v_product_prices_bs v
+     WHERE v.company_id = $1
+       AND ($2::text IS NULL
+        OR v.sku ILIKE '%' || $2 || '%'
+        OR v.descripcion ILIKE '%' || $2 || '%')
+     ORDER BY v.descripcion
      LIMIT $3 OFFSET $4`,
     [Number(companyId) || 1, search || null, safeLimit, offset]
   );

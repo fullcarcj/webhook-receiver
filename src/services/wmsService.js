@@ -148,7 +148,7 @@ async function reserveStock({ sku, quantity, referenceId, referenceType, userId 
 
   try {
     const { rows: prodRows } = await pool.query(
-      `SELECT COALESCE(requires_lot_tracking, FALSE) AS r FROM productos WHERE sku = $1`,
+      `SELECT COALESCE(requires_lot_tracking, FALSE) AS r FROM products WHERE sku = $1`,
       [String(sku || "").trim()]
     );
     if (prodRows[0]?.r === true) {
@@ -159,7 +159,7 @@ async function reserveStock({ sku, quantity, referenceId, referenceType, userId 
     }
   } catch (e) {
     if (e && e.code === "42703") {
-      /* columna requires_lot_tracking ausente hasta migración lot-management */
+      /* columna requires_lot_tracking ausente en products hasta migración lot-management */
     } else {
       console.warn("[wms] reserveStock lot-tracking check:", e.message || e);
     }
@@ -393,6 +393,8 @@ async function createBin({ shelfId, level, maxWeightKg, maxVolumeCbm, notes }) {
 
 module.exports = {
   setMovementSessionVars,
+  /** Alias documentado (conteo cíclico y otros flujos): mismo comportamiento que setMovementSessionVars. */
+  setMovementContext: setMovementSessionVars,
   adjustStock,
   reserveStock,
   releaseReservation,

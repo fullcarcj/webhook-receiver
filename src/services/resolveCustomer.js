@@ -12,14 +12,9 @@ const {
   isWaContactNameBlockedForFullName,
 } = require("../whatsapp/waNameCandidate");
 const { findCustomerIdByPhoneAndPersonName } = require("./customerDedupPhoneName");
+const { shouldForceNameUpgrade, isWaPhonePlaceholderFullName } = require("./customerNameUpgrade");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "resolveCustomer" });
-
-/** Placeholder antiguo `WA-584…` o variante con espacios; no es nombre real. */
-function isWaPhonePlaceholderFullName(s) {
-  const t = String(s || "").trim();
-  return /^WA-\d+$/i.test(t);
-}
 
 const identitySchema = z.object({
   source: z.enum(["whatsapp", "mercadolibre", "mostrador"]),
@@ -105,11 +100,20 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
   const name = resolved && String(resolved).trim() ? String(resolved).trim() : null;
   const email = data.email ? String(data.email).toLowerCase().trim() : null;
   const hasP2 = await customersHasPhone2Column(db);
+  let forceNameUpgrade = false;
+
+  if (name) {
+    const { rows: currentRows } = await db.query(`SELECT full_name FROM customers WHERE id = $1`, [customerId]);
+    const currentFullName = currentRows[0] ? currentRows[0].full_name : null;
+    forceNameUpgrade = shouldForceNameUpgrade(currentFullName, name);
+  }
 
   if (hasP2) {
     await db.query(
       `UPDATE customers SET
          full_name = CASE
+           WHEN $8::boolean IS TRUE AND $2::text IS NOT NULL
+             THEN $2::text
            WHEN $2::text IS NOT NULL AND full_name LIKE 'WA-%' AND $2::text NOT LIKE 'WA-%'
              THEN $2::text
            WHEN $2::text IS NOT NULL AND TRIM(full_name) = 'Cliente WhatsApp' AND NOT ($2::text LIKE 'WA-%')
@@ -135,12 +139,15 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
         email,
         data.id_type ?? null,
         data.id_number ?? null,
+        forceNameUpgrade,
       ]
     );
   } else {
     await db.query(
       `UPDATE customers SET
          full_name = CASE
+           WHEN $7::boolean IS TRUE AND $2::text IS NOT NULL
+             THEN $2::text
            WHEN $2::text IS NOT NULL AND full_name LIKE 'WA-%' AND $2::text NOT LIKE 'WA-%'
              THEN $2::text
            WHEN $2::text IS NOT NULL AND TRIM(full_name) = 'Cliente WhatsApp' AND NOT ($2::text LIKE 'WA-%')
@@ -157,7 +164,7 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
          id_number = COALESCE(NULLIF(TRIM(id_number), ''), $6::text),
          updated_at = NOW()
        WHERE id = $1`,
-      [customerId, name, normalizedPhone, email, data.id_type ?? null, data.id_number ?? null]
+      [customerId, name, normalizedPhone, email, data.id_type ?? null, data.id_number ?? null, forceNameUpgrade]
     );
   }
 }
@@ -228,19 +235,41 @@ async function resolveCustomer(identity, options = {}) {
     normalizedPhone ?? (source === "whatsapp" ? normalizePhone(extRaw) || String(extRaw).replace(/\D/g, "") : null);
 
   if (phoneToSearch) {
-    const { rows: phoneRows } = await db.query(
-      `SELECT c.id AS customer_id
-       FROM customers c
-       WHERE NULLIF(TRIM(c.phone), '') IS NOT NULL
-         AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
-       UNION
-       SELECT ci.customer_id
-       FROM crm_customer_identities ci
-       WHERE ci.external_id = $1
-         AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
-       LIMIT 1`,
-      [phoneToSearch]
-    );
+    let phoneRows;
+    try {
+      const r = await db.query(
+        `SELECT c.id AS customer_id
+         FROM customers c
+         WHERE REGEXP_REPLACE(COALESCE(c.phone, ''), '\\D', '', 'g') = $1
+            OR REGEXP_REPLACE(COALESCE(c.phone_2, ''), '\\D', '', 'g') = $1
+         UNION
+         SELECT ci.customer_id
+         FROM crm_customer_identities ci
+         WHERE ci.external_id = $1
+           AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
+         LIMIT 1`,
+        [phoneToSearch]
+      );
+      phoneRows = r.rows;
+    } catch (e) {
+      if (e && e.code === "42703") {
+        const r = await db.query(
+          `SELECT c.id AS customer_id
+           FROM customers c
+           WHERE REGEXP_REPLACE(COALESCE(c.phone, ''), '\\D', '', 'g') = $1
+           UNION
+           SELECT ci.customer_id
+           FROM crm_customer_identities ci
+           WHERE ci.external_id = $1
+             AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
+           LIMIT 1`,
+          [phoneToSearch]
+        );
+        phoneRows = r.rows;
+      } else {
+        throw e;
+      }
+    }
 
     if (phoneRows.length) {
       const customerId = Number(phoneRows[0].customer_id);

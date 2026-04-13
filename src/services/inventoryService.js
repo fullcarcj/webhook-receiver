@@ -80,6 +80,23 @@ async function listProducts({ limit = 50, offset = 0, alert, category, brand, se
   };
 }
 
+/** Baja lógica: deja de listarse en catálogo activo. */
+async function deactivateProduct(productId) {
+  const upd = await pool.query(
+    `UPDATE products SET is_active = FALSE, updated_at = NOW()
+     WHERE id = $1 AND is_active = TRUE
+     RETURNING id`,
+    [productId]
+  );
+  if (upd.rowCount) return { id: productId, deactivated: true };
+  const { rows } = await pool.query(
+    `SELECT id FROM products WHERE id = $1`,
+    [productId]
+  );
+  if (!rows.length) return null;
+  return { id: productId, already_inactive: true };
+}
+
 async function getProductById(id) {
   const { rows } = await pool.query(`
     SELECT
@@ -574,6 +591,7 @@ async function getInventoryStats() {
 
 module.exports = {
   listProducts,
+  deactivateProduct,
   getProductById,
   searchProducts,
   getAlerts,

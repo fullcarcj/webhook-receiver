@@ -94,7 +94,7 @@ const SupplierSchema = z.object({
  * Prefijo de rutas: /api/inventory
  */
 async function handleInventoryApiRequest(req, res, url) {
-  const { pathname } = url;
+  const pathname = String(url.pathname || '').replace(/\/+$/, '') || '/';
   if (!pathname.startsWith('/api/inventory')) return false;
 
   if (!isAdmin(req, url)) {
@@ -136,6 +136,16 @@ async function handleInventoryApiRequest(req, res, url) {
       return ok(res, { products: data }), true;
     }
 
+    // POST /api/inventory/products/deactivate  body: { product_id } (preferido; evita rutas anidadas raras)
+    if (method === 'POST' && pathname === '/api/inventory/products/deactivate') {
+      const body = await readBody(req);
+      const productId = Number(body?.product_id);
+      if (!productId) return fail(res, 'VALIDATION', 'product_id requerido y numérico', 400), true;
+      const data = await svc.deactivateProduct(productId);
+      if (!data) return fail(res, 'NOT_FOUND', 'Producto no encontrado', 404), true;
+      return ok(res, data), true;
+    }
+
     // GET /api/inventory/products/:id
     // PATCH /api/inventory/products/:id/stock
     // PATCH /api/inventory/products/:id/config
@@ -161,6 +171,20 @@ async function handleInventoryApiRequest(req, res, url) {
         return ok(res, data), true;
       }
 
+      // POST /api/inventory/products/:id/deactivate (misma baja lógica; útil si DELETE no llega al servidor)
+      if (method === 'POST' && parts[4] === 'deactivate') {
+        const data = await svc.deactivateProduct(productId);
+        if (!data) return fail(res, 'NOT_FOUND', 'Producto no encontrado', 404), true;
+        return ok(res, data), true;
+      }
+
+      // DELETE /api/inventory/products/:id (baja lógica is_active = false)
+      if (method === 'DELETE' && !parts[4]) {
+        const data = await svc.deactivateProduct(productId);
+        if (!data) return fail(res, 'NOT_FOUND', 'Producto no encontrado', 404), true;
+        return ok(res, data), true;
+      }
+
       // GET /api/inventory/products/:id
       if (method === 'GET' && !parts[4]) {
         const data = await svc.getProductById(productId);
@@ -173,13 +197,17 @@ async function handleInventoryApiRequest(req, res, url) {
     if (method === 'GET' && pathname === '/api/inventory/products') {
       const sp     = url.searchParams;
       const alertV = sp.get('alert');
+      const search = sp.get('search')?.trim() || undefined;
+      const maxLimit = search ? 500 : 200;
+      const rawLimit = Number(sp.get('limit') || (search ? 200 : 50));
+      const limit = Math.min(Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 50), maxLimit);
       const data   = await svc.listProducts({
-        limit:    Math.min(Number(sp.get('limit')  || 50), 200),
+        limit,
         offset:   Number(sp.get('offset') || 0),
         alert:    alertV !== null ? alertV === 'true' : undefined,
         category: sp.get('category') || undefined,
         brand:    sp.get('brand')    || undefined,
-        search:   sp.get('search')   || undefined,
+        search,
       });
       return ok(res, data), true;
     }

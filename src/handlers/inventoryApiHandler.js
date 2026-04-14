@@ -55,6 +55,17 @@ const ProductConfigSchema = z.object({
   supplier_id:    z.number().int().positive().optional(),
 }).strict();
 
+/** PATCH /api/inventory/products/:id — catálogo + stock básico */
+const ProductPatchSchema = z.object({
+  name:             z.string().min(1).optional(),
+  description:      z.union([z.string(), z.null()]).optional(),
+  category:         z.union([z.string(), z.null()]).optional(),
+  brand:            z.union([z.string(), z.null()]).optional(),
+  unit_price_usd:   z.coerce.number().min(0).optional(),
+  stock_qty:        z.coerce.number().min(0).optional(),
+  stock_min:        z.coerce.number().min(0).optional(),
+}).strict();
+
 const CreatePOSchema = z.object({
   supplier_id:  z.number().int().positive().optional(),
   notes:        z.string().max(1000).optional(),
@@ -180,6 +191,23 @@ async function handleInventoryApiRequest(req, res, url) {
         return ok(res, data), true;
       }
 
+      // PATCH /api/inventory/products/:id  (nombre, descripción, categoría, marca, precio, stock)
+      if (method === 'PATCH' && !parts[4]) {
+        const body = await readBody(req);
+        const parsed = ProductPatchSchema.safeParse(body);
+        if (!parsed.success) return fail(res, 'VALIDATION', parsed.error.issues[0].message), true;
+        try {
+          const data = await svc.updateProductById(productId, parsed.data);
+          if (!data) return fail(res, 'NOT_FOUND', 'Producto no encontrado', 404), true;
+          return ok(res, data), true;
+        } catch (e) {
+          if (e && e.code === 'EMPTY_UPDATE') {
+            return fail(res, 'VALIDATION', e.message || 'Nada que actualizar', 400), true;
+          }
+          throw e;
+        }
+      }
+
       // POST /api/inventory/products/:id/deactivate (misma baja lógica; útil si DELETE no llega al servidor)
       if (method === 'POST' && parts[4] === 'deactivate') {
         const data = await svc.deactivateProduct(productId);
@@ -194,7 +222,7 @@ async function handleInventoryApiRequest(req, res, url) {
         return ok(res, data), true;
       }
 
-      // GET /api/inventory/products/:id
+      // GET /api/inventory/products/:id  (después de PATCH :id sin subruta)
       if (method === 'GET' && !parts[4]) {
         const data = await svc.getProductById(productId);
         if (!data) return fail(res, 'NOT_FOUND', 'Producto no encontrado', 404), true;

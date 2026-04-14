@@ -121,6 +121,84 @@ async function getProductById(id) {
   return rows[0] || null;
 }
 
+/**
+ * Actualiza campos de catálogo (products) y/o stock (inventory) en una transacción.
+ * @param {object} patch — campos opcionales: name, description, category, brand, unit_price_usd, stock_qty, stock_min
+ */
+async function updateProductById(productId, patch) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: exist } = await client.query(
+      `SELECT 1 FROM products p
+       JOIN inventory i ON i.product_id = p.id
+       WHERE p.id = $1`,
+      [productId]
+    );
+    if (!exist.length) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    const pSets = [];
+    const pVals = [];
+    let idx = 1;
+    if (patch.name !== undefined) { pSets.push(`name = $${idx++}`); pVals.push(patch.name); }
+    if (patch.description !== undefined) { pSets.push(`description = $${idx++}`); pVals.push(patch.description); }
+    if (patch.category !== undefined) { pSets.push(`category = $${idx++}`); pVals.push(patch.category); }
+    if (patch.brand !== undefined) { pSets.push(`brand = $${idx++}`); pVals.push(patch.brand); }
+    if (patch.unit_price_usd !== undefined) {
+      pSets.push(`unit_price_usd = $${idx++}`);
+      pVals.push(patch.unit_price_usd);
+    }
+    if (pSets.length) {
+      pSets.push('updated_at = NOW()');
+      pVals.push(productId);
+      const upd = await client.query(
+        `UPDATE products SET ${pSets.join(', ')} WHERE id = $${idx} RETURNING id`,
+        pVals
+      );
+      if (!upd.rowCount) throw Object.assign(new Error('No se pudo actualizar el producto'), { code: 'NOT_FOUND' });
+    }
+
+    if (patch.stock_qty !== undefined || patch.stock_min !== undefined) {
+      const { rows: inv } = await client.query(
+        'SELECT stock_qty, stock_min FROM inventory WHERE product_id = $1 FOR UPDATE',
+        [productId]
+      );
+      if (!inv.length) throw Object.assign(new Error('Producto sin registro de inventario'), { code: 'NOT_FOUND' });
+
+      const qtyBefore = Number(inv[0].stock_qty);
+      const sq = patch.stock_qty !== undefined ? Number(patch.stock_qty) : qtyBefore;
+      const sm = patch.stock_min !== undefined ? Number(patch.stock_min) : Number(inv[0].stock_min || 0);
+      if (Number.isNaN(sq) || sq < 0) throw Object.assign(new Error('stock_qty inválido'), { code: 'VALIDATION' });
+      if (Number.isNaN(sm) || sm < 0) throw Object.assign(new Error('stock_min inválido'), { code: 'VALIDATION' });
+
+      const stockAlert = sq <= sm;
+      await client.query(
+        `UPDATE inventory
+         SET stock_qty = $1, stock_min = $2, stock_alert = $3, updated_at = NOW()
+         WHERE product_id = $4`,
+        [sq, sm, stockAlert, productId]
+      );
+      maybeSyncMlPublicationState(productId, qtyBefore, sq);
+    }
+
+    if (!pSets.length && patch.stock_qty === undefined && patch.stock_min === undefined) {
+      throw Object.assign(new Error('Nada que actualizar'), { code: 'EMPTY_UPDATE' });
+    }
+
+    await client.query('COMMIT');
+    return getProductById(productId);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 async function searchProducts(q, { limit = 20 } = {}) {
   const { rows } = await pool.query(`
     SELECT
@@ -608,6 +686,7 @@ module.exports = {
   listProducts,
   deactivateProduct,
   getProductById,
+  updateProductById,
   searchProducts,
   getAlerts,
   getImmStockouts,

@@ -94,7 +94,10 @@ const SupplierSchema = z.object({
  * Prefijo de rutas: /api/inventory
  */
 async function handleInventoryApiRequest(req, res, url) {
-  const pathname = String(url.pathname || '').replace(/\/+$/, '') || '/';
+  const pathname =
+    String(url.pathname || '')
+      .replace(/\/{2,}/g, '/')
+      .replace(/\/+$/, '') || '/';
   if (!pathname.startsWith('/api/inventory')) return false;
 
   if (!isAdmin(req, url)) {
@@ -125,6 +128,12 @@ async function handleInventoryApiRequest(req, res, url) {
     if (method === 'GET' && pathname === '/api/inventory/stockouts') {
       const data = await svc.getImmStockouts();
       return ok(res, { stockouts: data }), true;
+    }
+
+    // GET /api/inventory/category-products (respaldo; en server.js debe ir antes de este handler).
+    if (method === 'GET' && pathname === '/api/inventory/category-products') {
+      const data = await svc.listCategoryProducts();
+      return ok(res, data), true;
     }
 
     // GET /api/inventory/products/search?q=...

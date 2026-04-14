@@ -1,8 +1,8 @@
 $base   = "https://webhook-receiver-bs45.onrender.com" 
 $secret = "asdfrtasdfrtasdfrtasdfrtasdfrtasdfrt"
-$uid    = 489374604
+$uid    = 1335920698
 $text   = @'
-copiar body
+conectar 
 '@
 
 $body = @{ ml_user_id = $uid; cookies_netscape = $text } | ConvertTo-Json -Compress -Depth 10
@@ -13,3 +13,8 @@ Invoke-RestMethod `
   -Headers @{ "X-Admin-Secret" = $secret } `
   -ContentType "application/json; charset=utf-8" `
   -Body $body
+
+curl.exe -sS -X POST "https://webhook-receiver-bs45.onrender.com/buyers?k=asdfrtasdfrtasdfrtasdfrtasdfrtasdfrtT" `
+  -H "Content-Type: application/json; charset=utf-8" `
+  -d ""
+

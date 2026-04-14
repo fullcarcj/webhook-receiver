@@ -29,19 +29,19 @@ async function listProducts({ limit = 50, offset = 0, alert, category, brand, se
     offset,
   ];
 
-  const { rows } = await pool.query(`
+  /**
+   * Listado: sin JOIN a inventory_projections (el front solo usa sku, nombre, stock, etc.).
+   * Ese JOIN + ventana COUNT(*) era muy caro en catálogos grandes y en cold start Render.
+   */
+  const listSql = `
     SELECT
       p.id, p.sku, p.name, p.description, p.category, p.brand,
       p.unit_price_usd, p.source, p.is_active,
       i.stock_qty, i.stock_min, i.stock_max, i.stock_alert,
       i.lead_time_days, i.safety_factor, i.supplier_id,
-      ip.avg_daily_sales, ip.avg_weekly_sales, ip.avg_monthly_sales,
-      ip.days_to_stockout, ip.suggested_order_qty, ip.velocity_trend,
-      ip.last_calculated_at,
       COUNT(*) OVER() AS total_count
     FROM products p
     JOIN inventory i ON i.product_id = p.id
-    LEFT JOIN inventory_projections ip ON ip.product_id = p.id
     WHERE p.is_active = TRUE
       AND ($1::boolean IS NULL OR i.stock_alert = $1)
       AND ($2::text    IS NULL OR p.category = $2)
@@ -50,14 +50,11 @@ async function listProducts({ limit = 50, offset = 0, alert, category, brand, se
                                OR p.name ILIKE '%' || $4 || '%')
     ORDER BY
       i.stock_alert DESC,
-      ip.days_to_stockout ASC NULLS LAST,
       p.name ASC
     LIMIT $5 OFFSET $6
-  `, params);
+  `;
 
-  const total = rows.length ? Number(rows[0].total_count) : 0;
-
-  const [sumRow] = (await pool.query(`
+  const summarySql = `
     SELECT
       COUNT(*) FILTER (WHERE p.is_active)                        AS total_products,
       COUNT(*) FILTER (WHERE i.stock_alert)                      AS alerts_count,
@@ -66,7 +63,16 @@ async function listProducts({ limit = 50, offset = 0, alert, category, brand, se
     FROM products p
     JOIN inventory i ON i.product_id = p.id
     LEFT JOIN inventory_projections ip ON ip.product_id = p.id
-  `)).rows;
+  `;
+
+  const [{ rows }, summaryRes] = await Promise.all([
+    pool.query(listSql, params),
+    pool.query(summarySql),
+  ]);
+
+  const total = rows.length ? Number(rows[0].total_count) : 0;
+
+  const [sumRow] = summaryRes.rows;
 
   return {
     products: rows.map(r => { const { total_count, ...rest } = r; return rest; }),
@@ -252,6 +258,15 @@ async function updateProductConfig(productId, { lead_time_days, safety_factor, s
   );
   if (!rows.length) throw Object.assign(new Error('Producto no encontrado'), { code: 'NOT_FOUND' });
   return rows[0];
+}
+
+async function listCategoryProducts() {
+  const { rows } = await pool.query(`
+    SELECT id, category_descripcion, category_ml
+    FROM category_products
+    ORDER BY category_descripcion ASC, id ASC
+  `);
+  return { categories: rows };
 }
 
 // ── Proyecciones ─────────────────────────────────────────────────────────────
@@ -609,4 +624,5 @@ module.exports = {
   createSupplier,
   updateSupplier,
   getInventoryStats,
+  listCategoryProducts,
 };

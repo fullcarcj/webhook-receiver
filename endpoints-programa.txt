@@ -1,0 +1,432 @@
+================================================================================
+ENDPOINTS HTTP — webhook-receiver
+Generado: 2026-04-13
+Fuente: server.js, handlers bajo src/, public-frontend-api.js, endpoints-cubiertos-hasta-hoy.md
+Nota: Rutas configurables por env se indican entre paréntesis (default).
+================================================================================
+
+--- RUTAS CONFIGURABLES (process.env) ---
+POST  ${WEBHOOK_PATH:-/webhook}                    Mercado Libre webhook
+POST  ${WASENDER_WEBHOOK_PATH:-/wasender-webhook} Wasender (+ alias en WASENDER_WEBHOOK_ALIASES; default incluye /api/wasender/webhook)
+POST|GET|DELETE  ${REG_PATH:-/reg}  y  /reg.php   Registro webhook_events (DB)
+GET/POST  /webhook/whatsapp                        Meta WhatsApp Cloud (WA_VERIFY_TOKEN)
+
+--- CORE / HEALTH / PÚBLICO MÍNIMO ---
+GET   /
+GET   /health
+GET   /api/health
+GET   /monitor
+GET   /catalogo                    Catálogo HTML público (CATALOG_PAGE_ENABLED + FRONTEND_API_KEY)
+GET   /admin-panel                 Panel admin HTML (?k=)
+
+--- OAUTH ---
+GET   /oauth/status
+GET   /oauth/token-status
+
+--- API PÚBLICA FRONTEND (cabecera X-API-KEY = FRONTEND_API_KEY) ---
+GET   /api/v1
+GET   /api/v1/health
+GET   /api/v1/catalog
+GET   /api/v1/catalog/compat/makes
+GET   /api/v1/catalog/compat/models
+GET   /api/v1/catalog/compat/search
+GET   /api/v1/catalog/compat/for-sku
+GET   /api/v1/catalog/compat/equivalences
+GET   /api/v1/catalog/compat/years
+
+--- AUTENTICACIÓN JWT ---
+POST  /api/auth/login
+POST  /api/auth/logout
+GET   /api/auth/me
+POST  /api/auth/change-password
+
+--- USUARIOS (ADMIN+ / JWT) ---
+GET   /api/users/role-permissions
+GET   /api/users
+POST  /api/users
+GET   /api/users/:id
+PATCH /api/users/:id
+GET   /api/users/:id/sessions
+POST  /api/users/:id/revoke-sessions
+POST  /api/users/:id/reset-password   (SUPERUSER)
+POST  /api/users/:id/unlock
+
+--- MONITOR / SSE ---
+GET   /api/events
+GET   /api/events/stats
+
+--- CURRENCY ---
+GET   /api/currency/today
+GET   /api/currency/history
+GET   /api/currency/products
+POST  /api/currency/override         (admin)
+POST  /api/currency/fetch           (admin o Bearer CRON_SECRET)
+
+--- SHIPPING ---
+GET   /api/shipping/settings
+PATCH /api/shipping/settings/:key
+POST  /api/shipping/quote/all
+POST  /api/shipping/quote
+POST  /api/shipping/rates
+POST  /api/shipping/assign-category
+GET   /api/shipping/unassigned-products
+GET   /api/shipping/providers
+GET   /api/shipping/providers/:id
+POST  /api/shipping/providers
+PATCH /api/shipping/providers/:id
+GET   /api/shipping/categories
+GET   /api/shipping/categories/:id
+POST  /api/shipping/categories
+PATCH /api/shipping/categories/:id/rate
+GET   /api/shipping/categories/:id/rate-history
+POST  /api/shipping/products/assign
+GET   /api/shipping/products/unassigned
+POST  /api/shipping/shipments/:id/validate
+POST  /api/shipping/shipments/:id/refresh-rates
+
+--- SHIPMENTS / LANDED COST ---
+GET   /embarques-landed              HTML ayuda (?k=)
+GET   /api/shipments
+POST  /api/shipments
+GET   /api/shipments/:id
+GET   /api/shipments/:id/preview
+PATCH /api/shipments/:id/expenses
+POST  /api/shipments/:id/lines
+DELETE /api/shipments/:id/lines/:sku
+POST  /api/shipments/:id/close
+POST  /api/shipments/:id/reopen
+
+--- WMS ---
+GET   /api/wms/warehouses
+GET   /api/wms/warehouses/:id/bins
+GET   /api/wms/picking
+GET   /api/wms/movements
+GET   /api/wms/movements/:sku
+GET   /api/wms/stock/:sku
+GET   /api/wms/picking-list
+GET   /api/wms/bins/:binCode...
+POST  /api/wms/stock/adjust
+POST  /api/wms/stock/reserve
+POST  /api/wms/stock/commit
+POST  /api/wms/stock/release
+POST  /api/wms/ml-order/reserve
+POST  /api/wms/ml-order/commit
+POST  /api/wms/ml-order/release
+POST  /api/wms/bins
+GET   /wms-test
+
+--- CONTEO CÍCLICO (/api/count/* — ver src/routes/cycleCount.js) ---
+GET   /api/count/sessions/pending
+POST  /api/count/sessions
+GET   /api/count/sessions/:id
+POST  /api/count/sessions/:id/start
+POST  /api/count/sessions/:id/approve
+POST  /api/count/lines/:id/submit
+GET   /api/count/config
+PATCH /api/count/config
+
+--- POS ---
+POST  /api/pos/sales
+GET   /api/pos/sales/:id
+GET   /api/pos/purchases
+GET   /api/pos/purchases/:id
+POST  /api/pos/purchases
+
+--- CATÁLOGO MOTOR (/api/catalog/*) ---
+GET   /api/catalog/makes
+GET   /api/catalog/models
+GET   /api/catalog/engines
+GET   /api/catalog/search
+GET   /api/catalog/search/text
+GET   /api/catalog/products/:sku/compatibility
+GET   /api/catalog/products/:sku/valve-specs
+GET   /api/catalog/products/:sku/equivalences
+POST  /api/catalog/makes
+POST  /api/catalog/models
+POST  /api/catalog/engines
+POST  /api/catalog/engines/:engineId/models
+POST  /api/catalog/compatibility
+DELETE /api/catalog/compatibility
+POST  /api/catalog/products/:sku/valve-specs
+POST  /api/catalog/import
+
+--- ML API (server.js + mlApiHandler) ---
+GET   /api/ml/orders
+GET   /api/ml/orders/:mlOrderId
+GET   /api/ml/alerts
+POST  /api/ml/alerts/:id/resolve
+GET   /api/ml/sku-map
+POST  /api/ml/sku-map
+GET   /api/ml/publications
+POST  /api/ml/publications
+GET   /api/ml/publications/paused
+GET   /api/ml/publications/zero-stock
+POST  /api/ml/publications/sync
+GET   /api/ml/actions/pending
+POST  /api/ml/actions/request
+GET   /api/ml/paused-history
+GET   /api/ml/api-log
+
+--- VENTAS GLOBALES ---
+GET   /api/sales
+GET   /api/sales/stats
+POST  /api/sales/import/ml
+POST  /api/sales/create
+GET   /api/sales/alerts/pending
+GET   /api/sales/:id
+GET   /api/sales/:id/history
+PATCH /api/sales/:id/status
+POST  /api/quotes/create
+GET   /sales                          Vista HTML (misma auth que /api/sales)
+
+--- CASH / FINANCE SETTINGS ---
+GET   /api/finance-settings
+PATCH /api/finance-settings/:key
+GET   /api/cash/pending
+GET   /api/cash/my-pending
+GET   /api/cash/log/:orderId
+POST  /api/cash/submit/:orderId
+POST  /api/cash/resubmit/:txId
+POST  /api/cash/approve/:txId
+POST  /api/cash/reject/:txId
+
+--- BUNDLES / PRICE REVIEW ---
+GET   /api/bundles
+POST  /api/bundles
+GET   /api/bundles/:id
+GET   /api/bundles/:id/availability
+POST  /api/bundles/:bundleId/alternatives/...
+DELETE /api/bundles/alternatives/:id
+DELETE /api/bundles/:bundleId/components/:componentId
+GET   /api/price-review
+POST  /api/price-review/:id/resolve
+
+--- DELIVERY ---
+GET   /api/delivery/zones
+POST  /api/delivery/zones
+PATCH /api/delivery/zones/:id
+GET   /api/delivery/providers
+POST  /api/delivery/providers
+PATCH /api/delivery/providers/:id
+GET   /api/delivery/services
+GET   /api/delivery/services/:id
+POST  /api/delivery/services/:id/assign
+POST  /api/delivery/services/:id/deliver
+GET   /api/delivery/providers/:id/pending
+POST  /api/delivery/providers/:id/liquidate
+GET   /api/delivery/debt-summary
+GET   /api/delivery/stats
+
+--- MOTOR DE PRECIOS ---
+GET   /api/price-settings
+GET   /api/price-settings/history
+PATCH /api/price-settings/:key
+POST  /api/price/calculate
+GET   /api/price/cache
+POST  /api/price/approval/request
+GET   /api/price/approval/pending
+GET   /api/price/approval/history
+POST  /api/price/approval/:id/review
+
+--- PROVEEDORES IA (ADMIN) ---
+GET   /api/admin/ai-log
+POST  /api/admin/test/receipt
+POST  /api/admin/providers/health-all
+GET   /api/admin/providers/usage/today
+GET   /api/admin/providers
+GET   /api/admin/providers/:id
+POST  /api/admin/providers/:id/toggle
+POST  /api/admin/providers/:id/key
+POST  /api/admin/providers/:id/limits
+POST  /api/admin/providers/:id/health
+
+--- MEDIA CRM / WHATSAPP ---
+POST  /api/media/send-image
+POST  /api/media/send-audio
+POST  /api/media/send-video
+POST  /api/media/send-document
+GET   /api/media/customer/:customer_id
+GET   /api/media/logs
+GET   /media-logs
+
+--- CLIENTES / IDENTITIES ---
+GET   /api/customers/search
+GET   /api/customers
+POST  /api/customers
+GET   /api/customers/:id
+PUT   /api/customers/:id
+PATCH /api/customers/:id/status
+GET   /api/customers/:id/history
+GET   /api/customers/:id/loyalty
+POST  /api/customers/:id/loyalty/adjust
+GET   /api/customers/:id/profile
+GET   /api/customers/:id/identities
+POST  /api/customers/:id/identities
+POST  /api/customers/:id/vehicles
+DELETE /api/customers/:id/vehicles/:vehicleId
+DELETE /api/identities/:id
+POST  /api/identities/merge
+POST  /api/customers/purchase
+
+--- CRM (/api/crm/* salvo chats en chatApiHandler) ---
+GET   /api/crm/logs
+POST  /api/crm/migrate
+POST  /api/crm/buyers/:mlBuyerId/customer
+GET   /api/crm/customers
+POST  /api/crm/customers
+GET   /api/crm/customers/:id
+PATCH /api/crm/customers/:id
+GET   /api/crm/customers/:id/ml-buyers
+POST  /api/crm/customers/:id/ml-buyers
+GET   /api/crm/customers/:id/wallet
+GET   /api/crm/customers/:id/wallet/summary
+GET   /api/crm/customers/:id/wallet/history
+POST  /api/crm/customers/:id/wallet
+POST  /api/crm/loyalty/earn
+
+--- CHATS CRM ---
+GET   /api/crm/chats
+GET   /api/crm/chats/:id/context
+GET|POST /api/crm/chats/:id/messages
+PATCH /api/crm/chats/:id
+GET   /api/crm/system/wa-status
+
+--- CATÁLOGO VEHÍCULOS CRM (vehicleApiHandler) ---
+GET|POST /api/crm/brands
+GET|POST /api/crm/models
+GET|POST /api/crm/generations
+GET|POST /api/crm/compatibility
+
+--- WALLET (rutas explícitas en wallet.js; + resumen en documentación raíz) ---
+GET   /api/wallet/summary
+GET   /api/wallet/drift
+GET   /api/wallet/customers
+GET   /api/wallet/customer
+GET   /api/wallet/transactions
+POST  /api/wallet/customers
+POST  /api/wallet/ensure-customer
+POST  /api/wallet/credit-rma
+POST  /api/wallet/link-ml-buyer
+POST  /api/wallet/wallets/ensure
+POST  /api/wallet/transactions
+POST  /api/wallet/transactions/confirm
+POST  /api/wallet/transactions/cancel
+
+--- INVENTARIO INTELIGENTE ---
+GET   /api/inventory/stats
+GET   /api/inventory/alerts
+GET   /api/inventory/stockouts
+GET   /api/inventory/products/search
+GET   /api/inventory/products
+POST  /api/inventory/projections/recalculate
+GET   /api/inventory/projections/stockouts
+GET   /api/inventory/projections
+POST  /api/inventory/purchase-orders/generate
+POST  /api/inventory/purchase-orders
+GET   /api/inventory/purchase-orders
+POST  /api/inventory/suppliers
+GET   /api/inventory/suppliers
+
+--- ESTADÍSTICAS / FINANZAS (statsApiHandler) ---
+GET   /api/stats/overview
+GET   /api/stats/realtime
+GET   /api/stats/sales
+GET   /api/stats/sales/hourly
+GET   /api/stats/sales/products
+GET   /api/stats/customers
+GET   /api/stats/customers/vehicles
+GET   /api/stats/whatsapp
+GET   /api/stats/mercadolibre
+GET   /api/stats/reconciliation
+GET   /api/stats/payment-attempts
+GET   /api/stats/reconciliation-log
+GET   /api/stats/cashflow
+GET   /api/stats/expenses
+GET   /api/stats/pnl
+GET   /api/stats/exchange-rates
+GET   /api/stats/wa-throttle
+GET   /api/stats/db-activity
+GET   /api/finance/debits/unjustified
+POST  /api/finance/debits/:id/justify
+GET|POST /api/finance/categories
+GET|POST /api/finance/transactions
+GET   /api/finance/exchange-rates/current
+POST  /api/finance/exchange-rates
+
+--- LOTES ---
+GET   /api/lots/alerts
+POST  /api/lots/expire-daily        (admin o Bearer CRON_SECRET)
+POST  /api/lots/dispatch
+POST  /api/lots
+GET   /api/lots/:sku               (listado por SKU; no numérico id en este handler)
+
+--- IGTF ---
+GET   /igtf-panel
+GET   /api/igtf/payment-methods
+POST  /api/igtf/calculate
+GET   /api/igtf/declarations
+GET   /api/igtf/declarations/:year/:month
+POST  /api/igtf/declarations/:year/:month/close
+
+--- RETENCIONES / FISCAL (prefijos /api/tax/*, /api/fiscal/*, /api/settings/tax/*, /api/fiscal/documents/*, libro-ventas, sequences — ver taxRetentions.js, fiscal.js, fiscalDocuments.js) ---
+
+--- AI RESPONDER TIPO M ---
+GET   /ai-responder                    HTML (?k=)
+GET   /api/ai-responder/stats
+GET   /api/ai-responder/pending
+GET   /api/ai-responder/log
+POST  /api/ai-responder/:id/approve
+POST  /api/ai-responder/:id/override
+
+--- BANESCO / BANCO ---
+GET   /banesco
+GET   /banesco-connection
+GET   /statements
+GET   /api/bank/banesco/connection
+GET   /api/bank/banesco/status
+GET   /api/bank/statements
+
+--- PÁGINAS HTML ADMIN (mayoría ?k= / X-Admin-Secret en APIs) ---
+GET   /cuentas
+GET   /hooks
+GET   /wasender-webhooks
+GET   /fetches
+GET   /buyers
+GET   /inventario-productos
+GET   /mensajes-postventa
+GET   /mensajes-tipo-e-whatsapp
+GET   /mensajes-tipo-f-whatsapp
+GET   /envios-postventa
+POST  /envios-postventa/retry
+GET   /recordatorios-calificacion
+GET   /recordatorios
+GET   /envios-tipos-abc
+GET   /envios-whatsapp-tipo-e
+GET   /filemaker/tipo-g
+GET   /mensajes-tipo-g
+GET   /filemaker/inventario-productos
+GET   /mensajes-inventario-productos
+GET   /ventas-detalle-web
+POST  /ventas-detalle-web/retry
+GET   /preguntas-ml
+GET   /preguntas-ml-refresh
+GET   /preguntas-ml-sync-pending
+GET   /preguntas-ia-auto-log
+GET   /preguntas-ia-auto-retry
+GET   /preguntas-ia-auto-status
+GET   /publicaciones-ml
+GET   /listing-change-ack
+GET   /ordenes-ml
+GET   /mensajes-pack-orden
+GET   /payment-attempts
+GET   /admin/topic-fetches
+GET   /admin/ventas-detalle-web
+GET   /admin/ml-questions-pending
+GET   /admin/oauth-exchange
+GET   /admin/ml-accounts
+GET   /admin/ml-web-cookies
+
+================================================================================
+Para el detalle exacto de métodos HTTP, auth y query params, ver el código del
+handler citado o endpoints-cubiertos-hasta-hoy.md (Markdown).
+================================================================================

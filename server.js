@@ -3070,6 +3070,58 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /api/inventory/category-products — antes del handler general de inventario.
+  // Debe ejecutarse antes de handleInventoryApiRequest: ese handler devuelve true con 404
+  // en rutas desconocidas y corta el flujo; si este bloque quedara debajo, nunca se alcanzaría.
+  if (req.method === "GET") {
+    const invCatPath =
+      String(url.pathname || "")
+        .replace(/\/{2,}/g, "/")
+        .replace(/\/+$/, "") || "/";
+    if (
+      invCatPath === "/api/inventory/category-products" ||
+      invCatPath === "/api/inventory/category_products"
+    ) {
+      const secret = process.env.ADMIN_SECRET;
+      const headerOk = secret && req.headers["x-admin-secret"] === secret;
+      const queryOk = secret && url.searchParams.get("k") === secret;
+      if (!headerOk && !queryOk) {
+        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "Se requiere X-Admin-Secret" } }));
+        return;
+      }
+      try {
+        const { pool: pgPool } = require("./db");
+        const { rows } = await pgPool.query(
+          `SELECT id, category_descripcion, category_ml
+           FROM category_products
+           ORDER BY category_descripcion ASC, id ASC`
+        );
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ data: { categories: rows } }));
+      } catch (e) {
+        if (e && e.code === "42P01") {
+          res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(
+            JSON.stringify({
+              error: {
+                code: "SCHEMA_MISSING",
+                message:
+                  "Tabla category_products no existe. En el repo: npm run db:category-products",
+              },
+            })
+          );
+          return;
+        }
+        console.error("[inventory/category-products]", e.message);
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "Error interno" } }));
+      }
+      return;
+    }
+  }
+
+  // Handler general /api/inventory — va después del bloque category-products de arriba.
   if (
     req.method !== "GET" &&
     url.pathname.startsWith("/api/inventory") &&

@@ -93,6 +93,8 @@
     "db:catalog": "node scripts/run-motor-compatibility-migration.js",
     "db:customer-wallet": "node scripts/run-customer-wallet-migration.js",
     "db:crm-customers": "node scripts/run-crm-customers-migration.js",
+    "db:category-products": "node scripts/run-category-products-migration.js",
+    "import:category-products": "node scripts/import-category-products-csv.js",
     "db:search-indexes": "node scripts/run-search-indexes-migration.js",
     "db:lots-management": "node scripts/run-lot-management-migration.js",
     "db:lots-management-products-patch": "node scripts/run-lot-management-products-patch.js",

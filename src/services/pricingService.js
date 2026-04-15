@@ -388,6 +388,235 @@ async function runPricingUpdate(opts = {}) {
   return summary;
 }
 
+const PRICING_CHANNELS = new Set(['mostrador', 'whatsapp', 'ml', 'ecommerce']);
+
+const FINANCIAL_PATCH_KEYS = new Set([
+  'flete_nacional_pct',
+  'arancel_pct',
+  'gasto_admin_pct',
+  'storage_cost_pct',
+  'picking_packing_usd',
+  'iva_pct',
+  'igtf_pct',
+  'igtf_absorbed',
+  'spread_alert_pct',
+]);
+
+const POLICY_PATCH_KEYS = new Set(['markup_pct', 'commission_pct', 'max_discount_pct', 'is_active']);
+
+const PAYMENT_PATCH_KEYS = new Set([
+  'rate_source',
+  'applies_igtf',
+  'method_commission_pct',
+  'collection_currency',
+  'is_active',
+]);
+
+/** GET settings: financial_settings + políticas + métodos de cobro por empresa. */
+async function getPricingSettings(companyId) {
+  const cid = Number(companyId) || 1;
+  const [fs, pol, pay] = await Promise.all([
+    pool.query(`SELECT * FROM financial_settings WHERE company_id = $1 LIMIT 1`, [cid]),
+    pool.query(
+      `SELECT * FROM pricing_policies WHERE company_id = $1 ORDER BY channel ASC, level ASC, category_id NULLS LAST`,
+      [cid]
+    ),
+    pool.query(
+      `SELECT * FROM payment_method_settings WHERE company_id = $1 ORDER BY payment_code ASC`,
+      [cid]
+    ),
+  ]);
+  return {
+    financial_settings: fs.rows[0] || null,
+    pricing_policies: pol.rows,
+    payment_method_settings: pay.rows,
+  };
+}
+
+/** PATCH financial_settings (solo claves permitidas). */
+async function patchFinancialSettings(companyId, patch) {
+  const cid = Number(companyId) || 1;
+  const entries = Object.entries(patch || {}).filter(([k]) => FINANCIAL_PATCH_KEYS.has(k));
+  if (!entries.length) {
+    throw Object.assign(new Error('Sin campos válidos para actualizar'), { code: 'VALIDATION' });
+  }
+  const sets = [];
+  const vals = [];
+  let i = 1;
+  for (const [k, v] of entries) {
+    sets.push(`${k} = $${i++}`);
+    vals.push(v);
+  }
+  vals.push(cid);
+  const sql = `UPDATE financial_settings SET ${sets.join(', ')}, updated_at = NOW() WHERE company_id = $${i} RETURNING *`;
+  const { rows, rowCount } = await pool.query(sql, vals);
+  if (!rowCount) {
+    throw Object.assign(new Error(`financial_settings no existe para company_id=${cid}`), { code: 'NOT_FOUND' });
+  }
+  return rows[0];
+}
+
+/** PATCH política global por canal. */
+async function patchPricingPolicyGlobal(companyId, channel, patch) {
+  const cid = Number(companyId) || 1;
+  const ch = String(channel || '').trim();
+  if (!PRICING_CHANNELS.has(ch)) {
+    throw Object.assign(new Error(`channel inválido: ${ch}`), { code: 'VALIDATION' });
+  }
+  const entries = Object.entries(patch || {}).filter(([k]) => POLICY_PATCH_KEYS.has(k));
+  if (!entries.length) {
+    throw Object.assign(new Error('Sin campos válidos para actualizar'), { code: 'VALIDATION' });
+  }
+  const sets = [];
+  const vals = [];
+  let i = 1;
+  for (const [k, v] of entries) {
+    sets.push(`${k} = $${i++}`);
+    vals.push(v);
+  }
+  const wCompany = i++;
+  const wChannel = i++;
+  vals.push(cid, ch);
+  const sql = `UPDATE pricing_policies SET ${sets.join(', ')}, updated_at = NOW()
+     WHERE company_id = $${wCompany} AND channel = $${wChannel} AND level = 'global'
+     RETURNING *`;
+  const { rows, rowCount } = await pool.query(sql, vals);
+  if (!rowCount) {
+    throw Object.assign(new Error(`Sin política global para canal "${ch}"`), { code: 'NOT_FOUND' });
+  }
+  return rows[0];
+}
+
+/** PATCH payment_method_settings por código de método. */
+async function patchPaymentMethodSetting(companyId, paymentCode, patch) {
+  const cid = Number(companyId) || 1;
+  const code = String(paymentCode || '').trim();
+  if (!code) {
+    throw Object.assign(new Error('payment_code vacío'), { code: 'VALIDATION' });
+  }
+  const entries = Object.entries(patch || {}).filter(([k]) => PAYMENT_PATCH_KEYS.has(k));
+  if (!entries.length) {
+    throw Object.assign(new Error('Sin campos válidos para actualizar'), { code: 'VALIDATION' });
+  }
+  const sets = [];
+  const vals = [];
+  let i = 1;
+  for (const [k, v] of entries) {
+    sets.push(`${k} = $${i++}`);
+    vals.push(v);
+  }
+  const wCompany = i++;
+  const wCode = i++;
+  vals.push(cid, code);
+  const sql = `UPDATE payment_method_settings SET ${sets.join(', ')}, updated_at = NOW()
+     WHERE company_id = $${wCompany} AND payment_code = $${wCode}
+     RETURNING *`;
+  const { rows, rowCount } = await pool.query(sql, vals);
+  if (!rowCount) {
+    throw Object.assign(new Error(`Sin configuración para payment_code="${code}"`), { code: 'NOT_FOUND' });
+  }
+  return rows[0];
+}
+
+/**
+ * Estado de alerta de brecha: umbral en financial_settings (decimal 0–1)
+ * + última fila daily_exchange_rates (spread_* en escala % del DER, típ. 0–100).
+ */
+async function getSpreadAlertOverview(companyId) {
+  const cid = Number(companyId) || 1;
+  const [fsRes, derRes] = await Promise.all([
+    pool.query(`SELECT company_id, spread_alert_pct FROM financial_settings WHERE company_id = $1`, [cid]),
+    pool.query(
+      `SELECT rate_date, bcv_rate, binance_rate, adjusted_rate,
+              spread_current_pct, spread_alert_triggered, spread_alert_pct
+       FROM daily_exchange_rates
+       WHERE company_id = $1
+         AND rate_date <= CURRENT_DATE
+         AND bcv_rate IS NOT NULL AND bcv_rate > 0
+         AND binance_rate IS NOT NULL AND binance_rate > 0
+       ORDER BY rate_date DESC
+       LIMIT 1`,
+      [cid]
+    ),
+  ]);
+  return {
+    company_id: cid,
+    financial_spread_alert_pct: fsRes.rows[0] ? Number(fsRes.rows[0].spread_alert_pct) : null,
+    latest_daily_exchange_rate: derRes.rows[0] || null,
+  };
+}
+
+/**
+ * Listado paginado de product_prices con SKU/nombre del producto.
+ * @param {object} opts
+ * @param {number} [opts.companyId=1]
+ * @param {string} [opts.channel]
+ * @param {string} [opts.search]
+ * @param {number} [opts.page=1]
+ * @param {number} [opts.limit=50]
+ */
+async function listProductPrices(opts = {}) {
+  const companyId = Number(opts.companyId) || 1;
+  const page = Math.max(1, parseInt(String(opts.page || 1), 10) || 1);
+  const limit = Math.min(Math.max(1, parseInt(String(opts.limit || 50), 10) || 50), 200);
+  const offset = (page - 1) * limit;
+
+  const channelRaw = opts.channel != null && String(opts.channel).trim() !== '' ? String(opts.channel).trim() : null;
+  if (channelRaw && !PRICING_CHANNELS.has(channelRaw)) {
+    throw Object.assign(new Error(`channel inválido: ${channelRaw}`), { code: 'VALIDATION' });
+  }
+
+  const searchRaw = opts.search != null && String(opts.search).trim() !== '' ? String(opts.search).trim() : null;
+
+  const params = [companyId];
+  let where = 'p.company_id = $1';
+
+  if (channelRaw) {
+    params.push(channelRaw);
+    where += ` AND pp.channel = $${params.length}`;
+  }
+  if (searchRaw) {
+    params.push(`%${searchRaw}%`);
+    where += ` AND (p.sku ILIKE $${params.length} OR p.name ILIKE $${params.length})`;
+  }
+
+  const listSql = `
+    SELECT
+      pp.id, pp.channel, pp.price_usd,
+      pp.price_bs_bcv, pp.price_bs_binance, pp.price_bs_ajuste,
+      pp.landed_cost_usd, pp.costo_operativo_usd,
+      pp.margin_usd, pp.margin_pct,
+      pp.bcv_rate, pp.binance_rate, pp.adjusted_rate,
+      pp.rate_date, pp.calculated_at,
+      p.sku, p.name
+    FROM product_prices pp
+    JOIN products p ON p.id = pp.product_id
+    WHERE ${where}
+    ORDER BY p.sku ASC, pp.channel ASC
+    LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+  `;
+  const countSql = `
+    SELECT COUNT(*)::bigint AS total
+    FROM product_prices pp
+    JOIN products p ON p.id = pp.product_id
+    WHERE ${where}
+  `;
+
+  const listParams = [...params, limit, offset];
+  const [{ rows }, countRes] = await Promise.all([
+    pool.query(listSql, listParams),
+    pool.query(countSql, params),
+  ]);
+
+  const total = Number(countRes.rows[0].total) || 0;
+  const pages = limit > 0 ? Math.ceil(total / limit) : 0;
+
+  return {
+    prices: rows,
+    pagination: { page, limit, total, pages },
+  };
+}
+
 /** @deprecated usar getTodayRates */
 async function getLatestRatesRow(companyId, q = pool) {
   const r = await getTodayRates(companyId, q);
@@ -408,5 +637,11 @@ module.exports = {
   computeOperationalCost,
   calculateChannelPrice,
   runPricingUpdate,
+  listProductPrices,
+  getPricingSettings,
+  patchFinancialSettings,
+  patchPricingPolicyGlobal,
+  patchPaymentMethodSetting,
+  getSpreadAlertOverview,
   getLatestRatesRow,
 };

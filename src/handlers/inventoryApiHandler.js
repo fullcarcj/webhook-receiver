@@ -50,6 +50,15 @@ function parsePositiveIntId(raw) {
   return n;
 }
 
+/** company_id desde query (?company_id=); default 1; inválido → null */
+function parseCompanyIdQuery(url, defaultVal = 1) {
+  const raw = url.searchParams.get('company_id');
+  if (raw == null || raw === '') return defaultVal;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return n;
+}
+
 // Validación de cuerpos
 const StockAdjustSchema = z.object({
   qty_change:   z.number().refine(v => v !== 0, { message: 'qty_change no puede ser 0' }),
@@ -110,6 +119,42 @@ const PricingRunSchema = z.object({
   channel: z.enum(['mostrador', 'whatsapp', 'ml', 'ecommerce']),
   company_id: z.number().int().positive().optional(),
 }).strict();
+
+const FinancialSettingsPatchSchema = z
+  .object({
+    flete_nacional_pct: z.number().min(0).max(1).optional(),
+    arancel_pct: z.number().min(0).max(1).optional(),
+    gasto_admin_pct: z.number().min(0).max(1).optional(),
+    storage_cost_pct: z.number().min(0).max(1).optional(),
+    picking_packing_usd: z.number().min(0).optional(),
+    iva_pct: z.number().min(0).max(1).optional(),
+    igtf_pct: z.number().min(0).max(0.999).optional(),
+    igtf_absorbed: z.boolean().optional(),
+    spread_alert_pct: z.number().min(0).max(1).optional(),
+  })
+  .strict()
+  .refine((d) => Object.keys(d).length > 0, { message: 'Se requiere al menos un campo' });
+
+const PolicyChannelPatchSchema = z
+  .object({
+    markup_pct: z.number().min(0).max(10).optional(),
+    commission_pct: z.number().min(0).max(0.999).optional(),
+    max_discount_pct: z.number().min(0).max(0.999).optional(),
+    is_active: z.boolean().optional(),
+  })
+  .strict()
+  .refine((d) => Object.keys(d).length > 0, { message: 'Se requiere al menos un campo' });
+
+const PaymentSettingPatchSchema = z
+  .object({
+    rate_source: z.enum(['bcv', 'binance', 'adjusted']).optional(),
+    applies_igtf: z.boolean().optional(),
+    method_commission_pct: z.number().min(0).max(0.999).optional(),
+    collection_currency: z.enum(['USD', 'VES', 'USDT']).optional(),
+    is_active: z.boolean().optional(),
+  })
+  .strict()
+  .refine((d) => Object.keys(d).length > 0, { message: 'Se requiere al menos un campo' });
 
 const CreatePOSchema = z.object({
   supplier_id:  z.number().int().positive().optional(),
@@ -205,32 +250,143 @@ async function handleInventoryApiRequest(req, res, url) {
       return ok(res, { stockouts: data }), true;
     }
 
-    // POST /api/inventory/pricing/run — tasas del día + políticas → product_prices (un canal por corrida)
-    if (method === 'POST' && pathname === '/api/inventory/pricing/run') {
-      const body = await readBody(req);
-      const parsed = PricingRunSchema.safeParse(body);
-      if (!parsed.success) {
-        return fail(res, 'VALIDATION', parsed.error.issues[0]?.message || 'Body inválido', 400), true;
+    // ── /api/inventory/pricing/* (todas bajo el mismo prefijo) ─────────────
+    if (parts[2] === 'pricing') {
+      const companyId = parseCompanyIdQuery(url, 1);
+      if (companyId == null) {
+        return fail(res, 'VALIDATION', 'company_id inválido', 400), true;
       }
-      const companyId = parsed.data.company_id ?? 1;
-      try {
-        const summary = await pricingService.runPricingUpdate({
-          companyId,
-          channels: [parsed.data.channel],
-        });
-        return ok(res, summary), true;
-      } catch (e) {
-        if (e instanceof pricingService.PricingError) {
-          const code = e.code;
-          const status =
-            code === pricingService.PRICING_ERROR_CODES.NO_RATE_TODAY ||
-            code === pricingService.PRICING_ERROR_CODES.NO_FINANCIAL_SETTINGS
-              ? 503
-              : 400;
-          return fail(res, code, e.message || code, status), true;
+
+      // GET /api/inventory/pricing/settings
+      if (method === 'GET' && parts[3] === 'settings' && !parts[4]) {
+        const data = await pricingService.getPricingSettings(companyId);
+        return ok(res, data), true;
+      }
+
+      // PATCH /api/inventory/pricing/settings/financial
+      if (method === 'PATCH' && parts[3] === 'settings' && parts[4] === 'financial' && !parts[5]) {
+        const body = await readBody(req);
+        const parsed = FinancialSettingsPatchSchema.safeParse(body);
+        if (!parsed.success) {
+          return fail(res, 'VALIDATION', parsed.error.issues[0]?.message || 'Body inválido', 400), true;
         }
-        throw e;
+        try {
+          const row = await pricingService.patchFinancialSettings(companyId, parsed.data);
+          return ok(res, { financial_settings: row }), true;
+        } catch (e) {
+          if (e && e.code === 'NOT_FOUND') {
+            return fail(res, 'NOT_FOUND', e.message, 404), true;
+          }
+          if (e && e.code === 'VALIDATION') {
+            return fail(res, 'VALIDATION', e.message, 400), true;
+          }
+          throw e;
+        }
       }
+
+      // PATCH /api/inventory/pricing/settings/policy/:channel
+      if (method === 'PATCH' && parts[3] === 'settings' && parts[4] === 'policy' && parts[5]) {
+        const channel = decodeURIComponent(parts[5]);
+        const body = await readBody(req);
+        const parsed = PolicyChannelPatchSchema.safeParse(body);
+        if (!parsed.success) {
+          return fail(res, 'VALIDATION', parsed.error.issues[0]?.message || 'Body inválido', 400), true;
+        }
+        try {
+          const row = await pricingService.patchPricingPolicyGlobal(companyId, channel, parsed.data);
+          return ok(res, { pricing_policy: row }), true;
+        } catch (e) {
+          if (e && e.code === 'NOT_FOUND') {
+            return fail(res, 'NOT_FOUND', e.message, 404), true;
+          }
+          if (e && e.code === 'VALIDATION') {
+            return fail(res, 'VALIDATION', e.message, 400), true;
+          }
+          throw e;
+        }
+      }
+
+      // PATCH /api/inventory/pricing/settings/payment/:paymentCode
+      if (method === 'PATCH' && parts[3] === 'settings' && parts[4] === 'payment' && parts[5]) {
+        const paymentCode = decodeURIComponent(parts[5]);
+        const body = await readBody(req);
+        const parsed = PaymentSettingPatchSchema.safeParse(body);
+        if (!parsed.success) {
+          return fail(res, 'VALIDATION', parsed.error.issues[0]?.message || 'Body inválido', 400), true;
+        }
+        try {
+          const row = await pricingService.patchPaymentMethodSetting(companyId, paymentCode, parsed.data);
+          return ok(res, { payment_method_setting: row }), true;
+        } catch (e) {
+          if (e && e.code === 'NOT_FOUND') {
+            return fail(res, 'NOT_FOUND', e.message, 404), true;
+          }
+          if (e && e.code === 'VALIDATION') {
+            return fail(res, 'VALIDATION', e.message, 400), true;
+          }
+          throw e;
+        }
+      }
+
+      // GET /api/inventory/pricing/spread-alert
+      if (method === 'GET' && parts[3] === 'spread-alert' && !parts[4]) {
+        const data = await pricingService.getSpreadAlertOverview(companyId);
+        return ok(res, data), true;
+      }
+
+      // GET /api/inventory/pricing/prices — listado paginado
+      if (method === 'GET' && parts[3] === 'prices' && !parts[4]) {
+        const sp = url.searchParams;
+        const channel = sp.get('channel')?.trim() || undefined;
+        const search = sp.get('search')?.trim() || undefined;
+        const page = sp.get('page') || '1';
+        const limit = sp.get('limit') || '50';
+        try {
+          const data = await pricingService.listProductPrices({
+            companyId,
+            channel,
+            search,
+            page,
+            limit,
+          });
+          return ok(res, data), true;
+        } catch (e) {
+          if (e && e.code === 'VALIDATION') {
+            return fail(res, 'VALIDATION', e.message || 'Validación fallida', 400), true;
+          }
+          throw e;
+        }
+      }
+
+      // POST /api/inventory/pricing/run
+      if (method === 'POST' && parts[3] === 'run' && !parts[4]) {
+        const body = await readBody(req);
+        const parsed = PricingRunSchema.safeParse(body);
+        if (!parsed.success) {
+          return fail(res, 'VALIDATION', parsed.error.issues[0]?.message || 'Body inválido', 400), true;
+        }
+        const runCompanyId = parsed.data.company_id ?? 1;
+        try {
+          const summary = await pricingService.runPricingUpdate({
+            companyId: runCompanyId,
+            channels: [parsed.data.channel],
+          });
+          return ok(res, summary), true;
+        } catch (e) {
+          if (e instanceof pricingService.PricingError) {
+            const code = e.code;
+            const status =
+              code === pricingService.PRICING_ERROR_CODES.NO_RATE_TODAY ||
+              code === pricingService.PRICING_ERROR_CODES.NO_FINANCIAL_SETTINGS
+                ? 503
+                : 400;
+            return fail(res, code, e.message || code, status), true;
+          }
+          throw e;
+        }
+      }
+
+      return fail(res, 'NOT_FOUND', `Ruta no encontrada: ${method} ${pathname}`, 404), true;
     }
 
     // GET /api/inventory/category-products (respaldo; en server.js debe ir antes de este handler).

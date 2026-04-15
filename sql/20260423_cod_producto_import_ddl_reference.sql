@@ -1,0 +1,12 @@
+-- Referencia DDL para importación CSV cod_producto → products + product_oem_codes
+-- Las tablas suelen existir ya; ejecutar migraciones previas si faltan columnas.
+--
+-- npm run db:inventory
+-- npm run db:sku-prefixes
+-- npm run db:category-products
+-- npm run db:product-subcategories
+-- npm run db:crm && npm run db:sku-prefixes   (crm_vehicle_brands.sku_prefix)
+-- npm run db:product-oem-codes
+--
+-- product_oem_codes: columna oem_normalized = OEM "limpio" (alfanumérico mayúsculas);
+--   equivale al concepto oem_clean del flujo de importación.

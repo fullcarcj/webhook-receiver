@@ -11,10 +11,10 @@ function yearRange(row) {
 
 async function listBrandsWithCounts() {
   const { rows } = await pool.query(
-    `SELECT b.id, b.name, COUNT(m.id)::int AS models_count
+    `SELECT b.id, b.name, b.sku_prefix, COUNT(m.id)::int AS models_count
      FROM crm_vehicle_brands b
      LEFT JOIN crm_vehicle_models m ON m.brand_id = b.id
-     GROUP BY b.id
+     GROUP BY b.id, b.name, b.sku_prefix
      ORDER BY b.name ASC`
   );
   return rows;

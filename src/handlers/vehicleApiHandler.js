@@ -6,6 +6,7 @@ const { timingSafeCompare } = require("../services/currencyService");
 const { safeParse } = require("../middleware/validateCrm");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const vehicleService = require("../services/vehicleService");
+const skuPrefixService = require("../services/skuPrefixService");
 const { pool } = require("../../db");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info", name: "vehicleApi" });
@@ -46,7 +47,11 @@ function metaTs() {
   return { timestamp: new Date().toISOString() };
 }
 
-const postBrandSchema = z.object({ name: z.string().min(2).max(100) });
+const postBrandSchema = z.object({
+  name: z.string().min(2).max(100),
+  sku_prefix: z
+    .preprocess((v) => (v === "" || v === undefined || v === null ? undefined : String(v).toUpperCase().trim()), z.string().length(3).regex(/^[A-Z]{3}$/).optional()),
+});
 const postModelSchema = z.object({
   brand_id: z.number().int().positive(),
   name: z.string().min(2).max(100),
@@ -96,18 +101,61 @@ async function handleVehicleApiRequest(req, res, url) {
         writeJson(res, 422, { error: "validation_error", details: parsed.error.issues });
         return true;
       }
+      const client = await pool.connect();
       try {
-        const { rows } = await pool.query(
-          `INSERT INTO crm_vehicle_brands (name) VALUES ($1) RETURNING id, name`,
-          [parsed.data.name.trim()]
+        await client.query("BEGIN");
+        let resolved;
+        try {
+          resolved = await skuPrefixService.resolveSkuPrefixForSave({
+            table: "crm_vehicle_brands",
+            name: parsed.data.name.trim(),
+            manualPrefix: parsed.data.sku_prefix,
+            client,
+          });
+        } catch (pe) {
+          await client.query("ROLLBACK");
+          if (pe && pe.code === "SKU_PREFIX_CONFLICT") {
+            writeJson(res, 409, {
+              error: "SKU_PREFIX_CONFLICT",
+              message: pe.message,
+              suggested_prefix: pe.suggested_prefix,
+            });
+            return true;
+          }
+          if (pe && pe.code === "INVALID_SKU_PREFIX_FORMAT") {
+            writeJson(res, 422, { error: "invalid_sku_prefix", message: pe.message });
+            return true;
+          }
+          throw pe;
+        }
+        const { rows } = await client.query(
+          `INSERT INTO crm_vehicle_brands (name, sku_prefix) VALUES ($1, $2) RETURNING id, name, sku_prefix`,
+          [parsed.data.name.trim(), resolved.sku_prefix]
         );
-        writeJson(res, 201, { data: rows[0], meta: metaTs() });
+        await client.query("COMMIT");
+        writeJson(res, 201, {
+          data: {
+            ...rows[0],
+            prefix_meta: {
+              source: resolved.source,
+              suggested_mnemonic: resolved.suggested_mnemonic,
+            },
+          },
+          meta: metaTs(),
+        });
       } catch (e) {
+        await client.query("ROLLBACK").catch(() => {});
         if (e && e.code === "23505") {
           writeJson(res, 409, { error: "BRAND_EXISTS" });
           return true;
         }
+        if (e && e.code === "42703") {
+          writeJson(res, 503, { error: "schema_missing", detail: "Columna sku_prefix: npm run db:sku-prefixes" });
+          return true;
+        }
         throw e;
+      } finally {
+        client.release();
       }
       return true;
     }

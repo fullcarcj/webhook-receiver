@@ -7,5 +7,6 @@ banesco-debug/
 banesco-export-debug/
 log.txt
 wasender-webhook.log
+scripts/assign-product-identity-errors.log
 node_modules/
 programa_dos/

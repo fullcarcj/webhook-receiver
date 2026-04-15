@@ -2,6 +2,7 @@
 const { pool } = require('../../db');
 const pino = require('pino');
 const log = pino({ level: process.env.LOG_LEVEL || 'info', name: 'inventory_service' });
+const { allocateNextSku } = require('./skuGeneratorService');
 
 function maybeSyncMlPublicationState(productId, qtyBefore, qtyAfter) {
   if (qtyAfter <= 0 && qtyBefore > 0) {
@@ -107,6 +108,7 @@ async function getProductById(id) {
   const { rows } = await pool.query(`
     SELECT
       p.id, p.sku, p.name, p.description, p.category, p.brand,
+      p.manufacturer_id,
       p.unit_price_usd, p.source, p.source_id, p.is_active, p.created_at, p.updated_at,
       i.stock_qty, i.stock_min, i.stock_max, i.stock_alert,
       i.lead_time_days, i.safety_factor, i.supplier_id, i.last_purchase_at,
@@ -126,6 +128,9 @@ async function getProductById(id) {
  * @param {object} patch — campos opcionales: name, description, category, brand, unit_price_usd, stock_qty, stock_min
  */
 async function updateProductById(productId, patch) {
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'sku')) {
+    throw Object.assign(new Error('El SKU no puede modificarse tras crear el producto'), { code: 'SKU_IMMUTABLE' });
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -193,6 +198,239 @@ async function updateProductById(productId, patch) {
     return getProductById(productId);
   } catch (err) {
     await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+function normalizeOemForProduct(s) {
+  return String(s ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
+/**
+ * Crea producto + inventario + OEM en una sola transacción; el SKU se reserva con `allocateNextSku`.
+ * @param {object} opts
+ * @param {number} opts.subcategory_id — `product_subcategories.id`
+ * @param {number} opts.vehicle_brand_id — `crm_vehicle_brands.id` (tramo MMM del SKU)
+ * @param {number} opts.manufacturer_id — `manufacturers.id` (fabricante del repuesto → products.manufacturer_id)
+ * @param {string} opts.oem_code — OEM tal cual; se guarda en product_oem_codes y se normaliza para duplicados
+ * @param {string} opts.name
+ * @param {string|null} [opts.description]
+ * @param {number} [opts.unit_price_usd]
+ * @param {number} [opts.stock_qty]
+ * @param {number} [opts.stock_min]
+ * @param {number} [opts.company_id] — default 1
+ */
+async function createProductWithAllocatedSku(opts) {
+  const sid = Number(opts.subcategory_id);
+  const vehicleBrandId = Number(opts.vehicle_brand_id);
+  const manufacturerId = Number(opts.manufacturer_id);
+  if (!Number.isInteger(sid) || sid <= 0) {
+    throw Object.assign(new Error('subcategory_id debe ser un entero positivo'), { code: 'INVALID_IDS' });
+  }
+  if (!Number.isInteger(vehicleBrandId) || vehicleBrandId <= 0) {
+    throw Object.assign(new Error('vehicle_brand_id debe ser un entero positivo'), { code: 'INVALID_IDS' });
+  }
+  if (!Number.isInteger(manufacturerId) || manufacturerId <= 0) {
+    throw Object.assign(new Error('manufacturer_id debe ser un entero positivo'), { code: 'INVALID_IDS' });
+  }
+  const name = String(opts.name || '').trim();
+  if (!name.length) {
+    throw Object.assign(new Error('name es obligatorio'), { code: 'VALIDATION' });
+  }
+  const oemOriginal = String(opts.oem_code ?? '').trim();
+  const oemNormalized = normalizeOemForProduct(oemOriginal);
+  if (!oemOriginal.length) {
+    throw Object.assign(new Error('Debe ingresar al menos un código OEM o de fabricante'), { code: 'VALIDATION' });
+  }
+  if (!oemNormalized.length) {
+    throw Object.assign(new Error('Código OEM inválido'), { code: 'OEM_INVALID' });
+  }
+  const description = opts.description === undefined || opts.description === null
+    ? null
+    : String(opts.description);
+  const unitPriceUsd = opts.unit_price_usd != null && opts.unit_price_usd !== ''
+    ? Number(opts.unit_price_usd)
+    : 0;
+  const stockQty = opts.stock_qty != null && opts.stock_qty !== ''
+    ? Number(opts.stock_qty)
+    : 0;
+  const stockMin = opts.stock_min != null && opts.stock_min !== ''
+    ? Number(opts.stock_min)
+    : 0;
+  const companyId = opts.company_id != null && opts.company_id !== ''
+    ? Number(opts.company_id)
+    : 1;
+
+  if (!Number.isFinite(unitPriceUsd) || unitPriceUsd < 0) {
+    throw Object.assign(new Error('unit_price_usd inválido'), { code: 'VALIDATION' });
+  }
+  if (!Number.isFinite(stockQty) || stockQty < 0) {
+    throw Object.assign(new Error('stock_qty inválido'), { code: 'VALIDATION' });
+  }
+  if (!Number.isFinite(stockMin) || stockMin < 0) {
+    throw Object.assign(new Error('stock_min inválido'), { code: 'VALIDATION' });
+  }
+  if (!Number.isInteger(companyId) || companyId <= 0) {
+    throw Object.assign(new Error('company_id inválido'), { code: 'VALIDATION' });
+  }
+
+  const { rows: subRows } = await pool.query(
+    `SELECT category_id FROM product_subcategories WHERE id = $1`,
+    [sid]
+  );
+  if (!subRows.length) {
+    throw Object.assign(new Error('Subcategoría no encontrada'), { code: 'SUBCATEGORY_NOT_FOUND' });
+  }
+  const derivedCategoryId = subRows[0].category_id;
+
+  const { rows: mfrRows } = await pool.query(
+    `SELECT id FROM manufacturers WHERE id = $1`,
+    [manufacturerId]
+  );
+  if (!mfrRows.length) {
+    throw Object.assign(new Error('Fabricante no encontrado'), { code: 'MANUFACTURER_NOT_FOUND' });
+  }
+
+  const { rows: dupRows } = await pool.query(
+    `
+    SELECT poc.product_id, p.sku, m.name AS manufacturer
+    FROM product_oem_codes poc
+    JOIN products p ON p.id = poc.product_id
+    JOIN manufacturers m ON m.id = p.manufacturer_id
+    WHERE poc.oem_normalized = $1 AND p.manufacturer_id = $2
+    LIMIT 1
+    `,
+    [oemNormalized, manufacturerId]
+  );
+  if (dupRows.length) {
+    const r = dupRows[0];
+    const mname = r.manufacturer != null ? String(r.manufacturer) : 'el fabricante';
+    throw Object.assign(
+      new Error(`El código ${oemOriginal} ya existe para ${mname}. SKU: ${r.sku}`),
+      { code: 'DUPLICATE_OEM' }
+    );
+  }
+
+  const { rows: altRows } = await pool.query(
+    `
+    SELECT p.sku, m.name AS manufacturer
+    FROM product_oem_codes poc
+    JOIN products p ON p.id = poc.product_id
+    JOIN manufacturers m ON m.id = p.manufacturer_id
+    WHERE poc.oem_normalized = $1 AND p.manufacturer_id <> $2
+    `,
+    [oemNormalized, manufacturerId]
+  );
+  const warnings = altRows.map((r) => {
+    const mname = r.manufacturer != null ? String(r.manufacturer) : 'otro fabricante';
+    return `OEM ${oemOriginal} también registrado para ${mname} (SKU: ${r.sku})`;
+  });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const sku = await allocateNextSku(client, sid, vehicleBrandId);
+
+    const { rows: metaRows } = await client.query(
+      `
+      SELECT
+        ps.id AS subcategory_id,
+        ps.category_id,
+        cp.category_descripcion,
+        b.id AS vehicle_brand_id,
+        b.name AS vehicle_brand_name
+      FROM product_subcategories ps
+      JOIN category_products cp ON cp.id = ps.category_id
+      JOIN crm_vehicle_brands b ON b.id = $2
+      WHERE ps.id = $1
+      `,
+      [sid, vehicleBrandId]
+    );
+    if (!metaRows.length) {
+      throw Object.assign(new Error('No se pudo resolver catálogo para el producto'), { code: 'PREFIX_LOOKUP_FAILED' });
+    }
+    const meta = metaRows[0];
+    const categoryText = meta.category_descripcion != null ? String(meta.category_descripcion) : null;
+    const vehicleBrandText = meta.vehicle_brand_name != null ? String(meta.vehicle_brand_name) : null;
+    const categoryIdForInsert = meta.category_id != null ? Number(meta.category_id) : derivedCategoryId;
+
+    const stockAlert = stockQty <= stockMin;
+
+    let insProd;
+    try {
+      insProd = await client.query(
+        `
+        INSERT INTO products (
+          sku, name, description, category, brand,
+          unit_price_usd, precio_usd, source, is_active,
+          subcategory_id, brand_id, manufacturer_id, category_id, company_id
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $6, 'manual', TRUE,
+          $7, $8, $9, $10, $11
+        )
+        RETURNING id
+        `,
+        [
+          sku,
+          name,
+          description,
+          categoryText,
+          vehicleBrandText,
+          unitPriceUsd,
+          sid,
+          vehicleBrandId,
+          manufacturerId,
+          categoryIdForInsert,
+          companyId,
+        ]
+      );
+    } catch (insErr) {
+      if (insErr && insErr.code === '23505') {
+        const dup = Object.assign(
+          new Error('Conflicto de SKU único; reintenta o revisa prefijos'),
+          { code: 'DUPLICATE_SKU' }
+        );
+        throw dup;
+      }
+      throw insErr;
+    }
+
+    const productId = insProd.rows[0].id;
+
+    await client.query(
+      `
+      INSERT INTO inventory (product_id, stock_qty, stock_min, stock_alert)
+      VALUES ($1, $2, $3, $4)
+      `,
+      [productId, stockQty, stockMin, stockAlert]
+    );
+
+    await client.query(
+      `
+      INSERT INTO product_oem_codes (product_id, oem_original, oem_normalized, source)
+      VALUES ($1, $2, $3, 'manual_creation')
+      `,
+      [productId, oemOriginal, oemNormalized]
+    );
+
+    await client.query('COMMIT');
+    const row = await getProductById(productId);
+    return {
+      ...row,
+      manufacturer_id: manufacturerId,
+      oem_original: oemOriginal,
+      oem_normalized: oemNormalized,
+      warnings,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     throw err;
   } finally {
     client.release();
@@ -345,6 +583,28 @@ async function listCategoryProducts() {
     ORDER BY category_descripcion ASC, id ASC
   `);
   return { categories: rows };
+}
+
+/**
+ * Subcategorías de catálogo bajo un category_products.id.
+ * @param {number} categoryId
+ */
+async function listProductSubcategoriesByCategoryId(categoryId) {
+  const { rows } = await pool.query(
+    `
+    SELECT
+      id,
+      category_id,
+      name AS subcategory_descripcion,
+      sort_order,
+      TRUE AS is_active
+    FROM product_subcategories
+    WHERE category_id = $1
+    ORDER BY sort_order ASC, name ASC
+    `,
+    [categoryId]
+  );
+  return { subcategories: rows };
 }
 
 // ── Proyecciones ─────────────────────────────────────────────────────────────
@@ -573,6 +833,40 @@ async function updatePurchaseOrderStatus(id, { status, approved_by, notes }) {
   }
 }
 
+// ── Fabricantes (repuesto) ───────────────────────────────────────────────────
+
+/**
+ * Listado de `manufacturers` para formularios (p. ej. alta de producto).
+ * @param {{ q?: string, limit?: number }} [opts]
+ */
+async function listManufacturers({ q, limit = 500 } = {}) {
+  const lim = Math.min(Math.max(Number(limit) || 500, 1), 2000);
+  const search = q != null && String(q).trim() !== '' ? String(q).trim() : null;
+  if (search) {
+    const { rows } = await pool.query(
+      `
+      SELECT id, name, created_at
+      FROM manufacturers
+      WHERE name ILIKE $1
+      ORDER BY name ASC
+      LIMIT $2
+      `,
+      [`%${search}%`, lim]
+    );
+    return rows;
+  }
+  const { rows } = await pool.query(
+    `
+    SELECT id, name, created_at
+    FROM manufacturers
+    ORDER BY name ASC
+    LIMIT $1
+    `,
+    [lim]
+  );
+  return rows;
+}
+
 // ── Proveedores ──────────────────────────────────────────────────────────────
 
 async function listSuppliers() {
@@ -687,6 +981,7 @@ module.exports = {
   deactivateProduct,
   getProductById,
   updateProductById,
+  createProductWithAllocatedSku,
   searchProducts,
   getAlerts,
   getImmStockouts,
@@ -703,5 +998,7 @@ module.exports = {
   createSupplier,
   updateSupplier,
   getInventoryStats,
+  listManufacturers,
   listCategoryProducts,
+  listProductSubcategoriesByCategoryId,
 };

@@ -9,6 +9,11 @@
  * PRODUCT_IMAGE_EXT: extensión (default .webp).
  * FILEMAKER_INVENTARIO_PRODUCTOS_SECRET: POST desde FileMaker a /filemaker/inventario-productos o /mensajes-inventario-productos (mismo patrón que FILEMAKER_TIPO_G_SECRET).
  * firebase-key.json: service account para scripts (p. ej. npm run upload-firebase-webp); no subir a git.
+ * Inventario — fabricantes: GET /api/inventory/manufacturers (admin) lista la tabla `manufacturers` en PostgreSQL.
+ * Si el listado debe resolverse contra otro backend, define INVENTORY_MANUFACTURERS_PROXY_URL como URL absoluta
+ * del endpoint remoto (incluye path, p. ej. https://otro-servicio.com/api/v1/fabricantes). El servidor hace GET
+ * a esa URL y devuelve el mismo status y cuerpo JSON. Cabecera al upstream: X-Admin-Secret desde
+ * INVENTORY_MANUFACTURERS_PROXY_SECRET si existe; si no, la misma cabecera del cliente o ADMIN_SECRET.
  * FRONTEND_API_KEY: solo lectura GET /api/v1/catalog (cabecera X-API-KEY); no sustituye ADMIN_SECRET.
  * ADMIN_SECRET_QUERY_AUTH: si 0 o false, ensureAdmin (src/middleware/adminAuth.js) solo acepta cabecera X-Admin-Secret; si no se define u otro valor, también ?k= / ?secret= (mismo ADMIN_SECRET) para GET en navegador y monitores.
  * Ventas globales GET /api/sales: sin tablas → error schema_missing; ejecutar npm run db:sales-all (incluye `completed` y `customers.phone_2`) contra DATABASE_URL — scripts usan driver pg (scripts/run-sql-file-pg.js), no requieren psql en PATH.

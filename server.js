@@ -3119,9 +3119,73 @@ const server = http.createServer(async (req, res) => {
       }
       return;
     }
+    // GET /api/inventory/subcategories?category_id= — mismo criterio que category-products (antes del handler general).
+    if (invCatPath === "/api/inventory/subcategories") {
+      const secret = process.env.ADMIN_SECRET;
+      const headerOk = secret && req.headers["x-admin-secret"] === secret;
+      const queryOk = secret && url.searchParams.get("k") === secret;
+      if (!headerOk && !queryOk) {
+        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            error: { code: "UNAUTHORIZED", message: "Falta o es inválido X-Admin-Secret" },
+          })
+        );
+        return;
+      }
+      const raw = url.searchParams.get("category_id");
+      const categoryId = raw != null && String(raw).trim() !== "" ? Number(raw) : NaN;
+      if (!Number.isInteger(categoryId) || categoryId <= 0) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            error: {
+              code: "INVALID_CATEGORY_ID",
+              message: "category_id es obligatorio y debe ser numérico",
+            },
+          })
+        );
+        return;
+      }
+      try {
+        const { pool: pgPool } = require("./db");
+        const { rows } = await pgPool.query(
+          `SELECT
+             id,
+             category_id,
+             name AS subcategory_descripcion,
+             sort_order,
+             TRUE AS is_active
+           FROM product_subcategories
+           WHERE category_id = $1
+           ORDER BY sort_order ASC, name ASC`,
+          [categoryId]
+        );
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ data: { subcategories: rows } }));
+      } catch (e) {
+        if (e && e.code === "42P01") {
+          res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(
+            JSON.stringify({
+              error: {
+                code: "TABLE_NOT_FOUND",
+                message:
+                  "No existe la tabla product_subcategories. Ejecuta npm run db:product-subcategories.",
+              },
+            })
+          );
+          return;
+        }
+        console.error("[inventory/subcategories]", e.message);
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "Error interno" } }));
+      }
+      return;
+    }
   }
 
-  // Handler general /api/inventory — va después del bloque category-products de arriba.
+  // Handler general /api/inventory — va después de category-products / subcategories arriba.
   if (
     req.method !== "GET" &&
     url.pathname.startsWith("/api/inventory") &&

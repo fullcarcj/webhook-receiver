@@ -9,7 +9,34 @@ const { customersHasPhone2Column } = require("../utils/customersPhone2");
 const { salesOrdersHasLifecycleColumns } = require("../utils/salesOrdersLifecycle");
 const bundleService = require("./bundleService");
 
-const MANUAL_SOURCES = new Set(["mostrador", "social_media"]);
+const MANUAL_SOURCES = new Set(["mostrador", "social_media", "ecommerce", "fuerza_ventas"]);
+
+/** Mapa source → channel_id (catálogo sales_channels) */
+const SOURCE_TO_CHANNEL = {
+  mostrador:      1,
+  social_media:   2,
+  mercadolibre:   3,
+  ecommerce:      4,
+  fuerza_ventas:  5,
+};
+
+/** payment_status inicial por canal (post-migración) */
+const CHANNEL_PAYMENT_STATUS = {
+  1: 'not_required', // MOSTRADOR: cobrado en caja
+  2: 'pending',      // WHATSAPP: transferencia diferida
+  3: 'pending',      // ML: esperar payment_approved webhook
+  4: 'pending',      // ECOMMERCE: esperar webhook pasarela
+  5: 'pending',      // FUERZA_VENTAS: crédito o efectivo diferido
+};
+
+/** fulfillment_status inicial por canal */
+const CHANNEL_FULFILLMENT_STATUS = {
+  1: 'not_required', // MOSTRADOR: retiro en el acto
+  2: 'pending',
+  3: 'pending',
+  4: 'pending',
+  5: 'pending',
+};
 const DEFAULT_ML_ACTIVE_MAX_DAYS = 10;
 
 function resolveMlActiveMaxDays() {
@@ -268,6 +295,8 @@ async function fetchOrderItems(client, salesOrderId) {
  */
 async function createOrder({
   source,
+  channelId,
+  sellerId,
   customerId,
   items,
   notes,
@@ -287,6 +316,29 @@ async function createOrder({
     e.code = "BAD_REQUEST";
     throw e;
   }
+
+  // Inferir channel_id desde source si no se provee explícitamente
+  const resolvedChannelId = channelId != null
+    ? Number(channelId)
+    : (SOURCE_TO_CHANNEL[source] ?? null);
+
+  // CH-05 fuerza_ventas: seller_id obligatorio
+  if (source === 'fuerza_ventas' && !sellerId) {
+    const e = new Error("seller_id es obligatorio para órdenes de fuerza_ventas (CH-05)");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  // CH-02 whatsapp/redes: cliente obligatorio
+  if (source === 'social_media' && !customerId) {
+    const e = new Error("customer_id es obligatorio para órdenes de WhatsApp/redes (CH-02)");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  const resolvedSellerId = sellerId != null ? Number(sellerId) : null;
+  const paymentSt  = CHANNEL_PAYMENT_STATUS[resolvedChannelId]  ?? 'pending';
+  const fulfillSt  = CHANNEL_FULFILLMENT_STATUS[resolvedChannelId] ?? 'pending';
   const st =
     status === "pending" || status === "pending_payment" ? "pending" : "paid";
   const cashApprovalService = require("./cashApprovalService");
@@ -382,14 +434,17 @@ async function createOrder({
 
     const ins = await client.query(
       `INSERT INTO sales_orders (
-         source, external_order_id, customer_id, status,
+         source, channel_id, seller_id, external_order_id, customer_id, status,
          order_total_amount, total_amount_bs, exchange_rate_bs_per_usd, payment_method,
+         payment_status, fulfillment_status,
          notes, sold_by, applies_stock, records_cash
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, TRUE)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE, TRUE)
        RETURNING id, created_at`,
       [
         source,
+        resolvedChannelId,
+        resolvedSellerId,
         extId,
         cid,
         insertStatus,
@@ -397,6 +452,8 @@ async function createOrder({
         totalBs != null ? totalBs.toFixed(2) : null,
         rate != null && Number.isFinite(rate) ? rate : null,
         pay,
+        paymentSt,
+        fulfillSt,
         notes ?? null,
         soldBy ?? null,
       ]

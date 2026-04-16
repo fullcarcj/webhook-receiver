@@ -11,6 +11,7 @@ const {
   patchChat,
   getWaStatus,
 } = require("../services/chatService");
+const { sendChatMessage } = require("../services/chatMessageService");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -72,7 +73,8 @@ async function handleChatApiRequest(req, res, url) {
   const isDev = process.env.NODE_ENV !== "production";
   applyCrmApiCorsHeaders(req, res);
 
-  if (!await requireAdminOrPermission(req, res, 'crm')) return true;
+  const user = await requireAdminOrPermission(req, res, "crm");
+  if (!user) return true;
 
   try {
     if (req.method === "GET" && pathname === "/api/crm/chats") {
@@ -105,6 +107,51 @@ async function handleChatApiRequest(req, res, url) {
     }
 
     const msgMatch = pathname.match(/^\/api\/crm\/chats\/(\d+)\/messages$/);
+    if (msgMatch && req.method === "POST") {
+      let body;
+      try {
+        body = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const text = body && body.text != null ? String(body.text) : "";
+      if (!text.trim()) {
+        writeJson(res, 400, { error: "bad_request", message: "text requerido" });
+        return true;
+      }
+      const sentBy =
+        body && body.sent_by != null && String(body.sent_by).trim() !== ""
+          ? String(body.sent_by).trim()
+          : String(user.userId != null ? user.userId : "");
+      try {
+        const out = await sendChatMessage(msgMatch[1], text, sentBy);
+        writeJson(res, 200, out);
+      } catch (e) {
+        if (e && e.code === "BAD_REQUEST") {
+          writeJson(res, 400, { error: "bad_request", message: e.message });
+          return true;
+        }
+        if (e && e.code === "NOT_FOUND") {
+          writeJson(res, 404, { error: "not_found" });
+          return true;
+        }
+        if (e && e.code === "SERVICE_UNAVAILABLE") {
+          writeJson(res, 503, { error: "wasender_not_configured" });
+          return true;
+        }
+        if (e && e.code === "WASENDER_ERROR") {
+          writeJson(res, e.httpStatus || 502, {
+            error: "wasender_error",
+            message: e.message,
+          });
+          return true;
+        }
+        throw e;
+      }
+      return true;
+    }
+
     if (msgMatch && req.method === "GET") {
       const before_id = url.searchParams.get("before_id");
       const limit = url.searchParams.get("limit");

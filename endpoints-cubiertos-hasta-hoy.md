@@ -1,6 +1,6 @@
 # Endpoints y módulos cubiertos (webhook-receiver)
 
-**Actualizado:** 2026-04-11  
+**Actualizado:** 2026-04-16  
 **Copia de trabajo Banesco (local, no versionada):** `data/BANESCO/endpoints-cubiertos-hasta-hoy.md` — misma versión que este archivo al generar/exportar.
 
 **Nota:** Rutas admin aceptan `X-Admin-Secret` o `?k=` / `?secret=` (legado) **o** JWT Bearer/Cookie (nuevo — ver `/api/auth`). Rate limiting: 120 req/min por IP (general) + bloqueo por 5 min tras 10 fallos de auth — `src/utils/rateLimiter.js`. API pública catálogo: `FRONTEND_API_KEY` en `/api/v1/*`.
@@ -11,12 +11,14 @@
 
 | Prefijo / área | Handler principal | Cobertura |
 |----------------|-------------------|-----------|
+| `/api/v1/*` | `public-frontend-api.js` | Catálogo público, health, compat motor (`/api/v1/catalog`, `/api/v1/catalog/compat/*`) |
+| `/api/config/*` | `src/routes/businessConfig.js` | Empresa, sucursales, monedas, tasas lectura, tax-rules (`settings`) |
 | `/api/auth/*` | `server.js` + `src/utils/authMiddleware.js` | Login JWT, logout, me, change-password |
 | `/api/users/*` | `server.js` + `src/services/authService.js` | Gestión usuarios + roles + sesiones |
-| `/api/v1/*` | `public-frontend-api.js` | Catálogo, health, compat motor |
 | `/api/currency/*` | `src/routes/currency.js` | Tasas, override, fetch BCV |
 | `/api/pos/*` | `src/routes/posSales.js` | Ventas POS + Compras POS (snapshot tasa + landed) |
 | `/api/shipping/*` | `src/routes/shipping.js` | Flete, categorías |
+| `/api/shipments/*` | `src/routes/shipments.js` | Envíos importación (gastos, líneas, close/reopen) |
 | `/api/wms/*` | `src/routes/wms.js` | Bins, stock, picking, reservas ML |
 | `/api/lots/*` | `src/routes/lots.js` | Lotes / shelf-life (recepción, despacho, alertas, expire diario) |
 | `/api/count/*` | `cycleCountService.js` | Conteo cíclico de inventario |
@@ -29,7 +31,10 @@
 | `/api/ml/*` | `mlApiHandler.js` | Publicaciones ML |
 | `/api/media/*` | `mediaApiHandler.js` | Media CRM/WhatsApp |
 | `/api/customers/*` | `routes/customers.js` | Clientes, historial, loyalty |
-| `/api/chat/*` | `chatApiHandler.js` | Chats CRM |
+| `/api/crm/chats/*`, `/api/crm/system/wa-status` | `chatApiHandler.js` | Chats CRM, mensajes, PATCH chat, **POST …/messages** |
+| `/api/inbox/:chatId/identity-candidates` … | `inboxIdentityHandler.js` | Candidatos identidad, link-customer, link-ml-order |
+| `/api/inbox/quotations/*` | `inboxQuotationHandler.js` | Cotizaciones `inventario_presupuesto` |
+| `/api/inbox`, `/api/inbox/counts` | `inboxApiHandler.js` | Bandeja unificada |
 | `/api/stats/*` | `statsApiHandler.js` | Estadísticas (incl. resumen throttle WA) |
 | `/api/inventory/*` | `inventoryApiHandler.js` | Inventario inteligente (products/inventory) |
 | `/api/crm/*` | `routes/crm.js` | CRM: customers, ml_buyers, wallet, migración |
@@ -40,12 +45,82 @@
 | `/api/igtf/*` | `igtfService.js` | IGTF |
 | `/api/tax-retentions/*` | `taxRetentionService.js` | Retenciones IVA/ISLR |
 | `/api/wms/ml-order/*` | `src/routes/wms.js` | Reservas ML ↔ bin_stock |
-| `/sse`, `/api/sse/*`, `/api/events` | `sseApiHandler.js` | Server-Sent Events |
+| `/sse`, `/api/events`, `/api/sse/stats` | `sseApiHandler.js` | Server-Sent Events (monitor HTML usa `/api/events?token=`) |
 | `/api/vehicle/*` | `vehicleApiHandler.js` | Catálogo vehículos / compat |
 | `/api/purchase/*` | `purchaseApiHandler.js` | Órdenes de compra |
 | `/api/provider/*` | `providerApiHandler.js` | Proveedores IA / ajustes |
-| `/api/auth/*` | `src/services/authService.js` + `src/utils/authMiddleware.js` | Login JWT, logout, change-password, me |
-| `/api/users/*` | `src/services/authService.js` | Gestión de usuarios, roles, sesiones |
+
+---
+
+## Export completo — orden de evaluación en `server.js` (pipeline HTTP)
+
+Orden aproximado en que se atienden las rutas (primera coincidencia gana). Útil para depurar “404 antes de mi handler”.
+
+| Orden | Handler / bloque | Prefijo o notas |
+|------:|------------------|-----------------|
+| 0 | `handleSseApiRequest`, `handleSseStatsRequest` | `/sse`, `/api/events`, `/api/sse/*` |
+| 1 | GET `/monitor` | HTML monitor SSE (query `?k=`) |
+| 2 | `handleCrmApiPreflight` | OPTIONS CORS CRM |
+| 3 | `handlePublicFrontendRequest` | `/api/v1/*` |
+| 4 | GET `/`, `/health`, `/api/health` | Raíz y health |
+| 5 | POST `/api/currency/override`, `/api/currency/fetch` | Bypass downtime (cron) |
+| 6 | `handleCurrencyApiRequest` | `/api/currency/*` |
+| 7 | `handleBusinessConfigRequest` | `/api/config/*` |
+| 8 | `handleShippingApiRequest` | `/api/shipping/*` |
+| 9 | `handleShipmentsApiRequest` | `/api/shipments/*` |
+| 10 | `handleWmsApiRequest` | `/api/wms/*` |
+| 11 | `handleCycleCountApiRequest` | `/api/count/*` |
+| 12 | `handlePosSalesApiRequest` | `/api/pos/*` |
+| 13 | `handleIgtfApiRequest` | `/api/igtf/*` |
+| 14 | `handleTaxRetentionsApiRequest` | `/api/tax-retentions/*` |
+| 15 | `handleFiscalApiRequest`, `handleFiscalDocumentsRequest` | `/api/fiscal/*`, `/api/fiscal-documents/*` |
+| 16 | `handleLotsApiRequest` | `/api/lots/*` |
+| 17 | `handleWalletApiRequest` | `/api/wallet/*` |
+| 18 | `handleVehicleApiRequest` | `/api/vehicle/*` |
+| 19 | `handlePurchaseApiRequest` | `/api/purchase/*` |
+| … | `handleSalesApiRequest` … `handleStatsApiRequest` | Ver tabla resumen |
+| … | GET `/api/inventory/category-products`, `/api/inventory/subcategories` | Antes de `handleInventoryApiRequest` |
+| … | `handleInventoryApiRequest` | `/api/inventory/*` |
+| … | `handleCrmApiRequest` | `/api/crm/*` + webhook CRM |
+| … | `handleBankStatementsRequest`, `handleBankBanescoRequest` | `/api/bank/*` |
+| … | Bloque `/api/auth`, `/api/users` | Al final del `createServer` |
+
+**Rutas HTML admin** (muchas con `?k=`): `/hooks`, `/wasender-webhooks`, `/fetches`, `/buyers`, `/preguntas-ml`, `/ordenes-ml`, `/payment-attempts`, `/banesco`, `/ai-responder`, etc. — listado en consola al arrancar con `ADMIN_SECRET`.
+
+**Webhooks:** `POST` `WEBHOOK_PATH` (ML + Wasender según cuerpo), rutas Wasender dedicadas si existen.
+
+---
+
+## Inbox — rutas API (`crm`)
+
+| Método | Ruta | Handler |
+|--------|------|---------|
+| GET | `/api/inbox/:chatId/identity-candidates` | `inboxIdentityHandler.js` |
+| POST | `/api/inbox/:chatId/link-customer` | idem |
+| POST | `/api/inbox/:chatId/link-ml-order` | idem |
+| POST | `/api/inbox/quotations`, `/api/inbox/quotations/:id/send` | `inboxQuotationHandler.js` |
+| GET | `/api/inbox/quotations/:chatId` | idem |
+| GET | `/api/inbox`, `/api/inbox/counts` | `inboxApiHandler.js` |
+
+Orden en `server.js`: **identity → quotations → inbox** (para no pisar prefijos).
+
+---
+
+## API pública `/api/v1` (catálogo frontend)
+
+| Ruta | Método | Descripción breve |
+|------|--------|-------------------|
+| `/api/v1` | GET | Descubre subrutas |
+| `/api/v1/health` | GET | Health catálogo |
+| `/api/v1/catalog` | GET | Listado catálogo público |
+| `/api/v1/catalog/compat/makes` | GET | Marcas compat |
+| `/api/v1/catalog/compat/models` | GET | Modelos |
+| `/api/v1/catalog/compat/search` | GET | Búsqueda compat |
+| `/api/v1/catalog/compat/for-sku` | GET | Por SKU |
+| `/api/v1/catalog/compat/equivalences` | GET | Equivalencias |
+| `/api/v1/catalog/compat/years` | GET | Años |
+
+Auth: `FRONTEND_API_KEY` donde aplique; CORS `FRONTEND_CORS_ORIGINS`.
 
 ---
 

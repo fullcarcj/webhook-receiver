@@ -55,6 +55,7 @@ function corsCrmPath(pathname) {
   return (
     pathname.startsWith("/api/customers") ||
     pathname.startsWith("/api/sales") ||
+    pathname.startsWith("/api/inbox") ||
     pathname === "/api/crm" ||
     pathname.startsWith("/api/crm/")
   );

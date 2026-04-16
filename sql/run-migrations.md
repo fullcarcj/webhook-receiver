@@ -1,5 +1,31 @@
 # Migraciones pendientes — shipping + landed cost
 
+## Módulo Omnicanal (extensión crm_chats + sales_orders + tablas ML)
+
+Ejecutar DESPUÉS de `db:sales-channels` y `db:business-config`:
+```bash
+# Extiende crm_chats con vínculos ML (ml_order_id, ml_buyer_id, source_type…)
+# Agrega conversation_id + fulfillment_type a sales_orders
+# Crea: ml_webhooks_logs (idempotencia CH-03), ml_sku_mapping, ml_sync_log, ml_alerts
+npm run db:omnichannel
+```
+
+---
+
+## Módulo Configuración de Negocio (companies, branches, currencies)
+
+Ejecutar ANTES del resto si es instalación nueva o se agrega multi-empresa:
+```bash
+# 0. Configuración base del negocio (companies, branches, currencies, from/to_currency en daily_exchange_rates)
+#    Requiere: currency-management.sql (set_updated_at y daily_exchange_rates deben existir)
+npm run db:business-config
+# Expone: GET/PUT /api/config/company, /api/config/branches, /api/config/currencies
+#         GET /api/config/exchange-rates, /at/:date, /history
+#         GET /api/config/tax-rules, /active  |  PUT /api/config/tax-rules
+```
+
+---
+
 ## Orden de ejecución en Render (o psql local)
 
 Ejecutar EN ESTE ORDEN antes de activar las rutas /api/shipping y /api/landed-cost:

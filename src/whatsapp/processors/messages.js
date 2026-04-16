@@ -526,6 +526,26 @@ async function handle(normalized) {
     await client.query("COMMIT");
     msgLog.info({ fromPhone: normalized.fromPhone, postAction, postCustomerId }, "tipo_h_post_commit");
 
+    {
+      const identityChatId = postChatId;
+      const identityPhone = normalizePhone(normalized.fromPhone);
+      const identityText =
+        normalized.content?.text != null ? String(normalized.content.text) : "";
+      if (identityChatId != null && isInboundMessagesReceived(eventType)) {
+        setImmediate(() => {
+          const _chatId = identityChatId;
+          const _phone = identityPhone;
+          const _text = identityText;
+          Promise.resolve()
+            .then(() => {
+              const { resolveIdentity } = require("../../services/identityResolver");
+              return resolveIdentity(_chatId, _phone, _text);
+            })
+            .catch((err) => msgLog.error({ err, chatId: _chatId }, "identityResolver"));
+        });
+      }
+    }
+
     // ── Post-commit ──────────────────────────────────────────────────
     if (postAction === "existing_welcome") {
       if (isInboundMessagesReceived(eventType) && (normalized.type || "text") !== "reaction") {

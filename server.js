@@ -173,6 +173,7 @@ const {
 const { enrichProductoConImagenesUrls, buildProductoImagenesUrls } = require("./producto-imagenes-urls");
 const { handlePublicFrontendRequest } = require("./public-frontend-api");
 const { handleCurrencyApiRequest } = require("./src/routes/currency");
+const { handleBusinessConfigRequest } = require("./src/routes/businessConfig");
 const { handleShippingApiRequest } = require("./src/routes/shipping");
 const { handleShipmentsApiRequest } = require("./src/routes/shipments");
 const { handleWmsApiRequest } = require("./src/routes/wms");
@@ -224,6 +225,10 @@ const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory
 const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./src/handlers/customerLoyalty");
 const { handleCustomersApiRequest } = require("./src/routes/customers");
 const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
+const { handleInboxApiRequest } = require("./src/handlers/inboxApiHandler");
+const { handleInboxIdentityRequest } = require("./src/handlers/inboxIdentityHandler");
+const { handleInboxMlQuestionRequest } = require("./src/handlers/inboxMlQuestionHandler");
+const { handleInboxQuotationRequest } = require("./src/handlers/inboxQuotationHandler");
 const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
 const { handleProviderApiRequest } = require("./src/handlers/providerApiHandler");
 const { handleAiResponderRequest } = require("./src/handlers/aiResponderApiHandler");
@@ -2121,6 +2126,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (await handleBusinessConfigRequest(req, res, url)) {
+    return;
+  }
+
   if (
     req.method !== "GET" &&
     url.pathname.startsWith("/api/shipping") &&
@@ -3063,6 +3072,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleChatApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleInboxIdentityRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleInboxMlQuestionRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleInboxQuotationRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleInboxApiRequest(req, res, url)) {
     return;
   }
 

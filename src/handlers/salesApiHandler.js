@@ -47,8 +47,12 @@ const paymentMethodEnum = z.enum([
 ]);
 
 const createBodySchema = z.object({
-  source: z.enum(["mostrador", "social_media"]),
+  source: z.enum(["mostrador", "social_media", "ecommerce", "mercadolibre", "fuerza_ventas"]),
+  /** channel_id explícito (1-5). Si se omite se infiere desde source en salesService. */
+  channel_id: z.number().int().min(1).max(5).optional(),
   customer_id: z.number().int().positive().optional(),
+  /** CH-05 fuerza_ventas: obligatorio en el servicio si source='fuerza_ventas' */
+  seller_id: z.number().int().positive().optional(),
   items: z
     .array(
       z.object({
@@ -275,6 +279,8 @@ async function handleSalesApiRequest(req, res, url) {
       }
       const created = await salesService.createOrder({
         source: d.source,
+        channelId: d.channel_id,
+        sellerId: d.seller_id,
         customerId: d.customer_id,
         items: d.items,
         notes: d.notes,

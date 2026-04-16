@@ -2,6 +2,7 @@
 
 const { timingSafeCompare } = require("../services/currencyService");
 const walletService = require("../services/walletService");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -22,19 +23,6 @@ async function parseJsonBody(req) {
   return JSON.parse(txt);
 }
 
-function ensureAdmin(req, res) {
-  const secret = process.env.ADMIN_SECRET;
-  if (!secret) {
-    writeJson(res, 503, { ok: false, error: "define ADMIN_SECRET en el servidor" });
-    return false;
-  }
-  const provided = req.headers["x-admin-secret"];
-  if (!timingSafeCompare(provided, secret)) {
-    writeJson(res, 403, { ok: false, error: "forbidden" });
-    return false;
-  }
-  return true;
-}
 
 function walletErrorStatus(err) {
   const c = err && err.code;
@@ -50,7 +38,7 @@ async function handleWalletApiRequest(req, res, url) {
   if (!url.pathname.startsWith("/api/wallet")) return false;
 
   try {
-    if (!ensureAdmin(req, res)) return true;
+    if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
 
     if (req.method === "GET" && url.pathname === "/api/wallet/summary") {
       const customerId = url.searchParams.get("customer_id");

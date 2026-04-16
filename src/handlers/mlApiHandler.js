@@ -1,7 +1,7 @@
 'use strict';
 
 const { z } = require('zod');
-const { ensureAdmin } = require('../middleware/adminAuth');
+const { requireAdminOrPermission } = require('../utils/authMiddleware');
 const svc = require('../services/mlPublicationsService');
 
 function ok(res, data, status = 200) {
@@ -85,7 +85,7 @@ async function handleMlApiRequest(req, res, url) {
   const path = url.pathname;
 
   if (!path.startsWith('/api/ml')) return false;
-  if (!ensureAdmin(req, res, url)) return true;
+  if (!await requireAdminOrPermission(req, res, 'settings')) return true;
 
   try {
     // ── Listado de publicaciones ───────────────────────────────────────────

@@ -3,7 +3,7 @@
 const { z } = require("zod");
 const { safeParse } = require("../middleware/validateCrm");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const deliveryService = require("../services/deliveryService");
 
 function writeJson(res, status, body) {
@@ -77,7 +77,7 @@ async function handleDeliveryApiRequest(req, res, url) {
     res.end();
     return true;
   }
-  if (!ensureAdmin(req, res, url)) return true;
+  if (!await requireAdminOrPermission(req, res, 'settings')) return true;
 
   try {
     // GET /api/delivery/zones

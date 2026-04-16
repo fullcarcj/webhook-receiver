@@ -7,6 +7,7 @@ const {
   timingSafeCompare,
 } = require("../services/currencyService");
 const { getClientIp, adminRequestLimiter, adminAuthFailLimiter } = require("../utils/rateLimiter");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -43,17 +44,6 @@ function validCronToken(req) {
   return timingSafeCompare(token, secret);
 }
 
-function ensureAdminAuth(req, res) {
-  if (!process.env.ADMIN_SECRET) {
-    writeJson(res, 503, { ok: false, error: "define ADMIN_SECRET en el servidor" });
-    return false;
-  }
-  if (!validAdminSecret(req)) {
-    writeJson(res, 403, { ok: false, error: "forbidden" });
-    return false;
-  }
-  return true;
-}
 
 /**
  * Handler integrado al server HTTP actual.
@@ -92,7 +82,7 @@ async function handleCurrencyApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/currency/override") {
-      if (!ensureAdminAuth(req, res)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const ip = getClientIp(req);
       const lim = adminRequestLimiter(ip, "currency_override");
       if (!lim.allowed) {

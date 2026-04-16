@@ -1,6 +1,6 @@
 "use strict";
 
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
   createPosSale,
   createPosPurchase,
@@ -42,14 +42,14 @@ async function handlePosSalesApiRequest(req, res, url) {
   try {
     const mGet = rest.match(/^\/api\/pos\/sales\/(\d+)$/);
     if (req.method === "GET" && mGet) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const data = await getPosSaleById(mGet[1]);
       writeJson(res, 200, { ok: true, data });
       return true;
     }
 
     if (req.method === "POST" && (rest === "/api/pos/sales" || rest === "/api/pos/sales/")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const body = await parseJsonBody(req);
       const data = await createPosSale({
         companyId: body.company_id,
@@ -82,14 +82,14 @@ async function handlePosSalesApiRequest(req, res, url) {
 
     const mPurGet = rest.match(/^\/api\/pos\/purchases\/(\d+)$/);
     if (req.method === "GET" && mPurGet) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const data = await getPosPurchaseById(mPurGet[1]);
       writeJson(res, 200, { ok: true, data });
       return true;
     }
 
     if (req.method === "GET" && (rest === "/api/pos/purchases" || rest === "/api/pos/purchases/")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const data = await listPosPurchases({
         companyId: url.searchParams.get("company_id") ? Number(url.searchParams.get("company_id")) : 1,
         from:      url.searchParams.get("from")    || null,
@@ -103,7 +103,7 @@ async function handlePosSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && (rest === "/api/pos/purchases" || rest === "/api/pos/purchases/")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const body = await parseJsonBody(req);
       if (!Array.isArray(body.lines) || body.lines.length === 0) {
         writeJson(res, 400, { success: false, error: "Se requiere lines: array no vacío" });

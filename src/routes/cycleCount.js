@@ -1,6 +1,6 @@
 "use strict";
 
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
   createSession,
   startSession,
@@ -46,7 +46,7 @@ async function handleCycleCountApiRequest(req, res, url) {
 
   try {
     if (req.method === "GET" && pathname === "/api/count/sessions/pending") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const data = await getSessionsPending();
       writeJson(res, 200, { ok: true, data });
       return true;
@@ -54,7 +54,7 @@ async function handleCycleCountApiRequest(req, res, url) {
 
     const mStart = pathname.match(/^\/api\/count\/sessions\/(\d+)\/start$/);
     if (req.method === "POST" && mStart) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const data = await startSession(mStart[1]);
       writeJson(res, 200, { ok: true, data });
       return true;
@@ -62,7 +62,7 @@ async function handleCycleCountApiRequest(req, res, url) {
 
     const mApprove = pathname.match(/^\/api\/count\/sessions\/(\d+)\/approve$/);
     if (req.method === "POST" && mApprove) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const data = await approveSession({
         sessionId: mApprove[1],
@@ -81,7 +81,7 @@ async function handleCycleCountApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && (pathname === "/api/count/sessions" || pathname === "/api/count/sessions/")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const data = await createSession({
         mode: body.mode,
@@ -97,7 +97,7 @@ async function handleCycleCountApiRequest(req, res, url) {
 
     const mSubmit = pathname.match(/^\/api\/count\/lines\/(\d+)\/submit$/);
     if (req.method === "POST" && mSubmit) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const data = await submitLine({
         lineId: mSubmit[1],
@@ -109,14 +109,14 @@ async function handleCycleCountApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && pathname === "/api/count/config") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const data = await getConfig();
       writeJson(res, 200, { ok: true, data });
       return true;
     }
 
     if (req.method === "PATCH" && pathname === "/api/count/config") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const data = await updateConfig(body);
       writeJson(res, 200, { ok: true, data });

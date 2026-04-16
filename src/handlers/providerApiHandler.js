@@ -3,7 +3,7 @@
 const { z } = require("zod");
 const pino = require("pino");
 const { pool } = require("../../db");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const { safeParse } = require("../middleware/validateCrm");
 const { encryptApiKey } = require("../services/cryptoService");
 const { checkProviderHealth, checkAllProviders, persistHealthCheck } = require("../services/providerHealthService");
@@ -225,7 +225,7 @@ async function handleProviderApiRequest(req, res, url) {
   const pathname = url.pathname || "";
 
   if (pathname === "/api/admin/ai-log" || pathname === "/api/admin/ai-log/") {
-    if (!ensureAdmin(req, res, url)) return true;
+    if (!await requireAdminOrPermission(req, res, 'settings')) return true;
     if (!(await schemaReady(res))) return true;
     if (req.method !== "GET") {
       writeJson(res, 405, { error: "method_not_allowed" });
@@ -250,7 +250,7 @@ async function handleProviderApiRequest(req, res, url) {
   }
 
   if (pathname === "/api/admin/test/receipt" || pathname === "/api/admin/test/receipt/") {
-    if (!ensureAdmin(req, res, url)) return true;
+    if (!await requireAdminOrPermission(req, res, 'settings')) return true;
     if (req.method !== "POST") {
       writeJson(res, 405, { error: "method_not_allowed" });
       return true;
@@ -262,7 +262,7 @@ async function handleProviderApiRequest(req, res, url) {
     return false;
   }
 
-  if (!ensureAdmin(req, res, url)) return true;
+  if (!await requireAdminOrPermission(req, res, 'settings')) return true;
   if (!(await schemaReady(res))) return true;
 
   try {

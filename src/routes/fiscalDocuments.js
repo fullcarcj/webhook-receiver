@@ -32,7 +32,7 @@ const {
   getSequences,
   updateSequence,
 } = require("../services/fiscalNumberingService");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const { rejectDuringDowntime } = require("../utils/sessionGuard");
 
 function writeJson(res, status, body) {
@@ -216,7 +216,7 @@ async function loadLibro(){
   try {
     // ── GET /api/fiscal/documents ─────────────────────────────────────
     if (req.method === "GET" && path === "/api/fiscal/documents") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const result = await listDocuments({
         companyId: COMPANY_ID,
         docType: url.searchParams.get("doc_type") || url.searchParams.get("docType"),
@@ -235,7 +235,7 @@ async function loadLibro(){
     // ── GET /api/fiscal/documents/:id ────────────────────────────────
     const getOneM = req.method === "GET" && path.match(/^\/api\/fiscal\/documents\/(\d+)$/);
     if (getOneM) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const doc = await getDocument(getOneM[1]);
       if (!doc) {
         writeJson(res, 404, { ok: false, error: "Documento no encontrado" });
@@ -248,7 +248,7 @@ async function loadLibro(){
     // ── POST /api/fiscal/documents/invoice ───────────────────────────
     if (req.method === "POST" && path === "/api/fiscal/documents/invoice") {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const body = await parseJsonBody(req);
       if (!body.base_imponible_usd && body.base_imponible_usd !== 0) {
         writeJson(res, 400, { ok: false, error: "base_imponible_usd requerido" });
@@ -277,7 +277,7 @@ async function loadLibro(){
     // ── POST /api/fiscal/documents/credit-note ───────────────────────
     if (req.method === "POST" && path === "/api/fiscal/documents/credit-note") {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const body = await parseJsonBody(req);
       if (!body.related_doc_id) {
         writeJson(res, 400, { ok: false, error: "related_doc_id requerido" });
@@ -304,7 +304,7 @@ async function loadLibro(){
     // ── POST /api/fiscal/documents/debit-note ────────────────────────
     if (req.method === "POST" && path === "/api/fiscal/documents/debit-note") {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const body = await parseJsonBody(req);
       if (!body.related_doc_id) {
         writeJson(res, 400, { ok: false, error: "related_doc_id requerido" });
@@ -331,7 +331,7 @@ async function loadLibro(){
     // ── POST /api/fiscal/documents/retention ─────────────────────────
     if (req.method === "POST" && path === "/api/fiscal/documents/retention") {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const body = await parseJsonBody(req);
       const doc = await issueRetentionCertificate({
         companyId: COMPANY_ID,
@@ -351,7 +351,7 @@ async function loadLibro(){
     const confirmM = req.method === "PATCH" && path.match(/^\/api\/fiscal\/documents\/(\d+)\/confirm$/);
     if (confirmM) {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const body = await parseJsonBody(req);
       const extNum = String(body.external_number || "").trim();
       if (!extNum) {
@@ -370,7 +370,7 @@ async function loadLibro(){
     const cancelM = req.method === "POST" && path.match(/^\/api\/fiscal\/documents\/(\d+)\/cancel$/);
     if (cancelM) {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const body = await parseJsonBody(req);
       const reason = String(body.reason || "").trim();
       if (!reason) {
@@ -389,7 +389,7 @@ async function loadLibro(){
     // ── GET /api/fiscal/libro-ventas/:year/:month ─────────────────────
     const libroM = req.method === "GET" && path.match(/^\/api\/fiscal\/libro-ventas\/(\d{4})\/(\d{1,2})$/);
     if (libroM) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const totales = await getLibroVentasTotales({
         companyId: COMPANY_ID,
         year: Number(libroM[1]),
@@ -401,7 +401,7 @@ async function loadLibro(){
 
     // ── GET /api/fiscal/sequences ─────────────────────────────────────
     if (req.method === "GET" && path === "/api/fiscal/sequences") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const seqs = await getSequences(COMPANY_ID);
       writeJson(res, 200, { ok: true, sequences: seqs });
       return true;
@@ -411,7 +411,7 @@ async function loadLibro(){
     const seqM = req.method === "PATCH" && path.match(/^\/api\/fiscal\/sequences\/(\d+)$/);
     if (seqM) {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
 
       // Constraint 5: OBLIGATORIO el header X-Confirm: reset-sequence
       const confirmHeader = req.headers["x-confirm"];

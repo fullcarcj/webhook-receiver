@@ -3,7 +3,7 @@
 const { z } = require("zod");
 const { safeParse } = require("../middleware/validateCrm");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const priceEngineService = require("../services/priceEngineService");
 const priceApprovalService = require("../services/priceApprovalService");
 
@@ -72,7 +72,7 @@ async function handlePriceApiRequest(req, res, url) {
     res.end();
     return true;
   }
-  if (!ensureAdmin(req, res, url)) return true;
+  if (!await requireAdminOrPermission(req, res, 'catalog')) return true;
 
   try {
     if (req.method === "GET" && pathname === "/api/price-settings") {

@@ -1,6 +1,7 @@
 "use strict";
 
 const { timingSafeCompare } = require("../services/currencyService");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
   createLot,
   getLotsBySku,
@@ -43,17 +44,6 @@ function validCronToken(req) {
   return timingSafeCompare(token, secret);
 }
 
-function ensureAdmin(req, res) {
-  if (!process.env.ADMIN_SECRET) {
-    writeJson(res, 503, { ok: false, error: "define ADMIN_SECRET en el servidor" });
-    return false;
-  }
-  if (!validAdminSecret(req)) {
-    writeJson(res, 403, { ok: false, error: "forbidden" });
-    return false;
-  }
-  return true;
-}
 
 function mapLotError(e) {
   const c = e && e.code;
@@ -85,7 +75,7 @@ async function handleLotsApiRequest(req, res, url) {
 
   try {
     if (req.method === "GET" && pathname === "/api/lots/alerts") {
-      if (!ensureAdmin(req, res)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const days = Number(url.searchParams.get("days") || 90);
       const data = await getExpiryAlerts({ companyId: 1, days });
       writeJson(res, 200, { ok: true, data });
@@ -105,7 +95,7 @@ async function handleLotsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && pathname === "/api/lots/dispatch") {
-      if (!ensureAdmin(req, res)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const data = await dispatchFromLot({
         lotId: body.lot_id,
@@ -120,7 +110,7 @@ async function handleLotsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && (pathname === "/api/lots" || pathname === "/api/lots/")) {
-      if (!ensureAdmin(req, res)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const data = await createLot({
         companyId: body.company_id,
@@ -144,7 +134,7 @@ async function handleLotsApiRequest(req, res, url) {
       if (!rest || rest === "alerts" || rest === "dispatch" || rest === "expire-daily") {
         return false;
       }
-      if (!ensureAdmin(req, res)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const sku = decodeURIComponent(rest);
       const rows = await getLotsBySku(sku);
       writeJson(res, 200, { ok: true, data: rows });

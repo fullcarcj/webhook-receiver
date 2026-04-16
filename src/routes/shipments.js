@@ -1,6 +1,6 @@
 "use strict";
 
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
   createShipment,
   setExpenses,
@@ -50,7 +50,7 @@ async function handleShipmentsApiRequest(req, res, url) {
 
   if (path === "/embarques-landed") {
     if (req.method !== "GET") return false;
-    if (!ensureAdmin(req, res, url)) return true;
+    if (!await requireAdminOrPermission(req, res, 'settings')) return true;
     const k = url.searchParams.get("k") || url.searchParams.get("secret") || "";
     const kEnc = encodeURIComponent(k);
     const base = ""; /* mismo origen */
@@ -84,7 +84,7 @@ curl -s -X POST "${base}/api/shipments" -H "X-Admin-Secret: TU_SECRETO" -H "Cont
 
   try {
     if (req.method === "GET" && path === "/api/shipments") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const st = url.searchParams.get("status");
       const rows = await listShipments({ companyId: 1, status: st || null });
       writeJson(res, 200, { ok: true, data: rows });
@@ -92,7 +92,7 @@ curl -s -X POST "${base}/api/shipments" -H "X-Admin-Secret: TU_SECRETO" -H "Cont
     }
 
     if (req.method === "POST" && path === "/api/shipments") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const body = await parseJsonBody(req);
       const row = await createShipment({
         companyId: 1,
@@ -109,7 +109,7 @@ curl -s -X POST "${base}/api/shipments" -H "X-Admin-Secret: TU_SECRETO" -H "Cont
 
     const mPreview = path.match(/^\/api\/shipments\/(\d+)\/preview$/);
     if (req.method === "GET" && mPreview) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = Number(mPreview[1]);
       const data = await previewLandedCost(id);
       writeJson(res, 200, { ok: true, data });
@@ -118,7 +118,7 @@ curl -s -X POST "${base}/api/shipments" -H "X-Admin-Secret: TU_SECRETO" -H "Cont
 
     const mClose = path.match(/^\/api\/shipments\/(\d+)\/close$/);
     if (req.method === "POST" && mClose) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = Number(mClose[1]);
       const body = await parseJsonBody(req);
       const data = await closeShipment({ shipmentId: id, userId: body.user_id });
@@ -128,7 +128,7 @@ curl -s -X POST "${base}/api/shipments" -H "X-Admin-Secret: TU_SECRETO" -H "Cont
 
     const mReopen = path.match(/^\/api\/shipments\/(\d+)\/reopen$/);
     if (req.method === "POST" && mReopen) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = Number(mReopen[1]);
       await parseJsonBody(req);
       const data = await reopenShipment({ shipmentId: id });
@@ -138,7 +138,7 @@ curl -s -X POST "${base}/api/shipments" -H "X-Admin-Secret: TU_SECRETO" -H "Cont
 
     const mExp = path.match(/^\/api\/shipments\/(\d+)\/expenses$/);
     if (req.method === "PATCH" && mExp) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = Number(mExp[1]);
       const body = await parseJsonBody(req);
       const row = await setExpenses({ shipmentId: id, totalExpensesUsd: body.total_expenses_usd });
@@ -148,7 +148,7 @@ curl -s -X POST "${base}/api/shipments" -H "X-Admin-Secret: TU_SECRETO" -H "Cont
 
     const mLines = path.match(/^\/api\/shipments\/(\d+)\/lines$/);
     if (req.method === "POST" && mLines) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = Number(mLines[1]);
       const body = await parseJsonBody(req);
       const row = await addLine({
@@ -164,7 +164,7 @@ curl -s -X POST "${base}/api/shipments" -H "X-Admin-Secret: TU_SECRETO" -H "Cont
 
     const mDelLine = path.match(/^\/api\/shipments\/(\d+)\/lines\/(.+)$/);
     if (req.method === "DELETE" && mDelLine) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = Number(mDelLine[1]);
       let sku = mDelLine[2];
       try {
@@ -177,7 +177,7 @@ curl -s -X POST "${base}/api/shipments" -H "X-Admin-Secret: TU_SECRETO" -H "Cont
 
     const mDetail = path.match(/^\/api\/shipments\/(\d+)$/);
     if (req.method === "GET" && mDetail) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = Number(mDetail[1]);
       const data = await getShipmentDetail(id);
       writeJson(res, 200, { ok: true, data });

@@ -230,6 +230,33 @@ async function checkAdminSecretOrJwt(req, res) {
   return null;
 }
 
+/**
+ * Combina checkAdminSecretOrJwt + requirePermission en un solo guard.
+ * La acción se infiere del método HTTP si no se provee explícitamente:
+ *   GET → 'read' | DELETE → 'admin' | cualquier otro → 'write'
+ *
+ * X-Admin-Secret y ?k= retornan payload SUPERUSER → bypass automático de permisos.
+ * JWT de OPERATOR solo pasa si tiene el permiso correspondiente en role_permissions.
+ *
+ * Uso: if (!await requireAdminOrPermission(req, res, 'wms')) return true;
+ *
+ * @param {import('http').IncomingMessage} req
+ * @param {import('http').ServerResponse} res
+ * @param {string} mod   módulo requerido (wms|ventas|crm|catalog|settings|fiscal)
+ * @param {string} [action]  acción explícita; si se omite se infiere del método
+ * @returns {Promise<object|null>} payload del usuario o null si rechazado (ya respondió)
+ */
+async function requireAdminOrPermission(req, res, mod, action) {
+  const user = await checkAdminSecretOrJwt(req, res);
+  if (!user) return null;
+  const resolvedAction = action || (
+    req.method === 'GET'    ? 'read'  :
+    req.method === 'DELETE' ? 'admin' : 'write'
+  );
+  if (!requirePermission(user, mod, resolvedAction, res)) return null;
+  return user;
+}
+
 module.exports = {
   extractToken,
   verifyToken,
@@ -237,5 +264,6 @@ module.exports = {
   requirePermission,
   requireRole,
   checkAdminSecretOrJwt,
+  requireAdminOrPermission,
   ROLE_HIERARCHY,
 };

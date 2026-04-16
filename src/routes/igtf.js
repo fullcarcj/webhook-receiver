@@ -1,6 +1,6 @@
 "use strict";
 
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
   calculateMultiPaymentIgtf,
   closePeriod,
@@ -37,7 +37,7 @@ async function handleIgtfApiRequest(req, res, url) {
 
   if (path === "/igtf-panel") {
     if (req.method !== "GET") return false;
-    if (!ensureAdmin(req, res, url)) return true;
+    if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
     const k = url.searchParams.get("k") || url.searchParams.get("secret") || "";
     const kEnc = encodeURIComponent(k);
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -90,7 +90,7 @@ async function handleIgtfApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && rest === "/api/igtf/declarations") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const st = url.searchParams.get("status");
       const rows = await getDeclarations({ companyId: 1, status: st || null });
       writeJson(res, 200, { ok: true, data: rows });
@@ -99,7 +99,7 @@ async function handleIgtfApiRequest(req, res, url) {
 
     const mPeriodGet = rest.match(/^\/api\/igtf\/declarations\/(\d{4})\/(\d{1,2})$/);
     if (req.method === "GET" && mPeriodGet) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const year = Number(mPeriodGet[1]);
       const month = Number(mPeriodGet[2]);
       const row = await getPeriodSummary({ year, month, companyId: 1 });
@@ -113,7 +113,7 @@ async function handleIgtfApiRequest(req, res, url) {
 
     const mClose = rest.match(/^\/api\/igtf\/declarations\/(\d{4})\/(\d{1,2})\/close$/);
     if (req.method === "POST" && mClose) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const year = Number(mClose[1]);
       const month = Number(mClose[2]);
       const data = await closePeriod({ year, month, companyId: 1 });

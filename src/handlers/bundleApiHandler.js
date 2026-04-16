@@ -3,7 +3,7 @@
 const { z } = require("zod");
 const pino = require("pino");
 const { pool } = require("../../db");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const { safeParse } = require("../middleware/validateCrm");
 const bundleService = require("../services/bundleService");
@@ -70,7 +70,7 @@ async function handleBundleApiRequest(req, res, url) {
 
   try {
     if (pathname.startsWith("/api/price-review")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       if (!(await bundleService.tableExists(pool))) {
         writeJson(res, 503, { error: "price_review_schema_missing", message: "Ejecutá npm run db:kits-bundles" });
         return true;
@@ -107,7 +107,7 @@ async function handleBundleApiRequest(req, res, url) {
     }
 
     /* ─── /api/bundles ─── */
-    if (!ensureAdmin(req, res, url)) return true;
+    if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
 
     if (!(await bundleService.tableExists(pool))) {
       writeJson(res, 503, { error: "bundles_schema_missing", message: "Ejecutá npm run db:kits-bundles" });

@@ -4,7 +4,7 @@ const { z } = require("zod");
 const pino = require("pino");
 const { safeParse } = require("../middleware/validateCrm");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const salesService = require("../services/salesService");
 const orderService = require("../services/orderService");
 
@@ -168,7 +168,7 @@ async function handleSalesApiRequest(req, res, url) {
 
   try {
     if (req.method === "GET" && (pathname === "/api/sales/stats" || segment === "stats")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const from = url.searchParams.get("from") || undefined;
       const to = url.searchParams.get("to") || undefined;
       const stats = await salesService.getSalesStats({ from, to });
@@ -177,7 +177,7 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && (pathname === "/api/sales" || pathname === "/api/sales/")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const limit = url.searchParams.get("limit");
       const offset = url.searchParams.get("offset");
       const source = url.searchParams.get("source") || undefined;
@@ -208,7 +208,7 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && (pathname === "/api/sales/import/ml" || segment === "import/ml")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       let body = {};
       try {
         body = await parseJsonBody(req);
@@ -245,7 +245,7 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && (pathname === "/api/sales/create" || segment === "create")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       let body = {};
       try {
         body = await parseJsonBody(req);
@@ -298,7 +298,7 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && pathname === "/api/quotes/create") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       let body = {};
       try {
         body = await parseJsonBody(req);
@@ -354,7 +354,7 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && (segment === "alerts/pending" || pathname === "/api/sales/alerts/pending")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const type = url.searchParams.get("type") || "all";
       const data = await orderService.listPendingRatingAlerts(type);
       writeJson(res, 200, { data, meta: { timestamp: new Date().toISOString() } });
@@ -363,7 +363,7 @@ async function handleSalesApiRequest(req, res, url) {
 
     const historyMatch = segment && segment.match(/^(\d+)\/history$/);
     if (req.method === "GET" && historyMatch) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const id = Number(historyMatch[1]);
       const rows = await orderService.getOrderHistory(id);
       writeJson(res, 200, { data: rows, meta: { timestamp: new Date().toISOString() } });
@@ -372,7 +372,7 @@ async function handleSalesApiRequest(req, res, url) {
 
     const statusMatch = segment && segment.match(/^(\d+)\/status$/);
     if (req.method === "PATCH" && statusMatch) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const id = Number(statusMatch[1]);
       let body = {};
       try {
@@ -387,7 +387,7 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && segment && /^\d+$/.test(segment)) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const id = Number(segment);
       const row = await salesService.getSalesOrderById(id);
       writeJson(res, 200, { data: row, meta: { timestamp: new Date().toISOString() } });
@@ -395,7 +395,7 @@ async function handleSalesApiRequest(req, res, url) {
     }
 
     if (req.method === "PATCH" && segment && /^\d+$/.test(segment)) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       let body = {};
       try {
         body = await parseJsonBody(req);

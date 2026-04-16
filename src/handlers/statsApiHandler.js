@@ -47,18 +47,9 @@ const statsService    = require("../services/statsService");
 const financialService = require("../services/financialService");
 const { pool }        = require("../../db");
 const { resolvePeriod, buildMeta } = require("../utils/statsHelpers");
-
-const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function isAdmin(req, url) {
-  if (!ADMIN_SECRET) return false;
-  const h = req.headers["x-admin-secret"] || "";
-  if (h && h === ADMIN_SECRET) return true;
-  const qk = url.searchParams.get("k") || url.searchParams.get("secret") || "";
-  return qk === ADMIN_SECRET;
-}
 
 function ok(res, status, data, meta) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -134,9 +125,7 @@ async function handleStatsApiRequest(req, res) {
   if (!path.startsWith("/api/stats") && !path.startsWith("/api/finance")) return false;
   // También maneja /api/stats/wa-throttle
 
-  if (!isAdmin(req, url)) {
-    return fail(res, 401, "UNAUTHORIZED", "Token inválido o ausente");
-  }
+  if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
 
   const t0 = Date.now();
 

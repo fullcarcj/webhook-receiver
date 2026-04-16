@@ -2,7 +2,7 @@
 
 const pino = require("pino");
 const { pool } = require("../../db");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
   sendAiReplyToCustomer,
   logAiResponse,
@@ -443,7 +443,7 @@ async function approve(mid) {
   }
 
   if (!path.startsWith("/api/ai-responder")) return false;
-  if (!ensureAdmin(req, res, url)) return true;
+  if (!await requireAdminOrPermission(req, res, 'crm')) return true;
 
   if (req.method === "GET" && path === "/api/ai-responder/stats") {
     try {

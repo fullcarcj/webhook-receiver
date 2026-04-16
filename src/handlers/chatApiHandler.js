@@ -3,7 +3,7 @@
 const { z } = require("zod");
 const pino = require("pino");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
   listChats,
   getChatContext,
@@ -72,7 +72,7 @@ async function handleChatApiRequest(req, res, url) {
   const isDev = process.env.NODE_ENV !== "production";
   applyCrmApiCorsHeaders(req, res);
 
-  if (!ensureAdmin(req, res, url)) return true;
+  if (!await requireAdminOrPermission(req, res, 'crm')) return true;
 
   try {
     if (req.method === "GET" && pathname === "/api/crm/chats") {

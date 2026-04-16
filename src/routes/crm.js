@@ -4,7 +4,7 @@ const pino = require("pino");
 const { listWhatsappLogs, mapSchemaError } = require("../services/crmIdentityService");
 const { routeWebhook } = require("../whatsapp/hookRouter");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const { pool } = require("../../db");
 const crmService = require("../services/crmService");
 
@@ -132,7 +132,7 @@ async function handleCrmApiRequest(req, res, url) {
 
   applyCrmApiCorsHeaders(req, res);
 
-  if (!ensureAdmin(req, res, url)) return true;
+  if (!await requireAdminOrPermission(req, res, 'crm')) return true;
 
   try {
     if (req.method === "GET" && pathname === "/api/crm/logs") {

@@ -1,15 +1,15 @@
 "use strict";
 
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 
 /**
  * Página mínima de prueba WMS (solo GET). Requiere `?k=` o `?secret=` igual a ADMIN_SECRET
  * (o cabecera X-Admin-Secret vía fetch desde consola).
  */
-function handleWmsTestPage(req, res, url) {
+async function handleWmsTestPage(req, res, url) {
   if (req.method !== "GET" || url.pathname !== "/wms-test") return false;
 
-  if (!ensureAdmin(req, res, url)) {
+  if (!await requireAdminOrPermission(req, res, 'wms')) {
     return true;
   }
 

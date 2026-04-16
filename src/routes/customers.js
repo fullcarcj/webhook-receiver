@@ -3,6 +3,7 @@
 const pino = require("pino");
 const { z } = require("zod");
 const { timingSafeCompare } = require("../services/currencyService");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const { safeParse } = require("../middleware/validateCrm");
 const { pool } = require("../../db");
@@ -39,19 +40,6 @@ async function parseJsonBody(req) {
   return JSON.parse(txt);
 }
 
-function ensureAdmin(req, res) {
-  const secret = process.env.ADMIN_SECRET;
-  if (!secret) {
-    writeJson(res, 503, { error: "define ADMIN_SECRET en el servidor" });
-    return false;
-  }
-  const provided = req.headers["x-admin-secret"];
-  if (!timingSafeCompare(provided, secret)) {
-    writeJson(res, 403, { error: "forbidden" });
-    return false;
-  }
-  return true;
-}
 
 function parsePositiveInt(s) {
   const t = String(s).trim();
@@ -163,7 +151,7 @@ async function handleCustomersApiRequest(req, res, url) {
 
   const isDev = process.env.NODE_ENV !== "production";
 
-  if (!ensureAdmin(req, res)) return true;
+  if (!await requireAdminOrPermission(req, res, 'crm')) return true;
 
   try {
     if (req.method === "GET" && pathname === "/api/customers/search") {

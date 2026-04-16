@@ -16,7 +16,7 @@
 const { z }           = require("zod");
 const pino            = require("pino");
 const { pool }        = require("../../db");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const { sendMedia }   = require("../whatsapp/media/outboundMedia");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "mediaApiHandler" });
@@ -75,7 +75,7 @@ async function handleMediaApiRequest(req, res, url) {
   const isMediaLogsHtmlPath = pathname === "/media-logs" || pathname === "/media-logs/";
   if (!isMediaApiPath && !isMediaLogsHtmlPath) return false;
 
-  if (!ensureAdmin(req, res, url)) return true;
+  if (!await requireAdminOrPermission(req, res, 'catalog')) return true;
 
   try {
     // POST /api/media/send-image

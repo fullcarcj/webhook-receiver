@@ -11,7 +11,7 @@ const {
   markFiled,
   markPaid,
 } = require("../services/fiscalService");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 
 const COMPANY_ID = 1;
 
@@ -113,7 +113,7 @@ fetch('/api/fiscal/periods?k='+encodeURIComponent(k), {
 
   try {
     if (path === "/api/settings/tax" && req.method === "GET") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const data = await getSettings(COMPANY_ID);
       writeJson(res, 200, { ok: true, settings: data });
       return true;
@@ -121,7 +121,7 @@ fetch('/api/fiscal/periods?k='+encodeURIComponent(k), {
 
     const patchTax = req.method === "PATCH" && /^\/api\/settings\/tax\/[^/]+$/.test(path);
     if (patchTax) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const key = decodeURIComponent(path.replace(/^\/api\/settings\/tax\//, ""));
       const body = await parseJsonBody(req);
       if (body.value === undefined && body.value !== 0 && body.value !== false) {
@@ -140,7 +140,7 @@ fetch('/api/fiscal/periods?k='+encodeURIComponent(k), {
     }
 
     if (path === "/api/fiscal/periods" && req.method === "GET") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const taxType = url.searchParams.get("tax_type") || url.searchParams.get("taxType");
       const status = url.searchParams.get("status");
       const rows = await listPeriods({ companyId: COMPANY_ID, taxType, status });
@@ -150,7 +150,7 @@ fetch('/api/fiscal/periods?k='+encodeURIComponent(k), {
 
     const getOne = req.method === "GET" && /^\/api\/fiscal\/periods\/[^/]+\/\d{4}(?:\/\d{1,2})?$/.test(path);
     if (getOne) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const m = path.match(/^\/api\/fiscal\/periods\/([^/]+)\/(\d{4})(?:\/(\d{1,2}))?$/);
       const taxType = m[1];
       const year = Number(m[2]);
@@ -170,7 +170,7 @@ fetch('/api/fiscal/periods?k='+encodeURIComponent(k), {
     }
 
     if (path === "/api/fiscal/periods" && req.method === "POST") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const body = await parseJsonBody(req);
       const tax_type = body.tax_type || body.taxType;
       const year = body.year;
@@ -191,7 +191,7 @@ fetch('/api/fiscal/periods?k='+encodeURIComponent(k), {
 
     const closeM = req.method === "POST" && /^\/api\/fiscal\/periods\/\d+\/close$/.test(path);
     if (closeM) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const id = path.match(/\/periods\/(\d+)\/close$/)[1];
       const body = await parseJsonBody(req);
       const doc = await closePeriod({ periodId: id, userId: body.user_id != null ? body.user_id : null });
@@ -201,7 +201,7 @@ fetch('/api/fiscal/periods?k='+encodeURIComponent(k), {
 
     const fileM = req.method === "POST" && /^\/api\/fiscal\/periods\/\d+\/file$/.test(path);
     if (fileM) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const id = path.match(/\/periods\/(\d+)\/file$/)[1];
       const body = await parseJsonBody(req);
       if (!body.filed_ref) {
@@ -219,7 +219,7 @@ fetch('/api/fiscal/periods?k='+encodeURIComponent(k), {
 
     const payM = req.method === "POST" && /^\/api\/fiscal\/periods\/\d+\/pay$/.test(path);
     if (payM) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const id = path.match(/\/periods\/(\d+)\/pay$/)[1];
       const body = await parseJsonBody(req);
       const row = await markPaid({
@@ -232,7 +232,7 @@ fetch('/api/fiscal/periods?k='+encodeURIComponent(k), {
     }
 
     if (path === "/api/fiscal/retentions" && req.method === "POST") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const body = await parseJsonBody(req);
       const row = await recordRetention({
         companyId: COMPANY_ID,

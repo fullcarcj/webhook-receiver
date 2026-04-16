@@ -2,7 +2,7 @@
 
 const { z } = require("zod");
 const pino = require("pino");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const { safeParse } = require("../middleware/validateCrm");
 const cashApprovalService = require("../services/cashApprovalService");
@@ -86,7 +86,7 @@ async function handleCashApiRequest(req, res, url) {
 
   try {
     if (req.method === "GET" && norm === "/api/finance-settings") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const data = await cashApprovalService.getFinanceSettings();
       writeJson(res, 200, { data, meta: { timestamp: new Date().toISOString() } });
       return true;
@@ -94,7 +94,7 @@ async function handleCashApiRequest(req, res, url) {
 
     const finPatch = norm.match(/^\/api\/finance-settings\/([^/]+)$/);
     if (req.method === "PATCH" && finPatch) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const key = decodeURIComponent(finPatch[1]);
       let body = {};
       try {
@@ -118,7 +118,7 @@ async function handleCashApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && norm === "/api/cash/pending") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const currency = url.searchParams.get("currency") || undefined;
       const submittedBy = url.searchParams.get("submitted_by") || undefined;
       const disc = url.searchParams.get("discrepancy");
@@ -133,7 +133,7 @@ async function handleCashApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && norm === "/api/cash/my-pending") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const submittedBy = url.searchParams.get("submitted_by");
       if (!submittedBy || !String(submittedBy).trim()) {
         writeJson(res, 400, { error: "submitted_by query requerido" });
@@ -146,7 +146,7 @@ async function handleCashApiRequest(req, res, url) {
 
     const logMatch = norm.match(/^\/api\/cash\/log\/(\d+)$/);
     if (req.method === "GET" && logMatch) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const orderId = Number(logMatch[1]);
       const rows = await cashApprovalService.getCashLogByOrderId(orderId);
       writeJson(res, 200, { data: rows, meta: { timestamp: new Date().toISOString() } });
@@ -155,7 +155,7 @@ async function handleCashApiRequest(req, res, url) {
 
     const submitMatch = norm.match(/^\/api\/cash\/submit\/(\d+)$/);
     if (req.method === "POST" && submitMatch) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const orderId = Number(submitMatch[1]);
       let body = {};
       try {
@@ -185,7 +185,7 @@ async function handleCashApiRequest(req, res, url) {
 
     const resubmitMatch = norm.match(/^\/api\/cash\/resubmit\/(\d+)$/);
     if (req.method === "POST" && resubmitMatch) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const txId = Number(resubmitMatch[1]);
       let body = {};
       try {
@@ -213,7 +213,7 @@ async function handleCashApiRequest(req, res, url) {
 
     const approveMatch = norm.match(/^\/api\/cash\/approve\/(\d+)$/);
     if (req.method === "POST" && approveMatch) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const txId = Number(approveMatch[1]);
       let body = {};
       try {
@@ -239,7 +239,7 @@ async function handleCashApiRequest(req, res, url) {
 
     const rejectMatch = norm.match(/^\/api\/cash\/reject\/(\d+)$/);
     if (req.method === "POST" && rejectMatch) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const txId = Number(rejectMatch[1]);
       let body = {};
       try {

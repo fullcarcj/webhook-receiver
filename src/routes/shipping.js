@@ -1,7 +1,7 @@
 "use strict";
 
 const { pool } = require("../../db-postgres");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const { rejectDuringDowntime } = require("../utils/sessionGuard");
 const shippingService = require("../services/shippingService");
 
@@ -46,7 +46,7 @@ async function handleShippingApiRequest(req, res, url) {
   try {
     // ── Settings ─────────────────────────────────────────────────────
     if (req.method === "GET" && url.pathname === "/api/shipping/settings") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const s = await shippingService.getShippingSettings(COMPANY_ID);
       writeJson(res, 200, { ok: true, data: s });
       return true;
@@ -54,7 +54,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     if (req.method === "PATCH" && url.pathname.startsWith("/api/shipping/settings/")) {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const key = decodeURIComponent(url.pathname.slice("/api/shipping/settings/".length));
       if (!key || key.includes("/")) {
         writeJson(res, 400, { ok: false, error: "key inválida" });
@@ -79,7 +79,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     // ── Quote (antes de /providers/:id para no capturar "quote" como id) ─
     if (req.method === "POST" && url.pathname === "/api/shipping/quote/all") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const body = await parseJsonBody(req);
       const mode = String(body.shipment_mode || "").trim();
       const cbm = parseFloat(body.total_cbm || 0);
@@ -113,7 +113,7 @@ async function handleShippingApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/shipping/quote") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const body = await parseJsonBody(req);
       const pid = Number(body.provider_id);
       const mode = String(body.shipment_mode || "").trim();
@@ -149,7 +149,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     if (req.method === "POST" && url.pathname === "/api/shipping/rates") {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const body = await parseJsonBody(req);
       const pid = Number(body.provider_id);
       const mode = String(body.shipment_mode || "").trim();
@@ -169,7 +169,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     if (req.method === "POST" && url.pathname === "/api/shipping/assign-category") {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const body = await parseJsonBody(req);
       const skus = body.skus;
       const cid = Number(body.category_id);
@@ -183,7 +183,7 @@ async function handleShippingApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/shipping/unassigned-products") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const page = Number(url.searchParams.get("page") || 1);
       const pageSize = Number(url.searchParams.get("page_size") || 500);
       const data = await shippingService.getUnassignedProducts({ page, pageSize });
@@ -193,7 +193,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     // ── Providers ─────────────────────────────────────────────────────
     if (req.method === "GET" && url.pathname === "/api/shipping/providers") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const scope = url.searchParams.get("scope") || null;
       const ia = url.searchParams.get("is_active");
       const isActive = ia !== undefined && ia !== null && ia !== "" ? ia === "true" : null;
@@ -207,7 +207,7 @@ async function handleShippingApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && /^\/api\/shipping\/providers\/\d+$/.test(url.pathname)) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = parseIdFromPath(url.pathname, /^\/api\/shipping\/providers\/(\d+)$/);
       if (!id) {
         writeJson(res, 400, { ok: false, error: "id inválido" });
@@ -224,7 +224,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     if (req.method === "POST" && url.pathname === "/api/shipping/providers") {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const body = await parseJsonBody(req);
       const name = String(body.name || "").trim();
       const scope = String(body.scope || "").trim();
@@ -285,7 +285,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     if (req.method === "PATCH" && /^\/api\/shipping\/providers\/\d+$/.test(url.pathname)) {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = parseIdFromPath(url.pathname, /^\/api\/shipping\/providers\/(\d+)$/);
       if (!id) {
         writeJson(res, 400, { ok: false, error: "id inválido" });
@@ -306,7 +306,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     // ── Categories ───────────────────────────────────────────────────
     if (req.method === "GET" && url.pathname === "/api/shipping/categories") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const companyId = Number(url.searchParams.get("company_id") || COMPANY_ID);
       const providerId = url.searchParams.get("provider_id");
       if (providerId) {
@@ -321,7 +321,7 @@ async function handleShippingApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && /^\/api\/shipping\/categories\/\d+$/.test(url.pathname)) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = parseIdFromPath(url.pathname, /^\/api\/shipping\/categories\/(\d+)$/);
       if (!id) {
         writeJson(res, 400, { ok: false, error: "id inválido" });
@@ -338,7 +338,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     if (req.method === "POST" && url.pathname === "/api/shipping/categories") {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const body = await parseJsonBody(req);
       const name = String(body.name || "").trim();
       if (!name) {
@@ -394,7 +394,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     if (req.method === "PATCH" && /^\/api\/shipping\/categories\/\d+\/rate$/.test(url.pathname)) {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = parseIdFromPath(url.pathname, /^\/api\/shipping\/categories\/(\d+)\/rate$/);
       if (!id) {
         writeJson(res, 400, { ok: false, error: "id inválido" });
@@ -415,7 +415,7 @@ async function handleShippingApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && /^\/api\/shipping\/categories\/\d+\/rate-history$/.test(url.pathname)) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const id = parseIdFromPath(url.pathname, /^\/api\/shipping\/categories\/(\d+)\/rate-history$/);
       if (!id) {
         writeJson(res, 400, { ok: false, error: "id inválido" });
@@ -434,7 +434,7 @@ async function handleShippingApiRequest(req, res, url) {
     // ── Legacy product assign / unassigned ─────────────────────────────
     if (req.method === "POST" && url.pathname === "/api/shipping/products/assign") {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const body = await parseJsonBody(req);
       const result = await shippingService.assignCategoryToProductsLegacy(body);
       writeJson(res, 200, { ok: true, ...result });
@@ -442,7 +442,7 @@ async function handleShippingApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/shipping/products/unassigned") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const page = Number(url.searchParams.get("page") || 1);
       const pageSize = Number(url.searchParams.get("page_size") || 100);
       const data = await shippingService.getUnassignedProducts({ page, pageSize });
@@ -451,7 +451,7 @@ async function handleShippingApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && /^\/api\/shipping\/shipments\/\d+\/validate$/.test(url.pathname)) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const shipmentId = parseIdFromPath(url.pathname, /^\/api\/shipping\/shipments\/(\d+)\/validate$/);
       if (!shipmentId) {
         writeJson(res, 400, { ok: false, error: "shipment id inválido" });
@@ -468,7 +468,7 @@ async function handleShippingApiRequest(req, res, url) {
 
     if (req.method === "POST" && /^\/api\/shipping\/shipments\/\d+\/refresh-rates$/.test(url.pathname)) {
       if (rejectDuringDowntime(req, res)) return true;
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const shipmentId = parseIdFromPath(url.pathname, /^\/api\/shipping\/shipments\/(\d+)\/refresh-rates$/);
       if (!shipmentId) {
         writeJson(res, 400, { ok: false, error: "shipment id inválido" });

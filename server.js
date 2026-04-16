@@ -7339,7 +7339,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (handleWmsTestPage(req, res, url)) {
+  if (await handleWmsTestPage(req, res, url)) {
     return;
   }
 

@@ -2,6 +2,7 @@
 
 const { z } = require("zod");
 const { timingSafeCompare } = require("../services/currencyService");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const { safeParse } = require("../middleware/validateCrm");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const purchaseService = require("../services/purchaseService");
@@ -25,18 +26,6 @@ async function parseJsonBody(req) {
   return JSON.parse(txt);
 }
 
-function ensureAdmin(req, res) {
-  const secret = process.env.ADMIN_SECRET;
-  if (!secret) {
-    writeJson(res, 503, { error: "define ADMIN_SECRET en el servidor" });
-    return false;
-  }
-  if (!timingSafeCompare(req.headers["x-admin-secret"], secret)) {
-    writeJson(res, 403, { error: "forbidden" });
-    return false;
-  }
-  return true;
-}
 
 const purchaseBodySchema = z.object({
   customer_id: z.number().int().positive(),
@@ -60,7 +49,7 @@ async function handlePurchaseApiRequest(req, res, url) {
   }
 
   applyCrmApiCorsHeaders(req, res);
-  if (!ensureAdmin(req, res)) return true;
+  if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
 
   let body = {};
   try {

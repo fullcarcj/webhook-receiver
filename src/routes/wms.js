@@ -1,6 +1,6 @@
 "use strict";
 
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
   adjustStock,
   reserveStock,
@@ -47,7 +47,7 @@ async function handleWmsApiRequest(req, res, url) {
   try {
     const binsStockMatch = url.pathname.match(/^\/api\/wms\/bins\/(\d+)\/stock\/?$/);
     if (req.method === "GET" && binsStockMatch) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const binId = Number(binsStockMatch[1]);
       const data = await getStockByBin(binId);
       writeJson(res, 200, { ok: true, data });
@@ -55,7 +55,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/wms/warehouses") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const rows = await listWarehouses(1);
       writeJson(res, 200, { ok: true, data: rows });
       return true;
@@ -63,7 +63,7 @@ async function handleWmsApiRequest(req, res, url) {
 
     const whBinsMatch = url.pathname.match(/^\/api\/wms\/warehouses\/(\d+)\/bins\/?$/);
     if (req.method === "GET" && whBinsMatch) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const warehouseId = Number(whBinsMatch[1]);
       const aisleId = url.searchParams.get("aisle_id");
       const status = url.searchParams.get("status");
@@ -77,7 +77,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/wms/picking") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const wid = url.searchParams.get("warehouse_id");
       if (!wid || !String(wid).trim()) {
         writeJson(res, 400, { ok: false, error: "warehouse_id obligatorio" });
@@ -97,7 +97,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/wms/movements") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const data = await getMovementHistory({
         sku: url.searchParams.get("sku") || null,
         binId: url.searchParams.get("bin_id"),
@@ -111,7 +111,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/api/wms/stock/")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const sku = decodeURIComponent(url.pathname.slice("/api/wms/stock/".length).replace(/\/+$/, ""));
       if (!sku) {
         writeJson(res, 400, { ok: false, error: "sku requerido" });
@@ -124,7 +124,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/wms/picking-list") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const raw = url.searchParams.get("skus") || "";
       const skus = raw
         .split(",")
@@ -159,7 +159,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/stock/adjust") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const binId = body.bin_id != null ? body.bin_id : body.binId;
       const sku = body.product_sku != null ? body.product_sku : body.sku;
@@ -177,7 +177,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/stock/reserve") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const qty = body.qty != null ? body.qty : body.quantity;
       if (!Number.isFinite(Number(qty)) || Number(qty) <= 0) {
@@ -210,7 +210,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/stock/commit") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const qty = body.qty != null ? body.qty : body.quantity;
       if (!Number.isFinite(Number(qty)) || Number(qty) <= 0) {
@@ -238,7 +238,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/stock/release") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const qty = body.qty != null ? body.qty : body.quantity;
       if (!Number.isFinite(Number(qty)) || Number(qty) <= 0) {
@@ -268,7 +268,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/ml-order/reserve") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const mlOrderId = Number(body.ml_order_id);
       const items = Array.isArray(body.items) ? body.items : [];
@@ -296,7 +296,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/ml-order/commit") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const mlOrderId = Number(body.ml_order_id != null ? body.ml_order_id : body.mlOrderId);
       const userId = body.user_id != null ? body.user_id : body.userId != null ? body.userId : null;
@@ -314,7 +314,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/ml-order/release") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const mlOrderId = Number(body.ml_order_id != null ? body.ml_order_id : body.mlOrderId);
       const userId = body.user_id != null ? body.user_id : body.userId != null ? body.userId : null;
@@ -332,7 +332,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/api/wms/movements/")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const sku = decodeURIComponent(url.pathname.slice("/api/wms/movements/".length).replace(/\/+$/, ""));
       if (!sku) {
         writeJson(res, 400, { ok: false, error: "sku requerido" });
@@ -355,7 +355,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/wms/bins") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const body = await parseJsonBody(req);
       const row = await createBin({
         shelfId: Number(body.shelf_id),
@@ -369,7 +369,7 @@ async function handleWmsApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/api/wms/bins/")) {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const binCode = decodeURIComponent(url.pathname.slice("/api/wms/bins/".length).replace(/\/+$/, ""));
       if (!binCode) {
         writeJson(res, 400, { ok: false, error: "bin_code requerido" });

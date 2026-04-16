@@ -6,7 +6,7 @@ const {
   enrichPaymentsWithTaxRetentions,
   getGlobals,
 } = require("../services/taxRetentionService");
-const { ensureAdmin } = require("../middleware/adminAuth");
+const { requireAdminOrPermission } = require("../utils/authMiddleware");
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -80,7 +80,7 @@ async function handleTaxRetentionsApiRequest(req, res, url) {
     }
 
     if (req.method === "GET" && rest === "/api/tax/retention-globals") {
-      if (!ensureAdmin(req, res, url)) return true;
+      if (!await requireAdminOrPermission(req, res, 'fiscal')) return true;
       const d = url.searchParams.get("as_of") || url.searchParams.get("date");
       const row = await getGlobals(d);
       writeJson(res, 200, { ok: true, data: row });

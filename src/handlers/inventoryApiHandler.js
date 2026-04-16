@@ -6,16 +6,9 @@ const skuPrefixService = require('../services/skuPrefixService');
 const { generateSuggestedPurchaseOrder } = require('../workers/inventoryWorker');
 const { allocateNextSku } = require('../services/skuGeneratorService');
 const pricingService = require('../services/pricingService');
+const { requireAdminOrPermission } = require('../utils/authMiddleware');
 
 // ── Auth + helpers ────────────────────────────────────────────────────────────
-
-function isAdmin(req, url) {
-  const secret = process.env.ADMIN_SECRET;
-  if (!secret) return false;
-  if (req.headers['x-admin-secret'] === secret) return true;
-  if (url.searchParams.get('k') === secret) return true;
-  return false;
-}
 
 function ok(res, data, status = 200) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -220,10 +213,7 @@ async function handleInventoryApiRequest(req, res, url) {
       .replace(/\/+$/, '') || '/';
   if (!pathname.startsWith('/api/inventory')) return false;
 
-  if (!isAdmin(req, url)) {
-    fail(res, 'UNAUTHORIZED', 'Se requiere X-Admin-Secret', 401);
-    return true;
-  }
+  if (!await requireAdminOrPermission(req, res, 'catalog')) return true;
 
   const method  = req.method.toUpperCase();
   const parts   = pathname.split('/').filter(Boolean);

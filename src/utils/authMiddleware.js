@@ -18,10 +18,26 @@ function ensureJwtSecret() {
 }
 
 const ROLE_HIERARCHY = {
-  SUPERUSER: 3,
-  ADMIN:     2,
-  OPERATOR:  1,
+  SUPERUSER:          100,
+  ADMIN:               80,
+  SUPERVISOR:          60,
+  CONTADOR:            50,
+  ALMACENISTA:         45,
+  VENDEDOR_MOSTRADOR:  40,
+  VENDEDOR_EXTERNO:    40,
+  OPERADOR_DIGITAL:    35,
+  OPERATOR:            35, // legado users.sql — mismo escalón que operador digital para menú/JWT
 };
+
+/**
+ * Comparación por nivel de rol (menú dinámico, no reemplaza requirePermission en APIs).
+ * @param {string} userRole
+ * @param {string} minRole
+ * @returns {boolean}
+ */
+function hasMinRole(userRole, minRole) {
+  return (ROLE_HIERARCHY[userRole] ?? 0) >= (ROLE_HIERARCHY[minRole] ?? 999);
+}
 
 /**
  * Extrae el token JWT desde dos fuentes (en orden de prioridad):
@@ -134,8 +150,7 @@ function requirePermission(user, module, action, res) {
 }
 
 /**
- * Verifica que el usuario tiene al menos el rol mínimo requerido.
- * SUPERUSER(3) > ADMIN(2) > OPERATOR(1)
+ * Verifica que el usuario tiene al menos el rol mínimo requerido (escala ROLE_HIERARCHY).
  *
  * Uso: if (!requireRole(user, 'ADMIN', res)) return;
  *
@@ -265,5 +280,6 @@ module.exports = {
   requireRole,
   checkAdminSecretOrJwt,
   requireAdminOrPermission,
+  hasMinRole,
   ROLE_HIERARCHY,
 };

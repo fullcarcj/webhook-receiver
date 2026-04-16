@@ -3,34 +3,40 @@
 /**
  * Queries de analytics de solo-lectura para el módulo ERP/CRM.
  * Timezone: America/Caracas (-0400) en todos los DATE_TRUNC y GROUP BY.
- * Columna de monto en sales_orders: order_total_amount (Bs).
- * USD equivalente: order_total_amount / NULLIF(exchange_rate_bs_per_usd, 0)
+ * KPIs de ventas: `v_sales_unified` (POS `sales` + `sales_orders`).
+ * revenue_bs: ver V_SALES_UNIFIED_BS_AMOUNT en statsHelpers.
+ * revenue_usd: SUM(total_usd) (columna unificada en la vista).
  */
 
 const { pool }  = require("../../db");
-const { fillGaps, calcChange, calcPct } = require("../utils/statsHelpers");
+const {
+  fillGaps,
+  calcChange,
+  calcPct,
+  V_SALES_UNIFIED_BS_AMOUNT,
+} = require("../utils/statsHelpers");
 
 // ─── OVERVIEW ─────────────────────────────────────────────────────────────────
 
 async function getOverview() {
   const [todayRows, yesterdayRows, customersRow, messagesRow, reconcRow, debitRow] =
     await Promise.all([
-      // Ventas hoy
+      // Ventas hoy (POS + omnicanal)
       pool.query(`
         SELECT
-          COUNT(*)                                                    AS orders,
-          COALESCE(SUM(order_total_amount), 0)                       AS revenue_bs,
-          COALESCE(SUM(order_total_amount / NULLIF(exchange_rate_bs_per_usd,0)), 0) AS revenue_usd,
-          COUNT(*) FILTER (WHERE status='pending')                    AS pending_orders,
-          COUNT(*) FILTER (WHERE status='payment_overdue')            AS overdue_orders,
-          COALESCE(SUM(order_total_amount) FILTER (WHERE status='paid'), 0) AS collected_bs
-        FROM sales_orders
+          COUNT(*)::bigint AS orders,
+          COALESCE(SUM(${V_SALES_UNIFIED_BS_AMOUNT}), 0) AS revenue_bs,
+          COALESCE(SUM(total_usd), 0) AS revenue_usd,
+          COUNT(*) FILTER (WHERE LOWER(status) IN ('pending', 'pending_payment')) AS pending_orders,
+          COUNT(*) FILTER (WHERE LOWER(status) = 'payment_overdue') AS overdue_orders,
+          COALESCE(SUM(${V_SALES_UNIFIED_BS_AMOUNT}) FILTER (WHERE LOWER(status) = 'paid'), 0) AS collected_bs
+        FROM v_sales_unified
         WHERE DATE(created_at AT TIME ZONE 'America/Caracas') = CURRENT_DATE
       `),
       // Ventas ayer
       pool.query(`
-        SELECT COUNT(*) AS orders, COALESCE(SUM(order_total_amount), 0) AS revenue_bs
-        FROM sales_orders
+        SELECT COUNT(*)::bigint AS orders, COALESCE(SUM(${V_SALES_UNIFIED_BS_AMOUNT}), 0) AS revenue_bs
+        FROM v_sales_unified
         WHERE DATE(created_at AT TIME ZONE 'America/Caracas') = CURRENT_DATE - 1
       `),
       // Clientes nuevos hoy
@@ -110,8 +116,8 @@ async function getOverview() {
 async function getRealtime() {
   const [ordersRow, chatsRow, reconcRow] = await Promise.all([
     pool.query(`
-      SELECT COUNT(*) AS orders, COALESCE(SUM(order_total_amount),0) AS revenue_bs
-      FROM sales_orders WHERE created_at >= NOW() - INTERVAL '60 minutes'
+      SELECT COUNT(*)::bigint AS orders, COALESCE(SUM(${V_SALES_UNIFIED_BS_AMOUNT}), 0) AS revenue_bs
+      FROM v_sales_unified WHERE created_at >= NOW() - INTERVAL '60 minutes'
     `),
     pool.query(`
       SELECT COUNT(DISTINCT chat_id) AS chats FROM crm_messages

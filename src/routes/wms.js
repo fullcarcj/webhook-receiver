@@ -15,6 +15,7 @@ const {
   listBins,
   getBinByCode,
   createBin,
+  getWmsInventorySummary,
 } = require("../services/wmsService");
 const {
   reserveForOrder,
@@ -58,6 +59,13 @@ async function handleWmsApiRequest(req, res, url) {
       if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const rows = await listWarehouses(1);
       writeJson(res, 200, { ok: true, data: rows });
+      return true;
+    }
+
+    if (req.method === "GET" && (url.pathname === "/api/wms/summary" || url.pathname === "/api/wms/summary/")) {
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
+      const summary = await getWmsInventorySummary();
+      writeJson(res, 200, { ok: true, ...summary });
       return true;
     }
 
@@ -113,6 +121,14 @@ async function handleWmsApiRequest(req, res, url) {
     if (req.method === "GET" && url.pathname.startsWith("/api/wms/stock/")) {
       if (!await requireAdminOrPermission(req, res, 'wms')) return true;
       const sku = decodeURIComponent(url.pathname.slice("/api/wms/stock/".length).replace(/\/+$/, ""));
+      if (sku === "adjust" || sku === "adjust-simple") {
+        writeJson(res, 404, {
+          ok: false,
+          error: "not_found",
+          hint: "Los ajustes son POST /api/wms/stock/adjust o POST /api/wms/stock/adjust-simple",
+        });
+        return true;
+      }
       if (!sku) {
         writeJson(res, 400, { ok: false, error: "sku requerido" });
         return true;
@@ -155,6 +171,41 @@ async function handleWmsApiRequest(req, res, url) {
           throw e;
         }
       }
+      return true;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/wms/stock/adjust-simple") {
+      if (!await requireAdminOrPermission(req, res, 'wms')) return true;
+      const body = await parseJsonBody(req);
+      const binId = Number(body.bin_id);
+      const sku = body.product_sku != null ? String(body.product_sku).trim() : "";
+      const delta =
+        body.delta != null && body.delta !== ""
+          ? Number(body.delta)
+          : NaN;
+      if (!Number.isFinite(binId) || binId <= 0) {
+        writeJson(res, 400, { ok: false, error: "bin_id debe ser un entero positivo" });
+        return true;
+      }
+      if (!sku) {
+        writeJson(res, 400, { ok: false, error: "product_sku es obligatorio" });
+        return true;
+      }
+      if (!Number.isFinite(delta) || delta === 0) {
+        writeJson(res, 400, { ok: false, error: "delta debe ser un número distinto de cero" });
+        return true;
+      }
+      const out = await adjustStock({
+        bin_id: binId,
+        product_sku: sku,
+        delta,
+        reason: body.reason,
+        reference_type: body.reference_type,
+        reference_id: body.reference_id,
+        user_id: body.user_id,
+        notes: body.notes,
+      });
+      writeJson(res, 200, { ok: true, data: out });
       return true;
     }
 

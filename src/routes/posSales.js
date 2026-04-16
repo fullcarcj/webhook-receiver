@@ -140,6 +140,7 @@ async function handlePosSalesApiRequest(req, res, url) {
         companyId:        body.company_id || 1,
         purchaseDate:     body.purchase_date || null,
         importShipmentId: body.import_shipment_id != null ? body.import_shipment_id : null,
+        supplierId:       body.supplier_id != null && body.supplier_id !== "" ? body.supplier_id : null,
         lines:            body.lines,
         notes:            body.notes || null,
         userId:           body.user_id != null ? body.user_id : null,
@@ -231,7 +232,7 @@ async function handlePosSalesApiRequest(req, res, url) {
       writeJson(res, 400, { ok: false, error: msg, code });
       return true;
     }
-    if (code === "SKU_NOT_FOUND" || code === "CUSTOMER_NOT_FOUND" || code === "SHIPMENT_NOT_FOUND") {
+    if (code === "SKU_NOT_FOUND" || code === "CUSTOMER_NOT_FOUND" || code === "SHIPMENT_NOT_FOUND" || code === "SUPPLIER_NOT_FOUND") {
       writeJson(res, 404, { ok: false, error: msg, code, sku: e.sku });
       return true;
     }

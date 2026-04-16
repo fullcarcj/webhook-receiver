@@ -173,11 +173,14 @@ const {
 const { enrichProductoConImagenesUrls, buildProductoImagenesUrls } = require("./producto-imagenes-urls");
 const { handlePublicFrontendRequest } = require("./public-frontend-api");
 const { handleCurrencyApiRequest } = require("./src/routes/currency");
+const { handleBusinessConfigRequest } = require("./src/routes/businessConfig");
 const { handleShippingApiRequest } = require("./src/routes/shipping");
 const { handleShipmentsApiRequest } = require("./src/routes/shipments");
 const { handleWmsApiRequest } = require("./src/routes/wms");
+const { handleDispatchApiRequest } = require("./src/handlers/dispatchApiHandler");
 const { handleCycleCountApiRequest } = require("./src/routes/cycleCount");
 const { handlePosSalesApiRequest } = require("./src/routes/posSales");
+const { handleSuppliersApiRequest } = require("./src/handlers/suppliersApiHandler");
 const { handleIgtfApiRequest } = require("./src/routes/igtf");
 const { handleTaxRetentionsApiRequest } = require("./src/routes/taxRetentions");
 const { handleFiscalApiRequest } = require("./src/routes/fiscal");
@@ -224,6 +227,11 @@ const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory
 const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./src/handlers/customerLoyalty");
 const { handleCustomersApiRequest } = require("./src/routes/customers");
 const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
+const { handleInboxApiRequest } = require("./src/handlers/inboxApiHandler");
+const { handleInboxIdentityRequest } = require("./src/handlers/inboxIdentityHandler");
+const { handleInboxMlQuestionRequest } = require("./src/handlers/inboxMlQuestionHandler");
+const { handleInboxQuotationRequest } = require("./src/handlers/inboxQuotationHandler");
+const { handleMenuApiRequest } = require("./src/handlers/menuApiHandler");
 const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
 const { handleProviderApiRequest } = require("./src/handlers/providerApiHandler");
 const { handleAiResponderRequest } = require("./src/handlers/aiResponderApiHandler");
@@ -2121,6 +2129,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (await handleBusinessConfigRequest(req, res, url)) {
+    return;
+  }
+
   if (
     req.method !== "GET" &&
     url.pathname.startsWith("/api/shipping") &&
@@ -2154,6 +2166,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleWmsApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/dispatch")) {
+    if (req.method !== "GET" && rejectDuringDowntime(req, res)) return;
+  }
+  if (await handleDispatchApiRequest(req, res, url)) {
     return;
   }
 
@@ -2605,6 +2624,13 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: false, error: e.message, code: e.code || undefined }));
       return;
     }
+  }
+
+  if (String(url.pathname || "").startsWith("/api/suppliers")) {
+    if (req.method !== "GET" && rejectDuringDowntime(req, res)) return;
+  }
+  if (await handleSuppliersApiRequest(req, res, url)) {
+    return;
   }
 
   if (
@@ -3063,6 +3089,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleChatApiRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleInboxIdentityRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleInboxMlQuestionRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleInboxQuotationRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleInboxApiRequest(req, res, url)) {
     return;
   }
 
@@ -7658,6 +7700,10 @@ const server = http.createServer(async (req, res) => {
 
     res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: false, error: "no encontrado" }));
+    return;
+  }
+
+  if (await handleMenuApiRequest(req, res, url)) {
     return;
   }
 

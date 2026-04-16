@@ -7,7 +7,14 @@ const igtfService = require("./igtfService");
 const taxRetentionService = require("./taxRetentionService");
 const fiscalNumberingService = require("./fiscalNumberingService");
 
-const ALLOWED_STATUS = new Set(["PENDING", "PAID", "CANCELLED", "REFUNDED"]);
+const ALLOWED_STATUS = new Set([
+  "PENDING",
+  "PAID",
+  "READY_TO_SHIP",
+  "SHIPPED",
+  "CANCELLED",
+  "REFUNDED",
+]);
 const RATE_TYPES = new Set(["BCV", "BINANCE", "ADJUSTED"]);
 
 /**
@@ -467,6 +474,7 @@ async function applyPurchaseLotReceipt(client, p) {
  * @param {number} [p.companyId]
  * @param {string|null} [p.purchaseDate] YYYY-MM-DD
  * @param {number|string|null} [p.importShipmentId]
+ * @param {number|string|null} [p.supplierId]  FK opcional a suppliers(id)
  * @param {Array<{ product_sku?: string, productSku?: string, quantity: number, unit_cost_usd?: number, unitCostUsd?: number, bin_id?: number|null, binId?: number|null, lot_id?: number|null, lotId?: number|null }>} p.lines
  * @param {string|null} [p.notes]
  * @param {number|string|null} [p.userId]
@@ -527,6 +535,12 @@ async function createPosPurchase(p) {
       ? Number(p.importShipmentId)
       : null;
 
+  const supplierIdRaw = p.supplierId != null ? p.supplierId : p.supplier_id;
+  const supplierId =
+    supplierIdRaw != null && String(supplierIdRaw).trim() !== ""
+      ? Number(supplierIdRaw)
+      : null;
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -538,6 +552,15 @@ async function createPosPurchase(p) {
       if (!sh.length) {
         throw Object.assign(new Error(`import_shipment_id no existe: ${importShipmentId}`), {
           code: "SHIPMENT_NOT_FOUND",
+        });
+      }
+    }
+
+    if (supplierId != null && Number.isFinite(supplierId) && supplierId > 0) {
+      const { rows: sup } = await client.query(`SELECT id FROM suppliers WHERE id = $1 LIMIT 1`, [supplierId]);
+      if (!sup.length) {
+        throw Object.assign(new Error(`supplier_id no existe: ${supplierId}`), {
+          code: "SUPPLIER_NOT_FOUND",
         });
       }
     }
@@ -599,13 +622,13 @@ async function createPosPurchase(p) {
 
     const insPur = await client.query(
       `INSERT INTO purchases (
-         company_id, import_shipment_id, purchase_date,
+         company_id, import_shipment_id, supplier_id, purchase_date,
          rate_applied, rate_type, rate_date,
          subtotal_usd, total_usd, status, notes
        ) VALUES (
-         $1, $2, $3::date,
-         $4::numeric, $5::rate_type, $6::date,
-         $7::numeric, $8::numeric, $9, $10
+         $1, $2, $3, $4::date,
+         $5::numeric, $6::rate_type, $7::date,
+         $8::numeric, $9::numeric, $10, $11
        )
        RETURNING *`,
       [
@@ -613,6 +636,7 @@ async function createPosPurchase(p) {
         importShipmentId != null && Number.isFinite(importShipmentId) && importShipmentId > 0
           ? importShipmentId
           : null,
+        supplierId != null && Number.isFinite(supplierId) && supplierId > 0 ? supplierId : null,
         purchaseDate,
         rate.rate_applied,
         rate.rate_type,
@@ -715,7 +739,13 @@ async function getPosPurchaseById(purchaseId) {
   if (!Number.isFinite(id) || id <= 0) {
     throw Object.assign(new Error("id inválido"), { code: "INVALID_ID" });
   }
-  const { rows: pRows } = await pool.query(`SELECT * FROM purchases WHERE id = $1`, [id]);
+  const { rows: pRows } = await pool.query(
+    `SELECT p.*, s.name AS supplier_name
+     FROM purchases p
+     LEFT JOIN suppliers s ON s.id = p.supplier_id
+     WHERE p.id = $1`,
+    [id]
+  );
   if (!pRows.length) {
     throw Object.assign(new Error("Compra no encontrada"), { code: "NOT_FOUND" });
   }
@@ -745,22 +775,27 @@ async function listPosPurchases({ companyId = 1, from = null, to = null, status 
   const lim = Math.min(Math.max(1, Number(limit) || 50), 200);
   const off = Math.max(0, Number(offset) || 0);
 
-  const conditions = [`company_id = $1`];
+  const conditions = [`p.company_id = $1`];
   const params = [cid];
   let p = 2;
 
-  if (from) { conditions.push(`purchase_date >= $${p++}::date`); params.push(from); }
-  if (to)   { conditions.push(`purchase_date <= $${p++}::date`); params.push(to); }
-  if (status) { conditions.push(`status = $${p++}`); params.push(status.toUpperCase()); }
+  if (from) { conditions.push(`p.purchase_date >= $${p++}::date`); params.push(from); }
+  if (to)   { conditions.push(`p.purchase_date <= $${p++}::date`); params.push(to); }
+  if (status) { conditions.push(`p.status = $${p++}`); params.push(status.toUpperCase()); }
 
   const where = conditions.join(" AND ");
 
   const [{ rows: dataRows }, { rows: countRows }] = await Promise.all([
     pool.query(
-      `SELECT * FROM purchases WHERE ${where} ORDER BY purchase_date DESC, id DESC LIMIT $${p} OFFSET $${p + 1}`,
+      `SELECT p.*, s.name AS supplier_name
+       FROM purchases p
+       LEFT JOIN suppliers s ON s.id = p.supplier_id
+       WHERE ${where}
+       ORDER BY p.purchase_date DESC, p.created_at DESC, p.id DESC
+       LIMIT $${p} OFFSET $${p + 1}`,
       [...params, lim, off]
     ),
-    pool.query(`SELECT COUNT(*) AS total FROM purchases WHERE ${where}`, params),
+    pool.query(`SELECT COUNT(*) AS total FROM purchases p WHERE ${where}`, params),
   ]);
 
   return {

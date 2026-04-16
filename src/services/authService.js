@@ -39,7 +39,7 @@ function validatePassword(password) {
 }
 
 /**
- * Carga los permisos del rol desde role_permissions.
+ * Carga los permisos del rol desde role_permissions (incl. roles añadidos por sql/20260416_roles_8niveles.sql).
  * @param {string} role
  * @returns {Promise<Array<{module: string, action: string}>>}
  */

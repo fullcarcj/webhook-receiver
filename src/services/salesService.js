@@ -8,8 +8,36 @@ const { CustomerModel } = require("./crmIdentityService");
 const { customersHasPhone2Column } = require("../utils/customersPhone2");
 const { salesOrdersHasLifecycleColumns } = require("../utils/salesOrdersLifecycle");
 const bundleService = require("./bundleService");
+const { V_SALES_UNIFIED_BS_AMOUNT } = require("../utils/statsHelpers");
 
-const MANUAL_SOURCES = new Set(["mostrador", "social_media"]);
+const MANUAL_SOURCES = new Set(["mostrador", "social_media", "ecommerce", "fuerza_ventas"]);
+
+/** Mapa source → channel_id (catálogo sales_channels) */
+const SOURCE_TO_CHANNEL = {
+  mostrador:      1,
+  social_media:   2,
+  mercadolibre:   3,
+  ecommerce:      4,
+  fuerza_ventas:  5,
+};
+
+/** payment_status inicial por canal (post-migración) */
+const CHANNEL_PAYMENT_STATUS = {
+  1: 'not_required', // MOSTRADOR: cobrado en caja
+  2: 'pending',      // WHATSAPP: transferencia diferida
+  3: 'pending',      // ML: esperar payment_approved webhook
+  4: 'pending',      // ECOMMERCE: esperar webhook pasarela
+  5: 'pending',      // FUERZA_VENTAS: crédito o efectivo diferido
+};
+
+/** fulfillment_status inicial por canal */
+const CHANNEL_FULFILLMENT_STATUS = {
+  1: 'not_required', // MOSTRADOR: retiro en el acto
+  2: 'pending',
+  3: 'pending',
+  4: 'pending',
+  5: 'pending',
+};
 const DEFAULT_ML_ACTIVE_MAX_DAYS = 10;
 
 function resolveMlActiveMaxDays() {
@@ -268,6 +296,8 @@ async function fetchOrderItems(client, salesOrderId) {
  */
 async function createOrder({
   source,
+  channelId,
+  sellerId,
   customerId,
   items,
   notes,
@@ -287,6 +317,29 @@ async function createOrder({
     e.code = "BAD_REQUEST";
     throw e;
   }
+
+  // Inferir channel_id desde source si no se provee explícitamente
+  const resolvedChannelId = channelId != null
+    ? Number(channelId)
+    : (SOURCE_TO_CHANNEL[source] ?? null);
+
+  // CH-05 fuerza_ventas: seller_id obligatorio
+  if (source === 'fuerza_ventas' && !sellerId) {
+    const e = new Error("seller_id es obligatorio para órdenes de fuerza_ventas (CH-05)");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  // CH-02 whatsapp/redes: cliente obligatorio
+  if (source === 'social_media' && !customerId) {
+    const e = new Error("customer_id es obligatorio para órdenes de WhatsApp/redes (CH-02)");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  const resolvedSellerId = sellerId != null ? Number(sellerId) : null;
+  const paymentSt  = CHANNEL_PAYMENT_STATUS[resolvedChannelId]  ?? 'pending';
+  const fulfillSt  = CHANNEL_FULFILLMENT_STATUS[resolvedChannelId] ?? 'pending';
   const st =
     status === "pending" || status === "pending_payment" ? "pending" : "paid";
   const cashApprovalService = require("./cashApprovalService");
@@ -360,7 +413,7 @@ async function createOrder({
     );
     if (dup.rows.length) {
       await client.query("ROLLBACK");
-      const existing = await getSalesOrderById(dup.rows[0].id);
+      const existing = await fetchSalesOrderOmnichannelDetail(dup.rows[0].id);
       return { ...existing, idempotent: true };
     }
 
@@ -382,14 +435,17 @@ async function createOrder({
 
     const ins = await client.query(
       `INSERT INTO sales_orders (
-         source, external_order_id, customer_id, status,
+         source, channel_id, seller_id, external_order_id, customer_id, status,
          order_total_amount, total_amount_bs, exchange_rate_bs_per_usd, payment_method,
+         payment_status, fulfillment_status,
          notes, sold_by, applies_stock, records_cash
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, TRUE)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE, TRUE)
        RETURNING id, created_at`,
       [
         source,
+        resolvedChannelId,
+        resolvedSellerId,
         extId,
         cid,
         insertStatus,
@@ -397,6 +453,8 @@ async function createOrder({
         totalBs != null ? totalBs.toFixed(2) : null,
         rate != null && Number.isFinite(rate) ? rate : null,
         pay,
+        paymentSt,
+        fulfillSt,
         notes ?? null,
         soldBy ?? null,
       ]
@@ -537,7 +595,7 @@ async function createOrder({
       }
     }
 
-    const out = await getSalesOrderById(orderId);
+    const out = await fetchSalesOrderOmnichannelDetail(orderId);
     return { ...out, idempotent: false };
   } catch (e) {
     try {
@@ -554,8 +612,12 @@ async function createOrder({
 /** @deprecated usar createOrder */
 const createSalesOrder = createOrder;
 
-async function getSalesOrderById(id) {
-  const oid = Number(id);
+/**
+ * Detalle omnicanal desde `sales_orders` + ítems (ids numéricos legacy).
+ * @param {number} oid
+ * @param {{ responseId?: string }} [opts] Si `responseId` (p.ej. `so-42`), se devuelve como `id` en el JSON.
+ */
+async function fetchSalesOrderOmnichannelDetail(oid, opts) {
   if (!Number.isFinite(oid) || oid <= 0) {
     const e = new Error("id inválido");
     e.code = "BAD_REQUEST";
@@ -604,8 +666,9 @@ async function getSalesOrderById(id) {
       [oid]
     );
     const tot = Number(o.order_total_amount);
+    const responseId = opts && opts.responseId != null ? opts.responseId : o.id;
     return {
-      id: o.id,
+      id: responseId,
       source: o.source,
       external_order_id: o.external_order_id,
       customer_id: o.customer_id,
@@ -655,6 +718,141 @@ async function getSalesOrderById(id) {
   }
 }
 
+/**
+ * Detalle venta POS (`sales` + `sale_lines`).
+ * @param {number} saleId
+ * @param {{ responseId?: string }} [opts]
+ */
+async function getPosSaleUnifiedDetail(saleId, opts) {
+  const sid = Number(saleId);
+  if (!Number.isFinite(sid) || sid <= 0) {
+    const e = new Error("id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  try {
+    const { rows: srows } = await pool.query(`SELECT * FROM sales WHERE id = $1`, [sid]);
+    if (!srows.length) {
+      const e = new Error("NOT_FOUND");
+      e.code = "NOT_FOUND";
+      throw e;
+    }
+    const s = srows[0];
+    const { rows: irows } = await pool.query(
+      `SELECT sl.id,
+              p.id AS product_id,
+              sl.product_sku AS sku,
+              sl.quantity,
+              sl.unit_price_usd,
+              sl.line_total_usd
+       FROM sale_lines sl
+       LEFT JOIN products p ON p.sku = sl.product_sku
+       WHERE sl.sale_id = $1
+       ORDER BY sl.id`,
+      [sid]
+    );
+    let paymentMethod = null;
+    try {
+      const { rows: pm } = await pool.query(
+        `SELECT string_agg(DISTINCT payment_method_code, ', ' ORDER BY payment_method_code) AS pm
+         FROM sale_payments WHERE sale_id = $1`,
+        [sid]
+      );
+      paymentMethod = pm[0] && pm[0].pm ? String(pm[0].pm) : null;
+    } catch (pe) {
+      if (pe && pe.code !== "42P01") throw mapErr(pe);
+    }
+    const st = String(s.status || "").toUpperCase().trim();
+    let statusApi = String(s.status || "").toLowerCase();
+    if (st === "PAID") statusApi = "paid";
+    else if (st === "PENDING") statusApi = "pending";
+    else if (st === "CANCELLED") statusApi = "cancelled";
+    else if (st === "REFUNDED") statusApi = "refunded";
+
+    const tot = Number(s.total_usd);
+    const totalBs =
+      s.total_bs != null && s.total_bs !== ""
+        ? Number(s.total_bs)
+        : s.rate_applied != null && Number.isFinite(Number(s.rate_applied))
+          ? Number((tot * Number(s.rate_applied)).toFixed(2))
+          : null;
+    const responseId = opts && opts.responseId != null ? opts.responseId : `pos-${sid}`;
+    return {
+      id: responseId,
+      source: "mostrador",
+      external_order_id: null,
+      customer_id: s.customer_id != null ? Number(s.customer_id) : null,
+      status: statusApi,
+      order_total_amount: tot,
+      total_amount_usd: tot,
+      total_usd: tot,
+      total_amount_bs: totalBs,
+      exchange_rate_bs_per_usd: s.rate_applied != null ? Number(s.rate_applied) : null,
+      payment_method: paymentMethod,
+      loyalty_points_earned: 0,
+      notes: s.notes,
+      sold_by: null,
+      applies_stock: true,
+      records_cash: true,
+      ml_user_id: null,
+      lifecycle_status: null,
+      ml_status: null,
+      motivo_anulacion: null,
+      tipo_calificacion_ml: null,
+      aprobado_por_user_id: null,
+      es_pago_auto_banesco: null,
+      metodo_despacho: null,
+      calificacion_ml: null,
+      rating_deadline_at: null,
+      is_rating_alert: null,
+      created_at: s.created_at,
+      updated_at: s.updated_at,
+      reconciled_statement_id: null,
+      items: irows.map((r) => {
+        const sub = Number(r.line_total_usd);
+        return {
+          id: r.id,
+          product_id: r.product_id != null ? Number(r.product_id) : null,
+          sku: r.sku,
+          quantity: r.quantity,
+          unit_price_usd: Number(r.unit_price_usd),
+          line_total_usd: sub,
+          subtotal_usd: sub,
+        };
+      }),
+    };
+  } catch (e) {
+    throw mapErr(e);
+  }
+}
+
+/**
+ * GET /api/sales/:id — acepta id numérico (sales_orders), `so-N` o `pos-N` (vista unificada).
+ */
+async function getSalesOrderById(rawId) {
+  const s = rawId != null ? String(rawId).trim() : "";
+  if (!s) {
+    const e = new Error("id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  if (/^pos-\d+$/i.test(s)) {
+    const num = Number(s.slice(4));
+    return getPosSaleUnifiedDetail(num, { responseId: s });
+  }
+  if (/^so-\d+$/i.test(s)) {
+    const num = Number(s.slice(3));
+    return fetchSalesOrderOmnichannelDetail(num, { responseId: s });
+  }
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    return fetchSalesOrderOmnichannelDetail(n, {});
+  }
+  const e = new Error("id inválido");
+  e.code = "BAD_REQUEST";
+  throw e;
+}
+
 async function listSalesOrders({
   limit = 50,
   offset = 0,
@@ -672,55 +870,47 @@ async function listSalesOrders({
   let n = 1;
   const explicitStatus = status != null && String(status).trim() !== "";
   if (excludeCompleted && !explicitStatus) {
-    cond.push(`so.status <> $${n++}`);
+    cond.push(`vu.status <> $${n++}`);
     params.push("completed");
   }
   if (source) {
-    cond.push(`so.source = $${n++}`);
+    cond.push(`vu.source = $${n++}`);
     params.push(source);
   }
   if (explicitStatus) {
-    cond.push(`so.status = $${n++}`);
+    cond.push(`vu.status = $${n++}`);
     params.push(status);
   }
   if (from) {
-    cond.push(`so.created_at >= $${n++}`);
+    cond.push(`vu.created_at >= $${n++}`);
     params.push(from);
   }
   if (to) {
-    cond.push(`so.created_at <= $${n++}`);
+    cond.push(`vu.created_at <= $${n++}`);
     params.push(to);
   }
   // Evita contaminar "ventas activas" con órdenes ML antiguas.
   const mlActiveDays = resolveMlActiveMaxDays();
   cond.push(
-    `(so.source <> 'mercadolibre' OR so.created_at >= (NOW() - ($${n++}::text || ' days')::interval))`
+    `(vu.source <> 'mercadolibre' OR vu.created_at >= (NOW() - ($${n++}::text || ' days')::interval))`
   );
   params.push(String(mlActiveDays));
   const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
   params.push(lim, off);
   try {
     const { rows } = await pool.query(
-      `SELECT so.id, so.source, so.external_order_id, so.customer_id, so.status,
-              so.order_total_amount, so.loyalty_points_earned,
-              so.notes, so.sold_by, so.created_at,
-              rl.bank_statement_id AS reconciled_statement_id
-       FROM sales_orders so
-       LEFT JOIN LATERAL (
-         SELECT r.bank_statement_id
-         FROM reconciliation_log r
-         WHERE r.order_id = so.id
-           AND r.bank_statement_id IS NOT NULL
-         ORDER BY r.created_at DESC, r.id DESC
-         LIMIT 1
-       ) rl ON TRUE
+      `SELECT vu.id, vu.source, vu.external_order_id, vu.customer_id, vu.status,
+              vu.order_total_amount, vu.loyalty_points_earned,
+              vu.notes, vu.sold_by, vu.created_at,
+              vu.reconciled_statement_id
+       FROM v_sales_unified vu
        ${where}
-       ORDER BY so.created_at DESC
+       ORDER BY vu.created_at DESC
        LIMIT $${n++} OFFSET $${n}`,
       params
     );
     const { rows: countRows } = await pool.query(
-      `SELECT COUNT(*)::bigint AS c FROM sales_orders so ${where}`,
+      `SELECT COUNT(*)::bigint AS c FROM v_sales_unified vu ${where}`,
       params.slice(0, -2)
     );
     return {
@@ -769,19 +959,19 @@ async function getSalesStats({ from, to }) {
     const { rows } = await pool.query(
       `SELECT source,
               COUNT(*)::bigint AS order_count,
-              COALESCE(SUM(order_total_amount), 0)::numeric AS order_total_sum,
-              COALESCE(SUM(total_amount_bs), 0)::numeric AS total_amount_bs
-       FROM sales_orders
+              COALESCE(SUM(${V_SALES_UNIFIED_BS_AMOUNT}), 0)::numeric AS order_total_sum,
+              COALESCE(SUM(${V_SALES_UNIFIED_BS_AMOUNT}), 0)::numeric AS total_amount_bs
+       FROM v_sales_unified
        ${where}
        GROUP BY source
        ORDER BY source`,
       params
     );
     const { rows: sumRows } = await pool.query(
-      `SELECT COALESCE(SUM(order_total_amount), 0)::numeric AS order_total_sum,
-              COALESCE(SUM(total_amount_bs), 0)::numeric AS total_amount_bs,
+      `SELECT COALESCE(SUM(${V_SALES_UNIFIED_BS_AMOUNT}), 0)::numeric AS order_total_sum,
+              COALESCE(SUM(${V_SALES_UNIFIED_BS_AMOUNT}), 0)::numeric AS total_amount_bs,
               COUNT(*)::bigint AS order_count
-       FROM sales_orders ${where}`,
+       FROM v_sales_unified ${where}`,
       params
     );
     return {
@@ -944,7 +1134,7 @@ async function patchSalesOrderStatus(orderId, newStatus) {
     }
 
     await client.query("COMMIT");
-    return getSalesOrderById(oid);
+    return fetchSalesOrderOmnichannelDetail(oid);
   } catch (e) {
     try {
       await client.query("ROLLBACK");
@@ -1154,7 +1344,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     );
     if (dup.rows.length) {
       await client.query("COMMIT");
-      const existing = await getSalesOrderById(dup.rows[0].id);
+      const existing = await fetchSalesOrderOmnichannelDetail(dup.rows[0].id);
       return { ...existing, idempotent: true, import: "ml" };
     }
     let totalUsd = Number(ml.total_amount);
@@ -1262,7 +1452,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
 
     await client.query("COMMIT");
     try {
-      const out = await getSalesOrderById(salesId);
+      const out = await fetchSalesOrderOmnichannelDetail(salesId);
       return { ...out, idempotent: false, import: "ml" };
     } catch (readErr) {
       let fr;
@@ -1317,7 +1507,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
         [extId]
       );
       if (r.rows.length) {
-        const existing = await getSalesOrderById(r.rows[0].id);
+        const existing = await fetchSalesOrderOmnichannelDetail(r.rows[0].id);
         return { ...existing, idempotent: true, import: "ml" };
       }
     }

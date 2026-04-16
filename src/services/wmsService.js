@@ -756,6 +756,34 @@ async function createBin({ shelfId, level, maxWeightKg, maxVolumeCbm, notes }) {
   return rows[0] || null;
 }
 
+/**
+ * KPIs agregados para dashboard WMS (bin_stock + inventory.stock_min por producto).
+ * bin_stock vacío → ceros. Requiere tablas `products` e `inventory` (LEFT JOIN).
+ */
+async function getWmsInventorySummary() {
+  const { rows } = await pool.query(`
+    SELECT
+      COUNT(DISTINCT bs.product_sku)::bigint AS total_skus,
+      COALESCE(SUM(bs.qty_available), 0)::numeric AS total_units,
+      COUNT(*) FILTER (WHERE bs.qty_available = 0)::bigint AS stockout_count,
+      COUNT(*) FILTER (
+        WHERE bs.qty_available > 0
+          AND inv.stock_min IS NOT NULL
+          AND bs.qty_available <= inv.stock_min
+      )::bigint AS low_stock_count
+    FROM bin_stock bs
+    LEFT JOIN products p ON p.sku = bs.product_sku
+    LEFT JOIN inventory inv ON inv.product_id = p.id
+  `);
+  const r = rows[0] || {};
+  return {
+    total_skus: Number(r.total_skus || 0),
+    total_units: Number(r.total_units || 0),
+    stockout_count: Number(r.stockout_count || 0),
+    low_stock_count: Number(r.low_stock_count || 0),
+  };
+}
+
 module.exports = {
   setMovementSessionVars,
   setMovementContext,
@@ -775,4 +803,5 @@ module.exports = {
   listBins,
   getBinByCode,
   createBin,
+  getWmsInventorySummary,
 };

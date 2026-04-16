@@ -88,4 +88,18 @@ function buildMeta(startTime, label) {
   };
 }
 
-module.exports = { fillGaps, calcChange, calcPct, resolvePeriod, buildMeta };
+/**
+ * Monto equivalente en Bs por fila de `v_sales_unified`:
+ * POS (`sales`) = USD × tasa; omnicanal (`sales_orders`) = `order_total_amount` (Bs).
+ */
+const V_SALES_UNIFIED_BS_AMOUNT =
+  "CASE WHEN source_table = 'sales' THEN total_usd * NULLIF(exchange_rate_bs_per_usd, 0) ELSE order_total_amount END";
+
+module.exports = {
+  fillGaps,
+  calcChange,
+  calcPct,
+  resolvePeriod,
+  buildMeta,
+  V_SALES_UNIFIED_BS_AMOUNT,
+};

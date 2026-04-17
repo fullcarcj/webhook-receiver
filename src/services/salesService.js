@@ -1461,13 +1461,23 @@ function extractMlOrderFees(rawJson) {
   }
 }
 
-function mlStatusToSalesStatus(mlStatus) {
+function mlStatusToSalesStatus(mlStatus, feedbackSale = null, dateCreated = null) {
   const s = String(mlStatus || "")
     .toLowerCase()
     .trim();
-  if (s === "cancelled" || s === "invalid") return "cancelled";
-  if (s === "paid") return "paid";
-  if (s === "refunded" || s === "partially_refunded") return "cancelled";
+  if (["cancelled", "invalid", "refunded", "partially_refunded"].includes(s)) {
+    return "cancelled";
+  }
+  if (s === "confirmed") {
+    const isPositive = String(feedbackSale || "")
+      .toLowerCase()
+      .trim() === "positive";
+    if (isPositive) return "completed";
+    const isOld = dateCreated
+      ? Date.now() - new Date(dateCreated).getTime() > 10 * 24 * 60 * 60 * 1000
+      : false;
+    return isOld ? "completed" : "paid";
+  }
   return "pending";
 }
 
@@ -1507,7 +1517,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     await client.query("BEGIN");
 
     const { rows: mrows } = await client.query(
-      `SELECT ml_user_id, order_id, status, total_amount, buyer_id, date_created, raw_json
+      `SELECT ml_user_id, order_id, status, total_amount, buyer_id, date_created, feedback_sale, raw_json
        FROM ml_orders WHERE ml_user_id = $1 AND order_id = $2`,
       [mUid, oid]
     );
@@ -1549,7 +1559,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     if (!Number.isFinite(totalUsd) || totalUsd <= 0) {
       totalUsd = 0.01;
     }
-    const st = mlStatusToSalesStatus(ml.status);
+    const st = mlStatusToSalesStatus(ml.status, ml.feedback_sale, ml.date_created);
     const lifecycle = lifecycleStatusFromSalesStatus(st);
     const mlStatusRaw = String(ml.status || "").trim() || null;
     const ratingDays = Math.max(1, parseInt(process.env.ML_RATING_DEADLINE_DAYS || "30", 10) || 30);
@@ -1600,23 +1610,25 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
       loyaltyPoints = earn.points_earned || 0;
     }
 
+    const channelId = SOURCE_TO_CHANNEL["mercadolibre"] || 3;
     const hasLifecycle = await salesOrdersHasLifecycleColumns(client);
     let ins;
     const mlCreatedAt = ml.date_created || null;
     if (hasLifecycle) {
       ins = await client.query(
-        `INSERT INTO sales_orders (source, external_order_id, customer_id, status, order_total_amount,
+        `INSERT INTO sales_orders (source, external_order_id, customer_id, channel_id, status, order_total_amount,
           total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
           notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned,
           lifecycle_status, ml_status, rating_deadline_at, created_at)
-         VALUES ('mercadolibre', $1, $2, $3, $4,
-          $5, $6, $7, $8::date,
-          $9, NULL, FALSE, FALSE, $10, $11,
-          $12, $13, NOW() + ($14::text || ' days')::interval, COALESCE($15::timestamptz, NOW()))
+         VALUES ('mercadolibre', $1, $2, $3, $4, $5,
+          $6, $7, $8, $9::date,
+          $10, NULL, FALSE, FALSE, $11, $12,
+          $13, $14, NOW() + ($15::text || ' days')::interval, COALESCE($16::timestamptz, NOW()))
          RETURNING id`,
         [
           extId,
           customerId,
+          channelId,
           st,
           totalUsd.toFixed(2),
           totalBs != null ? totalBs.toFixed(2) : null,
@@ -1634,16 +1646,28 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
       );
     } else {
       ins = await client.query(
-        `INSERT INTO sales_orders (source, external_order_id, customer_id, status, order_total_amount,
+        `INSERT INTO sales_orders (source, external_order_id, customer_id, channel_id, status, order_total_amount,
           total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
           notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned, created_at)
-         VALUES ('mercadolibre', $1, $2, $3, $4,
-          $5, $6, $7, $8::date,
-          $9, NULL, FALSE, FALSE, $10, $11, COALESCE($12::timestamptz, NOW()))
+         VALUES ('mercadolibre', $1, $2, $3, $4, $5,
+          $6, $7, $8, $9::date,
+          $10, NULL, FALSE, FALSE, $11, $12, COALESCE($13::timestamptz, NOW()))
          RETURNING id`,
-        [extId, customerId, st, totalUsd.toFixed(2),
-         totalBs != null ? totalBs.toFixed(2) : null, rateApplied, rateType, rateDate,
-         notes, mUid, loyaltyPoints, mlCreatedAt]
+        [
+          extId,
+          customerId,
+          channelId,
+          st,
+          totalUsd.toFixed(2),
+          totalBs != null ? totalBs.toFixed(2) : null,
+          rateApplied,
+          rateType,
+          rateDate,
+          notes,
+          mUid,
+          loyaltyPoints,
+          mlCreatedAt,
+        ]
       );
     }
     const salesId = ins.rows[0].id;
@@ -1983,6 +2007,7 @@ async function importSalesOrdersFromMlTable({
   const summary = {
     imported: 0,
     idempotent: 0,
+    skipped: 0,
     rows_in_batch: rows.length,
     errors: [],
     ml_feedback_filter: mlFeedbackFilter || "none",
@@ -1993,8 +2018,13 @@ async function importSalesOrdersFromMlTable({
   for (const r of rows) {
     try {
       const out = await importSalesOrderFromMlOrder({ mlUserId: r.ml_user_id, orderId: r.order_id });
-      if (out.idempotent) summary.idempotent++;
-      else summary.imported++;
+      if (out && out.skipped) {
+        summary.skipped++;
+      } else if (out && out.idempotent) {
+        summary.idempotent++;
+      } else {
+        summary.imported++;
+      }
     } catch (err) {
       summary.errors.push({
         ml_user_id: r.ml_user_id,

@@ -1,0 +1,43 @@
+# Import ML → sales_orders vía POST /api/sales/import/ml (Render u otro host).
+# 06:00 America/Caracas (UTC−4) = 10:00 UTC.
+# Requiere en el servicio Node: SALES_ML_IMPORT_ENABLED=1.
+# Secrets del repo: RENDER_URL (raíz sin path), ADMIN_SECRET (cabecera X-Admin-Secret).
+
+name: Import ML sales daily
+
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: import-ml-sales-daily
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: POST /api/sales/import/ml (all_accounts)
+        env:
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+        run: |
+          test -n "$RENDER_URL"
+          test -n "$ADMIN_SECRET"
+          BASE="${RENDER_URL//[[:space:]]/}"
+          BASE="${BASE%/}"
+          while [[ "$BASE" == */ ]]; do BASE="${BASE%/}"; done
+          echo "GET ${BASE}/health"
+          curl -fsS -o /dev/null -w "health HTTP %{http_code}\n" "${BASE}/health"
+          BODY='{"all_accounts":true,"limit":500,"offset":0,"ml_feedback_filter":"none"}'
+          echo "POST ${BASE}/api/sales/import/ml"
+          code=$(curl -sS -o /tmp/ml-import.json -w "%{http_code}" -X POST "${BASE}/api/sales/import/ml" \
+            -H "Content-Type: application/json" \
+            -H "X-Admin-Secret: ${ADMIN_SECRET}" \
+            -d "$BODY")
+          echo "import HTTP ${code}"
+          cat /tmp/ml-import.json
+          echo
+          test "$code" = "200"

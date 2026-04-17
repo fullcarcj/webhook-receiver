@@ -158,7 +158,9 @@
     "clear:products-sku": "node scripts/clear-products-sku-column.js",
     "vac:products-sku-column": "node scripts/clear-products-sku-column.js",
     "report:sku-eligibility": "node scripts/report-sku-eligibility.js",
-    "import:cod-producto": "node scripts/import-cod-producto-csv.js"
+    "import:cod-producto": "node scripts/import-cod-producto-csv.js",
+    "db:merge-candidates": "node scripts/run-sql-file-pg.js sql/20260417_merge_candidates.sql",
+    "worker:dedup": "node src/workers/dedupWorker.js"
   },
   "engines": {
     "node": ">=18"

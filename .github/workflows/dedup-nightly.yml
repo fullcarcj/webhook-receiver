@@ -1,0 +1,36 @@
+# Worker S3 — deduplicación CRM (pares recientes + auto-fusión con ancla dura).
+# 03:00 America/Caracas = 07:00 UTC (UTC−4).
+# Requiere secrets.DATABASE_URL. Opcional: DEDUP_COMPANY_ID, DEDUP_LOOKBACK_DAYS, DEDUP_DRY_RUN.
+
+name: Dedup CRM nightly
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: dedup-nightly
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Worker dedup
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DEDUP_COMPANY_ID: "1"
+          DEDUP_LOOKBACK_DAYS: "7"
+        run: npm run worker:dedup

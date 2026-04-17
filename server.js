@@ -235,6 +235,7 @@ const { handleMenuApiRequest } = require("./src/handlers/menuApiHandler");
 const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
 const { handleProviderApiRequest } = require("./src/handlers/providerApiHandler");
 const { handleAutomationsApiRequest } = require("./src/handlers/automationsApiHandler");
+const { handleDedupApiRequest } = require("./src/handlers/dedupApiHandler");
 const { handleAiResponderRequest } = require("./src/handlers/aiResponderApiHandler");
 const { handleSseApiRequest, handleSseStatsRequest } = require("./src/handlers/sseApiHandler");
 const { startWorker: startReconciliationWorker, stopWorker: stopReconciliationWorker } = require("./src/workers/reconciliationWorker");
@@ -3044,6 +3045,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleAutomationsApiRequest(req, res, url)) {
+    return;
+  }
+  if (await handleDedupApiRequest(req, res, url)) {
     return;
   }
   if (await handleProviderApiRequest(req, res, url)) {

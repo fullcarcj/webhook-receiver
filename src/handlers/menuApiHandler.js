@@ -104,14 +104,17 @@ async function handleMenuApiRequest(req, res, url) {
       if (!itemVisibleForRole(role, raw)) continue;
       if (!canalOk(role, raw)) continue;
 
-      itemsOut.push({
+      const itemOut = {
         id: raw.id,
         label: raw.label,
         path: raw.path,
         minRole: raw.minRole,
         pendingMigration,
         future,
-      });
+      };
+      if (raw.icon) itemOut.icon = raw.icon;
+      if (raw.apiPath) itemOut.apiPath = raw.apiPath;
+      itemsOut.push(itemOut);
     }
 
     if (!itemsOut.length) continue;

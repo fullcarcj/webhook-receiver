@@ -169,8 +169,10 @@ function runSuperuser(menu, fails) {
   check(fails, "11 secciones", menu.length === 11);
   check(fails, "Existe config", hasSection(menu, "config"));
   check(fails, "Existe cfg.usuarios", hasItem(menu, "config", "cfg.usuarios"));
+  check(fails, "Existe cfg.automatizaciones", hasItem(menu, "config", "cfg.automatizaciones"));
   check(fails, "Existe mercadolibre", hasSection(menu, "mercadolibre"));
   check(fails, "Existe ml.mapeo", hasItem(menu, "mercadolibre", "ml.mapeo"));
+  check(fails, "Existe ml.automatizaciones", hasItem(menu, "mercadolibre", "ml.automatizaciones"));
   check(fails, "Existe fin.igtf", hasItem(menu, "finanzas", "fin.igtf"));
   check(fails, "Existe fin.retenciones", hasItem(menu, "finanzas", "fin.retenciones"));
   check(
@@ -185,6 +187,7 @@ function runSuperuser(menu, fails) {
 
 function runAdmin(menu, fails) {
   check(fails, "Sin cfg.usuarios", !hasItem(menu, "config", "cfg.usuarios"));
+  check(fails, "Con cfg.automatizaciones", hasItem(menu, "config", "cfg.automatizaciones"));
   check(fails, "Con ml.mapeo", hasItem(menu, "mercadolibre", "ml.mapeo"));
   check(fails, "Con fin.igtf", hasItem(menu, "finanzas", "fin.igtf"));
   check(fails, "Con fin.retenciones", hasItem(menu, "finanzas", "fin.retenciones"));
@@ -195,6 +198,7 @@ function runSupervisor(menu, fails) {
   check(fails, "Existe ventas", hasSection(menu, "ventas"));
   check(fails, "Existe mercadolibre", hasSection(menu, "mercadolibre"));
   check(fails, "ml.central visible", hasItem(menu, "mercadolibre", "ml.central"));
+  check(fails, "ml.automatizaciones visible", hasItem(menu, "mercadolibre", "ml.automatizaciones"));
   check(fails, "ml.reputacion visible", hasItem(menu, "mercadolibre", "ml.reputacion"));
   check(fails, "ml.mapeo NO visible", !hasItem(menu, "mercadolibre", "ml.mapeo"));
   check(fails, "ml.precios visible", hasItem(menu, "mercadolibre", "ml.precios"));
@@ -209,6 +213,8 @@ function runSupervisor(menu, fails) {
 }
 
 function runVendedorMostrador(menu, fails) {
+  check(fails, "ml.automatizaciones NO visible", !hasItem(menu, "mercadolibre", "ml.automatizaciones"));
+  check(fails, "cfg.automatizaciones NO visible", !hasItem(menu, "config", "cfg.automatizaciones"));
   check(fails, "Existe ventas", hasSection(menu, "ventas"));
   check(fails, "ventas.nueva visible", hasItem(menu, "ventas", "ventas.nueva"));
   check(fails, "ventas.cotizaciones visible", hasItem(menu, "ventas", "ventas.cotizaciones"));
@@ -244,6 +250,7 @@ function runVendedorExterno(menu, fails) {
 function runOperadorDigital(menu, fails) {
   check(fails, "Existe bandeja", hasSection(menu, "bandeja"));
   check(fails, "Existe mercadolibre", hasSection(menu, "mercadolibre"));
+  check(fails, "ml.automatizaciones visible", hasItem(menu, "mercadolibre", "ml.automatizaciones"));
   check(fails, "ventas NO visible", !hasSection(menu, "ventas"));
   check(
     fails,
@@ -290,12 +297,12 @@ function runContador(menu, fails) {
 }
 
 const ROLE_CHECKS = {
-  SUPERUSER:          { total: 11, run: runSuperuser },
-  ADMIN:              { total: 4,  run: runAdmin },
-  SUPERVISOR:         { total: 15, run: runSupervisor },
-  VENDEDOR_MOSTRADOR: { total: 15, run: runVendedorMostrador },
+  SUPERUSER:          { total: 13, run: runSuperuser },
+  ADMIN:              { total: 5,  run: runAdmin },
+  SUPERVISOR:         { total: 16, run: runSupervisor },
+  VENDEDOR_MOSTRADOR: { total: 17, run: runVendedorMostrador },
   VENDEDOR_EXTERNO:   { total: 7,  run: runVendedorExterno },
-  OPERADOR_DIGITAL:   { total: 10, run: runOperadorDigital },
+  OPERADOR_DIGITAL:   { total: 11, run: runOperadorDigital },
   ALMACENISTA:        { total: 13, run: runAlmacenista },
   CONTADOR:           { total: 12, run: runContador },
 };

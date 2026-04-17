@@ -111,6 +111,16 @@ const MENU_SECTIONS = [
       { id: "ml.central", label: "Central ML", path: "/mercadolibre", apiPath: "GET /api/stats/mercadolibre", minRole: "OPERADOR_DIGITAL" },
       { id: "ml.preguntas", label: "Preguntas Pre-venta", path: "/mercadolibre/preguntas", apiPath: "GET /api/inbox?src=ml_question", minRole: "OPERADOR_DIGITAL" },
       { id: "ml.mensajes", label: "Mensajería Post-venta", path: "/mercadolibre/mensajes", apiPath: "GET /api/inbox?src=ml_message", minRole: "OPERADOR_DIGITAL" },
+      {
+        id: "ml.automatizaciones",
+        label: "Automatizaciones",
+        path: "/mercadolibre/automatizaciones",
+        icon: "robot",
+        apiPath:
+          "GET /api/automations/stats · GET /api/automations/logs/ml · GET /api/automations/logs/whatsapp · GET /api/automations/logs/questions-ia",
+        minRole: "OPERADOR_DIGITAL",
+        allowedRoles: ["SUPERUSER", "ADMIN", "SUPERVISOR", "OPERADOR_DIGITAL"],
+      },
       { id: "ml.mapeo", label: "Sincronizador / Mapeo SKUs", path: "/mercadolibre/mapeo", apiPath: "GET /api/ml/publications", minRole: "ADMIN" },
       { id: "ml.precios",   label: "Precios",    path: "/mercadolibre/precios",    apiPath: "GET /api/price",           minRole: "SUPERVISOR" },
       { id: "ml.reputacion", label: "Reputación", path: "/mercadolibre/reputacion", apiPath: "GET /api/ml/reputation",   minRole: "SUPERVISOR" },
@@ -238,6 +248,16 @@ const MENU_SECTIONS = [
       { id: "cfg.usuarios", label: "Usuarios y Roles", path: "/config/usuarios", apiPath: "GET /api/users", minRole: "SUPERUSER" },
       { id: "cfg.ml", label: "ML OAuth / API", path: "/config/integraciones/ml", apiPath: "GET /admin/oauth-exchange (HTML)", minRole: "ADMIN" },
       { id: "cfg.wa", label: "Wasender WhatsApp", path: "/config/integraciones/wa", apiPath: "GET /api/crm/system/wa-status", minRole: "ADMIN" },
+      {
+        id: "cfg.automatizaciones",
+        label: "Mensajes automáticos WA",
+        path: "/config/automatizaciones",
+        icon: "brand-whatsapp",
+        apiPath:
+          "GET /api/automations/config/post-sale · GET /api/automations/config/tipo-e · GET /api/automations/config/tipo-f · GET /api/automations/config/wasender",
+        minRole: "ADMIN",
+        allowedRoles: ["SUPERUSER", "ADMIN"],
+      },
       { id: "cfg.banesco", label: "Banesco API", path: "/config/integraciones/banesco", apiPath: "GET /api/bank/banesco/connection", minRole: "ADMIN" },
       { id: "cfg.canales", label: "Canales de Venta", path: "/config/canales", apiPath: "futuro", minRole: "ADMIN", future: true },
       { id: "cfg.fiscal", label: "Ajustes Fiscales", path: "/config/fiscal", apiPath: "GET /api/config/tax-rules", minRole: "ADMIN" },

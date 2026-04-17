@@ -3,9 +3,8 @@
 /**
  * Queries de analytics de solo-lectura para el módulo ERP/CRM.
  * Timezone: America/Caracas (-0400) en todos los DATE_TRUNC y GROUP BY.
- * KPIs de ventas: `v_sales_unified` (POS `sales` + `sales_orders`).
- * revenue_bs: ver V_SALES_UNIFIED_BS_AMOUNT en statsHelpers.
- * revenue_usd: SUM(total_usd) (columna unificada en la vista).
+ * KPIs de ventas: `getSales` usa `v_sales_unified` (POS + omnicanal).
+ * revenue_bs: POS = total_usd×tasa; omnicanal = order_total_amount (Bs).
  */
 
 const { pool }  = require("../../db");
@@ -15,6 +14,21 @@ const {
   calcPct,
   V_SALES_UNIFIED_BS_AMOUNT,
 } = require("../utils/statsHelpers");
+
+/** Importe en Bs por fila de `v_sales_unified` (alias `vu`). */
+const VU_REVENUE_BS = `(
+  CASE WHEN vu.source_table = 'sales'
+    THEN vu.total_usd * NULLIF(vu.exchange_rate_bs_per_usd, 0)
+    ELSE vu.order_total_amount
+  END
+)`;
+/** Importe en USD por fila de `v_sales_unified`. */
+const VU_REVENUE_USD = `(
+  CASE WHEN vu.source_table = 'sales'
+    THEN vu.total_usd
+    ELSE vu.order_total_amount / NULLIF(vu.exchange_rate_bs_per_usd, 0)
+  END
+)`;
 
 // ─── OVERVIEW ─────────────────────────────────────────────────────────────────
 
@@ -152,47 +166,53 @@ async function getRealtime() {
 async function getSales({ start, end, source, seller, label }) {
   const params = [start, end];
   let filter = "";
-  if (source) { params.push(source); filter += ` AND source = $${params.length}`; }
-  if (seller) { params.push(seller); filter += ` AND sold_by = $${params.length}`; }
+  if (source) { params.push(source); filter += ` AND vu.source = $${params.length}`; }
+  if (seller) { params.push(seller); filter += ` AND vu.sold_by = $${params.length}`; }
+
+  const baseWhere = `
+    LOWER(vu.status) != 'cancelled'
+    AND vu.created_at >= $1 AND vu.created_at < $2
+    ${filter}
+  `;
 
   const [totals, chart, bySrc, bySeller] = await Promise.all([
     pool.query(`
       SELECT COUNT(*) AS orders,
-             COALESCE(SUM(order_total_amount),0) AS total_bs,
-             COALESCE(SUM(order_total_amount / NULLIF(exchange_rate_bs_per_usd,0)),0) AS total_usd
-      FROM sales_orders
-      WHERE status != 'cancelled' AND created_at >= $1 AND created_at < $2 ${filter}
+             COALESCE(SUM(${VU_REVENUE_BS}),0) AS total_bs,
+             COALESCE(SUM(${VU_REVENUE_USD}),0) AS total_usd
+      FROM v_sales_unified vu
+      WHERE ${baseWhere}
     `, params),
     pool.query(`
       SELECT
-        DATE(created_at AT TIME ZONE 'America/Caracas') AS date,
-        COALESCE(SUM(order_total_amount) FILTER (WHERE source='mercadolibre'),0)  AS mercadolibre,
-        COALESCE(SUM(order_total_amount) FILTER (WHERE source='mostrador'),0)     AS mostrador,
-        COALESCE(SUM(order_total_amount) FILTER (WHERE source='ecommerce'),0)     AS ecommerce,
-        COALESCE(SUM(order_total_amount) FILTER (WHERE source='social_media'),0)  AS social_media,
-        COALESCE(SUM(order_total_amount),0)                                       AS total
-      FROM sales_orders
-      WHERE status != 'cancelled' AND created_at >= $1 AND created_at < $2 ${filter}
-      GROUP BY DATE(created_at AT TIME ZONE 'America/Caracas')
+        DATE(vu.created_at AT TIME ZONE 'America/Caracas') AS date,
+        COALESCE(SUM(${VU_REVENUE_BS}) FILTER (WHERE vu.source='mercadolibre'),0)  AS mercadolibre,
+        COALESCE(SUM(${VU_REVENUE_BS}) FILTER (WHERE vu.source='mostrador'),0)     AS mostrador,
+        COALESCE(SUM(${VU_REVENUE_BS}) FILTER (WHERE vu.source='ecommerce'),0)     AS ecommerce,
+        COALESCE(SUM(${VU_REVENUE_BS}) FILTER (WHERE vu.source='social_media'),0)  AS social_media,
+        COALESCE(SUM(${VU_REVENUE_BS}),0) AS total
+      FROM v_sales_unified vu
+      WHERE ${baseWhere}
+      GROUP BY DATE(vu.created_at AT TIME ZONE 'America/Caracas')
       ORDER BY date ASC
     `, params),
     pool.query(`
-      SELECT source,
-             COUNT(*) AS orders,
-             COALESCE(SUM(order_total_amount),0) AS revenue_bs,
-             COUNT(*) FILTER (WHERE status='cancelled') AS cancelled_count,
+      SELECT vu.source,
+             COUNT(*) FILTER (WHERE LOWER(vu.status) != 'cancelled') AS orders,
+             COALESCE(SUM(${VU_REVENUE_BS}) FILTER (WHERE LOWER(vu.status) != 'cancelled'), 0) AS revenue_bs,
+             COUNT(*) FILTER (WHERE LOWER(vu.status) = 'cancelled') AS cancelled_count,
              COUNT(*) AS total_incl_cancelled
-      FROM sales_orders
-      WHERE created_at >= $1 AND created_at < $2 ${filter}
-      GROUP BY source
+      FROM v_sales_unified vu
+      WHERE vu.created_at >= $1 AND vu.created_at < $2 ${filter}
+      GROUP BY vu.source
     `, params),
     pool.query(`
-      SELECT sold_by AS seller, COUNT(*) AS orders,
-             COALESCE(SUM(order_total_amount),0) AS revenue_bs
-      FROM sales_orders
-      WHERE status != 'cancelled' AND sold_by IS NOT NULL
-        AND created_at >= $1 AND created_at < $2 ${filter}
-      GROUP BY sold_by ORDER BY revenue_bs DESC
+      SELECT vu.sold_by AS seller, COUNT(*) AS orders,
+             COALESCE(SUM(${VU_REVENUE_BS}),0) AS revenue_bs
+      FROM v_sales_unified vu
+      WHERE LOWER(vu.status) != 'cancelled' AND vu.sold_by IS NOT NULL
+        AND vu.created_at >= $1 AND vu.created_at < $2 ${filter}
+      GROUP BY vu.sold_by ORDER BY revenue_bs DESC
     `, params),
   ]);
 
@@ -224,6 +244,94 @@ async function getSales({ start, end, source, seller, label }) {
       seller:     r.seller,
       orders:     Number(r.orders),
       revenue_bs: Number(r.revenue_bs),
+    })),
+  };
+}
+
+// ─── INVENTARIO (WMS + catálogo) ─────────────────────────────────────────────
+
+async function getInventoryStats() {
+  const [sumRow, topStock, stockouts, byCat] = await Promise.all([
+    pool.query(`
+      SELECT
+        (SELECT COUNT(*)::bigint FROM products WHERE is_active = true) AS total_skus,
+        (SELECT COUNT(DISTINCT product_sku)::bigint FROM bin_stock WHERE qty_available > 0) AS skus_con_stock,
+        (SELECT COALESCE(SUM(qty_available), 0)::numeric FROM bin_stock) AS total_units,
+        (SELECT COUNT(*)::bigint FROM bin_stock WHERE qty_available = 0) AS stockout_count,
+        (
+          SELECT COUNT(*)::bigint
+          FROM bin_stock bs
+          LEFT JOIN products p ON p.sku = bs.product_sku
+          LEFT JOIN inventory i ON i.product_id = p.id
+          WHERE bs.qty_available > 0
+            AND bs.qty_available <= COALESCE(i.stock_min, 0)
+        ) AS low_stock_count,
+        (
+          SELECT COALESCE(SUM(bs.qty_available * COALESCE(p.landed_cost_usd, 0)), 0)::numeric
+          FROM bin_stock bs
+          LEFT JOIN products p ON p.sku = bs.product_sku
+        ) AS stock_value_usd
+    `),
+    pool.query(`
+      SELECT
+        bs.product_sku AS sku,
+        COALESCE(p.name, '') AS name,
+        SUM(bs.qty_available)::numeric AS qty
+      FROM bin_stock bs
+      LEFT JOIN products p ON p.sku = bs.product_sku
+      GROUP BY bs.product_sku, p.name
+      ORDER BY qty DESC
+      LIMIT 10
+    `),
+    pool.query(`
+      SELECT
+        bs.product_sku AS sku,
+        COALESCE(p.name, '') AS name,
+        p.category
+      FROM bin_stock bs
+      LEFT JOIN products p ON p.sku = bs.product_sku
+      WHERE bs.qty_available = 0
+      ORDER BY COALESCE(p.name, bs.product_sku) ASC
+      LIMIT 10
+    `),
+    pool.query(`
+      SELECT
+        COALESCE(NULLIF(TRIM(p.category), ''), '(sin categoría)') AS category,
+        COUNT(DISTINCT bs.product_sku)::bigint AS skus,
+        SUM(bs.qty_available)::numeric AS total_units
+      FROM bin_stock bs
+      LEFT JOIN products p ON p.sku = bs.product_sku
+      WHERE bs.qty_available > 0
+      GROUP BY 1
+      ORDER BY total_units DESC
+      LIMIT 10
+    `),
+  ]);
+
+  const s = sumRow.rows[0] || {};
+  return {
+    summary: {
+      total_skus:       Number(s.total_skus ?? 0),
+      skus_con_stock:   Number(s.skus_con_stock ?? 0),
+      total_units:      Number(s.total_units ?? 0),
+      stockout_count:   Number(s.stockout_count ?? 0),
+      low_stock_count:  Number(s.low_stock_count ?? 0),
+      stock_value_usd:  Number(Number(s.stock_value_usd ?? 0).toFixed(2)),
+    },
+    top_stock: topStock.rows.map((r) => ({
+      sku:  r.sku,
+      name: r.name,
+      qty:  Number(r.qty),
+    })),
+    stockouts: stockouts.rows.map((r) => ({
+      sku:      r.sku,
+      name:     r.name,
+      category: r.category != null ? r.category : null,
+    })),
+    by_category: byCat.rows.map((r) => ({
+      category:    r.category,
+      skus:        Number(r.skus),
+      total_units: Number(r.total_units),
     })),
   };
 }
@@ -780,4 +888,5 @@ module.exports = {
   getExpenses,
   getPnl,
   getExchangeRates,
+  getInventoryStats,
 };

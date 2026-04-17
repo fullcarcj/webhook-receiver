@@ -197,7 +197,7 @@ function runSupervisor(menu, fails) {
   check(fails, "ml.central visible", hasItem(menu, "mercadolibre", "ml.central"));
   check(fails, "ml.reputacion visible", hasItem(menu, "mercadolibre", "ml.reputacion"));
   check(fails, "ml.mapeo NO visible", !hasItem(menu, "mercadolibre", "ml.mapeo"));
-  check(fails, "ml.precios NO visible", !hasItem(menu, "mercadolibre", "ml.precios"));
+  check(fails, "ml.precios visible", hasItem(menu, "mercadolibre", "ml.precios"));
   check(fails, "Existe inventario", hasSection(menu, "inventario"));
   check(fails, "Existe logistica", hasSection(menu, "logistica"));
   check(fails, "Existe finanzas", hasSection(menu, "finanzas"));
@@ -216,11 +216,6 @@ function runVendedorMostrador(menu, fails) {
     fails,
     "ventas.turno future:true",
     getItem(menu, "ventas", "ventas.turno")?.future === true
-  );
-  check(
-    fails,
-    "ventas.cartera pendingMigration:true",
-    getItem(menu, "ventas", "ventas.cartera")?.pendingMigration === true
   );
   check(fails, "ventas.pedidos NO visible", !hasItem(menu, "ventas", "ventas.pedidos"));
   check(fails, "ventas.aprobaciones NO visible", !hasItem(menu, "ventas", "ventas.aprobaciones"));
@@ -241,11 +236,6 @@ function runVendedorExterno(menu, fails) {
   check(fails, "bandeja.wa visible", hasItem(menu, "bandeja", "bandeja.wa"));
   check(fails, "Existe ventas", hasSection(menu, "ventas"));
   check(fails, "ventas.nueva visible", hasItem(menu, "ventas", "ventas.nueva"));
-  check(
-    fails,
-    "ventas.cartera pendingMigration:true",
-    getItem(menu, "ventas", "ventas.cartera")?.pendingMigration === true
-  );
   check(fails, "inventario NO visible", !hasSection(menu, "inventario"));
   check(fails, "compras NO visible", !hasSection(menu, "compras"));
   check(fails, "config NO visible", !hasSection(menu, "config"));
@@ -254,10 +244,7 @@ function runVendedorExterno(menu, fails) {
 function runOperadorDigital(menu, fails) {
   check(fails, "Existe bandeja", hasSection(menu, "bandeja"));
   check(fails, "Existe mercadolibre", hasSection(menu, "mercadolibre"));
-  check(fails, "Existe ventas", hasSection(menu, "ventas"));
-  check(fails, "ventas.nueva visible", hasItem(menu, "ventas", "ventas.nueva"));
-  check(fails, "ventas.pedidos NO visible", !hasItem(menu, "ventas", "ventas.pedidos"));
-  check(fails, "ventas.aprobaciones NO visible", !hasItem(menu, "ventas", "ventas.aprobaciones"));
+  check(fails, "ventas NO visible", !hasSection(menu, "ventas"));
   check(
     fails,
     "bandeja.redes future:true",
@@ -291,7 +278,7 @@ function runContador(menu, fails) {
   check(fails, "fin.caja visible", hasItem(menu, "finanzas", "fin.caja"));
   check(fails, "fin.igtf visible", hasItem(menu, "finanzas", "fin.igtf"));
   check(fails, "fin.retenciones visible", hasItem(menu, "finanzas", "fin.retenciones"));
-  check(fails, "fin.documentos visible", hasItem(menu, "finanzas", "fin.documentos"));
+  check(fails, "fin.banesco visible", hasItem(menu, "finanzas", "fin.banesco"));
   check(fails, "Existe reportes", hasSection(menu, "reportes"));
   check(fails, "ventas NO visible", !hasSection(menu, "ventas"));
   check(fails, "bandeja NO visible", !hasSection(menu, "bandeja"));
@@ -303,14 +290,14 @@ function runContador(menu, fails) {
 }
 
 const ROLE_CHECKS = {
-  SUPERUSER: { total: 11, run: runSuperuser },
-  ADMIN: { total: 4, run: runAdmin },
-  SUPERVISOR: { total: 15, run: runSupervisor },
-  VENDEDOR_MOSTRADOR: { total: 16, run: runVendedorMostrador },
-  VENDEDOR_EXTERNO: { total: 8, run: runVendedorExterno },
-  OPERADOR_DIGITAL: { total: 12, run: runOperadorDigital },
-  ALMACENISTA: { total: 13, run: runAlmacenista },
-  CONTADOR: { total: 12, run: runContador },
+  SUPERUSER:          { total: 11, run: runSuperuser },
+  ADMIN:              { total: 4,  run: runAdmin },
+  SUPERVISOR:         { total: 15, run: runSupervisor },
+  VENDEDOR_MOSTRADOR: { total: 15, run: runVendedorMostrador },
+  VENDEDOR_EXTERNO:   { total: 7,  run: runVendedorExterno },
+  OPERADOR_DIGITAL:   { total: 10, run: runOperadorDigital },
+  ALMACENISTA:        { total: 13, run: runAlmacenista },
+  CONTADOR:           { total: 12, run: runContador },
 };
 
 async function main() {

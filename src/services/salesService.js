@@ -1263,6 +1263,57 @@ async function ensureCustomerAndLinkMlBuyer(client, buyerId) {
   return cid;
 }
 
+/**
+ * Extrae los fees de una orden ML desde su raw_json.
+ * Los campos son opcionales — ML no siempre los incluye según el tipo de envío y cuenta.
+ *
+ * @param {string|object|null} rawJson  Texto JSON o objeto ya parseado de ml_orders.raw_json.
+ * @returns {{ saleFee, shippingCost, taxes, payout }|null}  null si no parseable.
+ */
+function extractMlOrderFees(rawJson) {
+  if (!rawJson) return null;
+  try {
+    const order = typeof rawJson === "string" ? JSON.parse(rawJson) : rawJson;
+    const payment = Array.isArray(order.payments) ? order.payments[0] : null;
+
+    // Comisión ML: buscar en fee_details (ml_fee) o en sale_fee directo del payment
+    const feeDetails = Array.isArray(payment?.fee_details) ? payment.fee_details : [];
+    const feeEntry = feeDetails.find((f) => f.type === "ml_fee" || f.type === "coupon");
+    const saleFee =
+      feeEntry?.amount != null
+        ? Number(feeEntry.amount)
+        : payment?.sale_fee != null
+          ? Number(payment.sale_fee)
+          : null;
+
+    // Envío cobrado al vendedor
+    const shippingRaw = order.shipping?.cost;
+    const shippingCost = shippingRaw != null ? Number(shippingRaw) : null;
+
+    // Retenciones fiscales
+    const taxesRaw = order.taxes?.amount;
+    const taxes = taxesRaw != null ? Number(taxesRaw) : null;
+
+    // Neto: lo que efectivamente paga ML al vendedor
+    const totalPaid =
+      payment?.total_paid_amount != null
+        ? Number(payment.total_paid_amount)
+        : Number(order.total_amount ?? 0);
+
+    const payout =
+      totalPaid - (saleFee ?? 0) - (shippingCost ?? 0) - (taxes ?? 0);
+
+    return {
+      saleFee:      saleFee      != null && Number.isFinite(saleFee)      ? saleFee      : null,
+      shippingCost: shippingCost != null && Number.isFinite(shippingCost) ? shippingCost : null,
+      taxes:        taxes        != null && Number.isFinite(taxes)        ? taxes        : null,
+      payout:       Number.isFinite(payout) ? Number(payout.toFixed(2)) : null,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 function mlStatusToSalesStatus(mlStatus) {
   const s = String(mlStatus || "")
     .toLowerCase()
@@ -1309,7 +1360,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     await client.query("BEGIN");
 
     const { rows: mrows } = await client.query(
-      `SELECT ml_user_id, order_id, status, total_amount, buyer_id, date_created
+      `SELECT ml_user_id, order_id, status, total_amount, buyer_id, date_created, raw_json
        FROM ml_orders WHERE ml_user_id = $1 AND order_id = $2`,
       [mUid, oid]
     );
@@ -1451,6 +1502,25 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     const salesId = ins.rows[0].id;
 
     await client.query("COMMIT");
+
+    // ── Best-effort: poblar fees ML (columnas pueden no existir aún si la migración no corrió) ──
+    try {
+      const fees = extractMlOrderFees(ml.raw_json);
+      if (fees) {
+        await pool.query(
+          `UPDATE sales_orders
+           SET ml_sale_fee_usd      = $1,
+               ml_shipping_cost_usd = $2,
+               ml_taxes_usd         = $3,
+               ml_payout_usd        = $4
+           WHERE id = $5`,
+          [fees.saleFee, fees.shippingCost, fees.taxes, fees.payout, salesId]
+        );
+      }
+    } catch (_feesErr) {
+      // Columnas no existen aún → ejecutar: npm run db:ml-order-fees
+    }
+
     try {
       const out = await fetchSalesOrderOmnichannelDetail(salesId);
       return { ...out, idempotent: false, import: "ml" };
@@ -1541,7 +1611,7 @@ async function syncMercadolibreSalesAfterMlOrderChange({ mlUserId, orderId }) {
   const extId = `${mUid}-${oid}`;
 
   const mr = await pool.query(
-    `SELECT feedback_sale FROM ml_orders WHERE ml_user_id = $1 AND order_id = $2`,
+    `SELECT feedback_sale, raw_json FROM ml_orders WHERE ml_user_id = $1 AND order_id = $2`,
     [mUid, oid]
   );
   if (!mr.rows.length) {
@@ -1588,6 +1658,22 @@ async function syncMercadolibreSalesAfterMlOrderChange({ mlUserId, orderId }) {
            AND status <> 'cancelled'`,
         [extId]
       );
+  // ── Best-effort: refrescar fees ML en la orden (cubre órdenes ya importadas) ──
+  try {
+    const fees = extractMlOrderFees(mr.rows[0].raw_json);
+    if (fees) {
+      await pool.query(
+        `UPDATE sales_orders
+         SET ml_sale_fee_usd      = $1,
+             ml_shipping_cost_usd = $2,
+             ml_taxes_usd         = $3,
+             ml_payout_usd        = $4
+         WHERE source = 'mercadolibre' AND external_order_id = $5`,
+        [fees.saleFee, fees.shippingCost, fees.taxes, fees.payout, extId]
+      );
+    }
+  } catch (_) {}
+
   return { ok: true, completed: true, updated: upd.rowCount };
 }
 

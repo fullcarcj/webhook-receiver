@@ -234,6 +234,7 @@ const { handleInboxQuotationRequest } = require("./src/handlers/inboxQuotationHa
 const { handleMenuApiRequest } = require("./src/handlers/menuApiHandler");
 const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
 const { handleProviderApiRequest } = require("./src/handlers/providerApiHandler");
+const { handleAutomationsApiRequest } = require("./src/handlers/automationsApiHandler");
 const { handleAiResponderRequest } = require("./src/handlers/aiResponderApiHandler");
 const { handleSseApiRequest, handleSseStatsRequest } = require("./src/handlers/sseApiHandler");
 const { startWorker: startReconciliationWorker, stopWorker: stopReconciliationWorker } = require("./src/workers/reconciliationWorker");
@@ -275,6 +276,7 @@ const {
   getUser,
   getActiveSessions,
   revokeAllSessions,
+  changePasswordByUserOrSuperuser,
 } = require("./src/services/authService");
 
 const PORT = process.env.PORT || 3001;
@@ -2321,6 +2323,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (await handleMlApiRequest(req, res, url)) {
+      return;
+    }
+
     res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: false, error: "endpoint /api/ml no existe" }));
     return;
@@ -3034,6 +3040,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (await handleAutomationsApiRequest(req, res, url)) {
+    return;
+  }
   if (await handleProviderApiRequest(req, res, url)) {
     return;
   }
@@ -3056,10 +3065,6 @@ const server = http.createServer(async (req, res) => {
     rejectDuringDowntime(req, res)
   ) { return; }
   if (await handlePriceApiRequest(req, res, url)) {
-    return;
-  }
-
-  if (await handleMlApiRequest(req, res, url)) {
     return;
   }
 
@@ -7596,6 +7601,37 @@ const server = http.createServer(async (req, res) => {
       const result = await revokeAllSessions(+mRevoke[1], user.userId || null);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, ...result }));
+      return;
+    }
+
+    // POST /api/users/:id/change-password (JWT obligatorio: propio usuario o SUPERUSER)
+    const mChangePw = pathname.match(/^\/api\/users\/(\d+)\/change-password$/);
+    if (req.method === "POST" && mChangePw) {
+      if (rejectDuringDowntime(req, res)) return;
+      const user = await requireAuth(req, res);
+      if (!user) return;
+      let body;
+      try {
+        body = await parseJsonBody(req);
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+        return;
+      }
+      try {
+        const result = await changePasswordByUserOrSuperuser({
+          targetUserId:     +mChangePw[1],
+          actorUserId:      user.userId,
+          actorRole:        user.role,
+          currentPassword:  body.current_password,
+          newPassword:      body.new_password,
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(e.status || 400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.code || "ERROR", message: e.message }));
+      }
       return;
     }
 

@@ -119,8 +119,35 @@ async function mlRequest({ method, path, body = null, mlItemId = null, mlUserId,
   return responseBody;
 }
 
+/**
+ * Wrapper de `mlRequest` con retry automático en 429 (rate limit).
+ * Respeta el `Retry-After` devuelto por ML; si no viene, espera 60 s.
+ * En el último intento relanza el error original.
+ *
+ * @param {object} opts        Mismos parámetros que `mlRequest`.
+ * @param {number} maxRetries  Número máximo de intentos (default 3).
+ */
+async function mlRequestWithRetry(opts, maxRetries = 3) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await mlRequest(opts);
+    } catch (err) {
+      if (err.code === 'ML_RATE_LIMIT' && attempt < maxRetries - 1) {
+        const wait = Math.max(1000, (err.retryAfter || 60) * 1000);
+        log.warn(
+          { ml_item_id: opts.mlItemId, attempt: attempt + 1, wait_ms: wait },
+          '[ML] Rate limit. Reintentando...'
+        );
+        await new Promise((r) => setTimeout(r, wait));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 async function pauseItem(mlItemId, mlUserId, executedBy = 'system') {
-  return mlRequest({
+  return mlRequestWithRetry({
     method: 'PUT',
     path: `/items/${encodeURIComponent(mlItemId)}`,
     body: { status: 'paused' },
@@ -132,7 +159,7 @@ async function pauseItem(mlItemId, mlUserId, executedBy = 'system') {
 }
 
 async function activateItem(mlItemId, mlUserId, executedBy = 'system') {
-  return mlRequest({
+  return mlRequestWithRetry({
     method: 'PUT',
     path: `/items/${encodeURIComponent(mlItemId)}`,
     body: { status: 'active' },
@@ -144,7 +171,7 @@ async function activateItem(mlItemId, mlUserId, executedBy = 'system') {
 }
 
 async function updatePrice(mlItemId, priceUsd, mlUserId, executedBy = 'system') {
-  return mlRequest({
+  return mlRequestWithRetry({
     method: 'PUT',
     path: `/items/${encodeURIComponent(mlItemId)}`,
     body: { price: Number(priceUsd) },
@@ -156,7 +183,7 @@ async function updatePrice(mlItemId, priceUsd, mlUserId, executedBy = 'system') 
 }
 
 async function updateStock(mlItemId, availableQuantity, mlUserId, executedBy = 'system') {
-  return mlRequest({
+  return mlRequestWithRetry({
     method: 'PUT',
     path: `/items/${encodeURIComponent(mlItemId)}`,
     body: { available_quantity: Number(availableQuantity) },
@@ -227,6 +254,8 @@ async function resolveUserIdForItem(mlItemId) {
 }
 
 module.exports = {
+  mlRequest,
+  mlRequestWithRetry,
   pauseItem,
   activateItem,
   updatePrice,

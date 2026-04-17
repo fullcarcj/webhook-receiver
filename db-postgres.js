@@ -637,9 +637,37 @@ async function runSchemaAndSeed() {
   await migrateMlWhatsappWasenderLogTipoEActivationSource();
   await migrateMlFilemakerTipoGLogTipoEActivationSource();
   await migrateMlWhatsappTipoFConfig();
+  await migratePostSaleMessagesUiColumns();
   await migrateProductosUpdatedAtTrigger();
   await migrateProductosSolomotorColumns();
   await migrateProductosImagenesCantidad();
+}
+
+/** Columnas opcionales para API /api/automations (is_active, orden de plantilla). */
+async function migratePostSaleMessagesUiColumns() {
+  try {
+    const { rows: c1 } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'post_sale_messages' AND column_name = 'is_active'`
+    );
+    if (c1.length === 0) {
+      await pool.query(
+        `ALTER TABLE post_sale_messages ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE`
+      );
+      console.log("[db] post_sale_messages: columna is_active añadida (migración)");
+    }
+    const { rows: c2 } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'post_sale_messages' AND column_name = 'message_order'`
+    );
+    if (c2.length === 0) {
+      await pool.query(`ALTER TABLE post_sale_messages ADD COLUMN message_order INTEGER`);
+      await pool.query(`UPDATE post_sale_messages SET message_order = id WHERE message_order IS NULL`);
+      console.log("[db] post_sale_messages: columna message_order añadida (migración)");
+    }
+  } catch (e) {
+    console.error("[db] migrate post_sale_messages ui columns:", e.message);
+  }
 }
 
 /**
@@ -4515,6 +4543,7 @@ async function listMlWhatsappWasenderLogByUserAndOrderIds(mlUserId, orderIds, op
 
 module.exports = {
   pool,
+  ensureSchema,
   insertWebhook,
   listWebhooks,
   deleteWebhooks,

@@ -8,10 +8,20 @@ const RECONCILIATION_STATUSES = new Set([
   "CONFIRMED",
   "UNMATCHED",
   "IGNORED",
+  "MANUAL_REVIEW",
 ]);
 
+const TX_TYPES = new Set(["CREDIT", "DEBIT"]);
+
 /**
- * @param {{ bankAccountId: number|null, fromDate: string|null, toDate: string|null, reconciliationStatus: string|null }} p
+ * @param {{
+ *   bankAccountId: number|null,
+ *   fromDate: string|null,
+ *   toDate: string|null,
+ *   reconciliationStatus: string|null,
+ *   txType: string|null,
+ *   search: string|null,
+ * }} p
  * @returns {{ whereSql: string, values: unknown[] }}
  */
 function buildBankStatementsWhere(p) {
@@ -32,8 +42,19 @@ function buildBankStatementsWhere(p) {
     values.push(p.toDate);
   }
   if (p.reconciliationStatus) {
-    where.push(`bs.reconciliation_status = $${n++}::reconciliation_status`);
-    values.push(p.reconciliationStatus);
+    where.push(`bs.reconciliation_status::text = $${n++}`);
+    values.push(String(p.reconciliationStatus).trim().toUpperCase());
+  }
+  if (p.txType && TX_TYPES.has(String(p.txType).toUpperCase())) {
+    where.push(`bs.tx_type = $${n++}::statement_tx_type`);
+    values.push(String(p.txType).toUpperCase());
+  }
+  if (p.search && String(p.search).trim()) {
+    const term = `%${String(p.search).trim().replace(/([%_\\])/g, "\\$1")}%`;
+    const i1 = n++;
+    const i2 = n++;
+    where.push(`(bs.description ILIKE $${i1} OR bs.reference_number ILIKE $${i2})`);
+    values.push(term, term);
   }
 
   return { whereSql: where.join(" AND "), values };
@@ -116,4 +137,5 @@ module.exports = {
   listBankStatements,
   getLatestBalancesSnapshot,
   RECONCILIATION_STATUSES,
+  TX_TYPES,
 };

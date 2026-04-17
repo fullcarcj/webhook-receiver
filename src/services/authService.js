@@ -211,6 +211,71 @@ async function changePassword({ userId, currentPassword, newPassword }) {
   return { success: true };
 }
 
+/**
+ * Cambio de contraseña por el propio usuario (con contraseña actual) o por SUPERUSER
+ * (sin contraseña actual). Revoca todas las sesiones del usuario objetivo.
+ */
+async function changePasswordByUserOrSuperuser({
+  targetUserId,
+  actorUserId,
+  actorRole,
+  currentPassword,
+  newPassword,
+}) {
+  const superuser = String(actorRole || '').toUpperCase() === 'SUPERUSER';
+  const tid = Number(targetUserId);
+  const aid = Number(actorUserId);
+  if (!Number.isFinite(tid) || tid <= 0) {
+    throw Object.assign(new Error('Usuario inválido'), { code: 'VALIDATION', status: 400 });
+  }
+  if (!superuser && aid !== tid) {
+    throw Object.assign(new Error('No autorizado'), { code: 'FORBIDDEN', status: 403 });
+  }
+
+  const { rows } = await pool.query(
+    `SELECT id, password_hash FROM users WHERE id = $1`,
+    [tid]
+  );
+  if (!rows.length) {
+    throw Object.assign(new Error('Usuario no encontrado'), { code: 'NOT_FOUND', status: 404 });
+  }
+
+  if (!superuser) {
+    if (currentPassword == null || String(currentPassword) === '') {
+      throw Object.assign(new Error('current_password es obligatorio'), { code: 'VALIDATION', status: 400 });
+    }
+    const valid = await bcrypt.compare(String(currentPassword), rows[0].password_hash);
+    if (!valid) {
+      throw Object.assign(new Error('Contraseña actual incorrecta'), { code: 'WRONG_PASSWORD', status: 400 });
+    }
+  }
+
+  if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
+    throw Object.assign(new Error('new_password debe tener al menos 8 caracteres'), { code: 'VALIDATION', status: 400 });
+  }
+
+  const hash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
+  await pool.query(
+    `UPDATE users SET
+       password_hash   = $1,
+       failed_attempts = 0,
+       status          = CASE WHEN status = 'LOCKED' THEN 'ACTIVE' ELSE status END,
+       locked_at       = NULL,
+       reset_token     = NULL,
+       reset_token_exp = NULL
+     WHERE id = $2`,
+    [hash, tid]
+  );
+
+  await pool.query(
+    `UPDATE user_sessions SET revoked = TRUE, revoked_at = now(), revoked_by = $1
+     WHERE user_id = $2 AND revoked = FALSE`,
+    [superuser ? (Number.isFinite(aid) ? aid : null) : tid, tid]
+  );
+
+  return { ok: true, message: 'Contraseña actualizada. Iniciá sesión nuevamente.' };
+}
+
 // ── createUser ────────────────────────────────────────────────────────────────
 
 async function createUser({ username, email, fullName, role, password, createdBy }) {
@@ -420,4 +485,5 @@ module.exports = {
   getActiveSessions,
   revokeAllSessions,
   validatePassword,
+  changePasswordByUserOrSuperuser,
 };

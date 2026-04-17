@@ -730,6 +730,188 @@ async function updatePriceForPublication({ mlItemId, newPriceUsd, updatedBy }) {
   return { ml_item_id: mlItemId, price_usd: price };
 }
 
+/**
+ * Sincroniza el stock de WMS con ML para un SKU dado.
+ * Se llama post-commit en setImmediate — nunca bloquea el flujo principal.
+ *
+ * Lógica:
+ *   - stock = 0 + auto_pause_enabled + pub activa  → pausa en ML
+ *   - stock > 0 + pub pausada por auto              → reactiva en ML + actualiza stock
+ *   - stock > 0 + pub activa                        → actualiza stock en ML
+ *   - pub pausada manualmente                       → solo actualiza stock_qty local
+ *
+ * @param {string} sku
+ * @param {{ updatedBy?: string }} [opts]
+ * @returns {Promise<{ synced: number, sku: string, newStock: number }>}
+ */
+async function syncMlStockForSku(sku, { updatedBy = 'wms_sync' } = {}) {
+  const skuStr = String(sku || '').trim();
+  if (!skuStr) return { synced: 0, sku: skuStr, newStock: 0 };
+
+  // Stock total disponible en WMS para este SKU
+  const { rows: stockRows } = await pool.query(
+    `SELECT COALESCE(SUM(qty_available), 0)::numeric AS total FROM bin_stock WHERE product_sku = $1`,
+    [skuStr]
+  );
+  const newStock = Math.max(0, Math.floor(Number(stockRows[0]?.total ?? 0)));
+
+  // Publicaciones activas o pausadas asociadas al SKU
+  const { rows: pubs } = await pool.query(`
+    SELECT id, ml_item_id, ml_user_id, ml_status, local_status, auto_pause_enabled, stock_qty
+    FROM ml_publications
+    WHERE sku = $1
+      AND ml_status IN ('active', 'paused')
+      AND COALESCE(ml_item_id, '') <> ''
+      AND ml_user_id IS NOT NULL
+  `, [skuStr]);
+
+  if (!pubs.length) return { synced: 0, sku: skuStr, newStock };
+
+  const { mlQueuedCall } = require('../utils/mlQueue');
+  let synced = 0;
+
+  for (const pub of pubs) {
+    const mlUserId = Number(pub.ml_user_id);
+    try {
+      if (newStock === 0 && pub.auto_pause_enabled && pub.ml_status === 'active') {
+        // ── PAUSA AUTOMÁTICA ─────────────────────────────────────────────
+        await mlQueuedCall(() => mlService.pauseItem(pub.ml_item_id, mlUserId, updatedBy));
+        await pool.query(`
+          UPDATE ml_publications
+          SET ml_status    = 'paused',
+              local_status = 'paused',
+              stock_qty    = 0,
+              updated_at   = NOW(),
+              last_synced_at = NOW()
+          WHERE id = $1
+        `, [pub.id]);
+        // Audit trail (idempotente: no inserta si ya hay pausa activa sin reactivar)
+        await pool.query(`
+          INSERT INTO ml_paused_publications
+            (ml_publication_id, ml_item_id, sku, pause_type, pause_reason, paused_by, stock_at_pause)
+          SELECT $1, $2, $3, 'auto', 'wms_stock_cero', $4, 0
+          WHERE NOT EXISTS (
+            SELECT 1 FROM ml_paused_publications x
+            WHERE x.ml_publication_id = $1 AND x.reactivated_at IS NULL
+          )
+        `, [pub.id, pub.ml_item_id, pub.sku, updatedBy]);
+        emit('ml_publication_paused', {
+          ml_item_id: pub.ml_item_id,
+          sku: skuStr,
+          reason: 'wms_stock_cero',
+          updated_by: updatedBy,
+        });
+        log.info({ ml_item_id: pub.ml_item_id, sku: skuStr }, '[WMS→ML] publicación pausada por stock 0');
+
+      } else if (newStock > 0 && pub.ml_status === 'paused') {
+        // ── REACTIVACIÓN (solo si fue pausada automáticamente) ───────────
+        const { rows: autoPauseRows } = await pool.query(
+          `SELECT 1 FROM ml_paused_publications
+           WHERE ml_publication_id = $1 AND pause_type = 'auto' AND reactivated_at IS NULL
+           LIMIT 1`,
+          [pub.id]
+        );
+
+        if (autoPauseRows.length) {
+          await mlQueuedCall(() => mlService.updateStock(pub.ml_item_id, newStock, mlUserId, updatedBy));
+          await mlQueuedCall(() => mlService.activateItem(pub.ml_item_id, mlUserId, updatedBy));
+          await pool.query(`
+            UPDATE ml_publications
+            SET ml_status    = 'active',
+                local_status = 'active',
+                stock_qty    = $1,
+                updated_at   = NOW(),
+                last_synced_at = NOW()
+            WHERE id = $2
+          `, [newStock, pub.id]);
+          await pool.query(`
+            UPDATE ml_paused_publications
+            SET reactivated_at = NOW(), reactivated_by = $1
+            WHERE ml_publication_id = $2 AND pause_type = 'auto' AND reactivated_at IS NULL
+          `, [updatedBy, pub.id]);
+          emit('ml_publication_activated', {
+            ml_item_id: pub.ml_item_id,
+            sku: skuStr,
+            new_stock: newStock,
+            updated_by: updatedBy,
+          });
+          log.info({ ml_item_id: pub.ml_item_id, sku: skuStr, newStock }, '[WMS→ML] publicación reactivada');
+        } else {
+          // Pausada manualmente: solo actualiza stock local, no toca ML
+          await pool.query(
+            `UPDATE ml_publications SET stock_qty = $1, updated_at = NOW() WHERE id = $2`,
+            [newStock, pub.id]
+          );
+        }
+
+      } else if (newStock > 0 && pub.ml_status === 'active') {
+        // ── ACTUALIZACIÓN DE STOCK (publicación activa) ──────────────────
+        await mlQueuedCall(() => mlService.updateStock(pub.ml_item_id, newStock, mlUserId, updatedBy));
+        await pool.query(`
+          UPDATE ml_publications
+          SET stock_qty    = $1,
+              updated_at   = NOW(),
+              last_synced_at = NOW()
+          WHERE id = $2
+        `, [newStock, pub.id]);
+        emit('ml_stock_updated', {
+          ml_item_id: pub.ml_item_id,
+          sku: skuStr,
+          new_stock: newStock,
+          updated_by: updatedBy,
+        });
+
+      } else {
+        // stock=0, auto_pause_enabled=false o ya pausada: solo sync local
+        await pool.query(
+          `UPDATE ml_publications SET stock_qty = $1, updated_at = NOW() WHERE id = $2`,
+          [newStock, pub.id]
+        );
+      }
+      synced++;
+    } catch (err) {
+      log.error(
+        { err: err.message, ml_item_id: pub.ml_item_id, sku: skuStr },
+        '[WMS→ML] syncMlStockForSku error en publicación'
+      );
+    }
+  }
+
+  return { synced, sku: skuStr, newStock };
+}
+
+/**
+ * Listado de publicaciones activas en ml_listings sin mapeo en ml_sku_mapping.
+ * Útil para identificar qué publicaciones no están controladas por el ERP.
+ */
+async function listUnmappedListings({ limit = 100, offset = 0 } = {}) {
+  const { rows } = await pool.query(`
+    SELECT
+      l.item_id,
+      l.title,
+      l.status,
+      l.available_quantity,
+      l.price::numeric(10,4) AS price
+    FROM ml_listings l
+    LEFT JOIN ml_sku_mapping m ON m.ml_item_id = l.item_id
+    WHERE m.ml_item_id IS NULL
+      AND l.status = 'active'
+    ORDER BY l.available_quantity DESC NULLS LAST, l.item_id
+    LIMIT $1 OFFSET $2
+  `, [limit, offset]);
+
+  const { rows: countRows } = await pool.query(`
+    SELECT COUNT(*)::bigint AS n
+    FROM ml_listings l
+    LEFT JOIN ml_sku_mapping m ON m.ml_item_id = l.item_id
+    WHERE m.ml_item_id IS NULL
+      AND l.status = 'active'
+  `);
+  const total = Number(countRows[0].n);
+
+  return { rows, total, limit, offset };
+}
+
 module.exports = {
   listPublications,
   getPublicationByItemId,
@@ -747,4 +929,6 @@ module.exports = {
   upsertPublication,
   updateStockForPublication,
   updatePriceForPublication,
+  syncMlStockForSku,
+  listUnmappedListings,
 };

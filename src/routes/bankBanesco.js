@@ -3,6 +3,7 @@
 const { timingSafeCompare } = require("../services/currencyService");
 const { getPublicStatus, NEXT_STEPS_ES } = require("../config/banesco");
 const { getBanescoConnectionSnapshot } = require("../services/banescoStatus");
+const { requireBankRead } = require("./bankAuth");
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -172,7 +173,7 @@ async function handleBankBanescoRequest(req, res, url) {
   /** Alias corto: mismo JSON que GET /api/bank/banesco/connection (?k= o X-Admin-Secret). */
   const pathNorm = url.pathname.replace(/\/+$/, "") || "/";
   if (req.method === "GET" && pathNorm === "/banesco-connection") {
-    if (!ensureAdminJson(req, res, url)) return true;
+    if (!(await requireBankRead(req, res))) return true;
     try {
       const snap = await getBanescoConnectionSnapshot();
       writeJson(res, 200, { ok: true, ...snap });
@@ -187,14 +188,14 @@ async function handleBankBanescoRequest(req, res, url) {
 
   try {
     if (req.method === "GET" && url.pathname === "/api/bank/banesco/connection") {
-      if (!ensureAdminJson(req, res, url)) return true;
+      if (!(await requireBankRead(req, res))) return true;
       const snap = await getBanescoConnectionSnapshot();
       writeJson(res, 200, { ok: true, ...snap });
       return true;
     }
 
     if (req.method === "GET" && url.pathname === "/api/bank/banesco/status") {
-      if (!ensureAdminJson(req, res, url)) return true;
+      if (!(await requireBankRead(req, res))) return true;
       const status = getPublicStatus();
       const configured =
         status.statement_csv_dir_configured || (status.has_api_user && status.has_api_password);

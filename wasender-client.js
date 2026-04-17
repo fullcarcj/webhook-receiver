@@ -5,7 +5,7 @@
  * Env típico:
  *   WASENDER_API_KEY      — Bearer token (obligatorio para enviar)
  *   WASENDER_API_BASE_URL — opcional, default https://www.wasenderapi.com
- *   WA_DAILY_CAP          — límite de mensajes por número por día, default 5
+ *   WA_DAILY_MESSAGE_LIMIT / WA_DAILY_CAP — límite global por número por día (Caracas), default 5 si no se define ninguna
  *   WA_QUIET_HOURS_*      — ventana configurable (default 00:00–05:00 America/Caracas); solo bloquea si WA_QUIET_HOURS_BLOCK_SEND=1 (ver load-env-local.js, src/services/waQuietHours.js)
  *   WA_PREVENT_DUPLICATES, WA_MAX_REMINDERS_PER_DAY — anti-spam (src/services/waAntiSpam.js)
  *   WASENDER_429_MAX_RETRIES — reintentos si Wasender devuelve 429 (p. ej. Account Protection: 1 msg / 5s). Default 5.

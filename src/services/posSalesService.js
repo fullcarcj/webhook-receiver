@@ -705,6 +705,23 @@ async function createPosPurchase(p) {
     }
 
     await client.query("COMMIT");
+
+    // ── Hook WMS→ML: recepción de compra → stock sube → sync ML ──────────
+    // Se ejecuta post-commit en setImmediate para no bloquear la respuesta HTTP.
+    const purchasedSkus = [...new Set(normalizedLines.map((L) => L.product_sku).filter(Boolean))];
+    if (purchasedSkus.length) {
+      setImmediate(async () => {
+        try {
+          const { syncMlStockForSku } = require("./mlPublicationsService");
+          for (const sku of purchasedSkus) {
+            await syncMlStockForSku(sku, { updatedBy: "pos_purchase" });
+          }
+        } catch (err) {
+          console.error("[WMS→ML] createPosPurchase sync error:", err.message);
+        }
+      });
+    }
+
     return {
       purchaseId,
       purchaseDate,

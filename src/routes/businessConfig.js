@@ -20,7 +20,124 @@
  */
 
 const { pool } = require('../../db-postgres');
-const { requireAdminOrPermission } = require('../utils/authMiddleware');
+const { requireAdminOrPermission, requireAuth, requirePermission } = require('../utils/authMiddleware');
+
+async function fetchWhatsappIntegration() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT
+         CASE WHEN wa_token IS NOT NULL AND TRIM(COALESCE(wa_token::text, '')) != ''
+           THEN true ELSE false END AS configured,
+         wa_phone_number AS phone_number
+       FROM ml_wasender_settings LIMIT 1`
+    );
+    const r = rows[0];
+    const configured = !!(r && r.configured);
+    return {
+      configured,
+      phone_number: r && r.phone_number != null ? String(r.phone_number) : null,
+      status:       configured ? 'connected' : 'not_configured',
+    };
+  } catch {
+    try {
+      const { rows } = await pool.query(
+        `SELECT is_enabled, default_phone_country_code, api_base_url
+         FROM ml_wasender_settings LIMIT 1`
+      );
+      const r = rows[0];
+      const configured = !!(r && (r.is_enabled === true || r.is_enabled === 1));
+      return {
+        configured,
+        phone_number: null,
+        status:       configured ? 'connected' : 'not_configured',
+      };
+    } catch {
+      return { configured: false, phone_number: null, status: 'not_configured' };
+    }
+  }
+}
+
+async function fetchMercadolibreIntegration() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int AS accounts_count,
+              MAX(created_at) AS last_connected
+       FROM ml_accounts WHERE is_active = true`
+    );
+    const r = rows[0];
+    const n = r && Number(r.accounts_count) ? Number(r.accounts_count) : 0;
+    const last = r && r.last_connected != null ? r.last_connected : null;
+    const connected = n > 0;
+    return {
+      accounts_count: n,
+      last_connected: last ? new Date(last).toISOString() : null,
+      status:         connected ? 'connected' : 'not_configured',
+    };
+  } catch {
+    try {
+      const { rows } = await pool.query(
+        `SELECT COUNT(*)::int AS accounts_count,
+                MAX(updated_at) AS last_connected
+         FROM ml_accounts
+         WHERE refresh_token IS NOT NULL AND TRIM(refresh_token) != ''`
+      );
+      const r = rows[0];
+      const n = r && Number(r.accounts_count) ? Number(r.accounts_count) : 0;
+      const last = r && r.last_connected != null ? r.last_connected : null;
+      const connected = n > 0;
+      return {
+        accounts_count: n,
+        last_connected: last ? new Date(last).toISOString() : null,
+        status:         connected ? 'connected' : 'not_configured',
+      };
+    } catch {
+      return {
+        accounts_count: 0,
+        last_connected: null,
+        status:         'not_configured',
+      };
+    }
+  }
+}
+
+async function fetchBanescoIntegration() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT
+         CASE WHEN connection_string IS NOT NULL THEN true ELSE false END AS configured,
+         last_sync_at,
+         status
+       FROM bank_accounts WHERE bank_name ILIKE '%banesco%' LIMIT 1`
+    );
+    const r = rows[0];
+    const configured = !!(r && r.configured);
+    const last = r && r.last_sync_at != null ? r.last_sync_at : null;
+    return {
+      configured,
+      last_sync_at: last ? new Date(last).toISOString() : null,
+      status:       configured ? 'connected' : 'not_configured',
+    };
+  } catch {
+    try {
+      const { rows } = await pool.query(
+        `SELECT
+           (session_cookies IS NOT NULL AND TRIM(COALESCE(session_cookies::text, '')) != '') AS configured,
+           session_saved_at AS last_sync_at
+         FROM bank_accounts WHERE bank_name ILIKE '%banesco%' LIMIT 1`
+      );
+      const r = rows[0];
+      const configured = !!(r && r.configured);
+      const last = r && r.last_sync_at != null ? r.last_sync_at : null;
+      return {
+        configured,
+        last_sync_at: last ? new Date(last).toISOString() : null,
+        status:       configured ? 'connected' : 'not_configured',
+      };
+    } catch {
+      return { configured: false, last_sync_at: null, status: 'not_configured' };
+    }
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -64,7 +181,10 @@ async function handleBusinessConfigRequest(req, res, url) {
     if (method === 'GET' && path === '/api/config/company') {
       if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const { rows } = await pool.query(
-        'SELECT id, name, rif, address, phone, email, base_currency_code, fiscal_year_start, is_active, created_at, updated_at FROM companies WHERE id = 1'
+        `SELECT id, name, rif, address, phone, email, base_currency_code, fiscal_year_start,
+                logo_url, city, country,
+                is_active, created_at, updated_at
+         FROM companies WHERE id = 1`
       );
       writeJson(res, 200, { ok: true, data: rows[0] || null });
       return true;
@@ -73,7 +193,7 @@ async function handleBusinessConfigRequest(req, res, url) {
     if (method === 'PUT' && path === '/api/config/company') {
       if (!await requireAdminOrPermission(req, res, 'settings')) return true;
       const body = await parseJsonBody(req);
-      const allowed = ['name', 'rif', 'address', 'phone', 'email', 'fiscal_year_start'];
+      const allowed = ['name', 'rif', 'address', 'phone', 'email', 'fiscal_year_start', 'logo_url', 'city', 'country'];
       const sets  = [];
       const vals  = [];
       allowed.forEach(k => {
@@ -85,10 +205,24 @@ async function handleBusinessConfigRequest(req, res, url) {
       }
       const { rows } = await pool.query(
         `UPDATE companies SET ${sets.join(', ')}, updated_at = now() WHERE id = $1
-         RETURNING id, name, rif, address, phone, email, base_currency_code, fiscal_year_start, updated_at`,
+         RETURNING id, name, rif, address, phone, email, base_currency_code, fiscal_year_start,
+                   logo_url, city, country, updated_at`,
         [1, ...vals]
       );
       writeJson(res, 200, { ok: true, data: rows[0] });
+      return true;
+    }
+
+    if (method === 'GET' && path === '/api/config/integrations') {
+      const user = await requireAuth(req, res);
+      if (!user) return true;
+      if (!requirePermission(user, 'settings', 'read', res)) return true;
+      const [whatsapp, mercadolibre, banesco] = await Promise.all([
+        fetchWhatsappIntegration(),
+        fetchMercadolibreIntegration(),
+        fetchBanescoIntegration(),
+      ]);
+      writeJson(res, 200, { data: { whatsapp, mercadolibre, banesco } });
       return true;
     }
 

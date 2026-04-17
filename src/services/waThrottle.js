@@ -3,10 +3,11 @@
 /**
  * Throttle global de mensajes WhatsApp salientes.
  *
- * Límite: `WA_DAILY_CAP` mensajes por número de teléfono por día calendario
- * (zona horaria America/Caracas). **Default: 5 en producción.**
+ * Límite (prioridad): `WA_DAILY_MESSAGE_LIMIT` → si no existe, `WA_DAILY_CAP`
+ * → si no hay ninguna, default interno **5**. Mismo valor para todos los números;
+ * no hay límite por fila en BD.
  *
- * Para pruebas/desarrollo: subir `WA_DAILY_CAP=999` (o cualquier número alto).
+ * Para pruebas/desarrollo: p. ej. `WA_DAILY_MESSAGE_LIMIT=50` o `WA_DAILY_CAP=999`.
  * En producción: bajar a 5-10 según política.
  *
  * Reset manual del contador de un número sin esperar a mañana:
@@ -21,6 +22,20 @@
 
 const MAX_DEFAULT = 5;
 
+function resolveWaDailyCap() {
+  const a = process.env.WA_DAILY_MESSAGE_LIMIT;
+  const b = process.env.WA_DAILY_CAP;
+  const pick =
+    a != null && String(a).trim() !== ''
+      ? a
+      : b != null && String(b).trim() !== ''
+        ? b
+        : undefined;
+  if (pick === undefined) return MAX_DEFAULT;
+  const n = Number(pick);
+  return Number.isFinite(n) && n >= 0 ? n : MAX_DEFAULT;
+}
+
 /**
  * Verifica e incrementa el contador diario del teléfono.
  *
@@ -31,7 +46,7 @@ const MAX_DEFAULT = 5;
  * @returns {Promise<{ allowed: boolean, count: number, cap: number }>}
  */
 async function checkWaSendCap(phone, pool, opts = {}) {
-  const cap = Number(process.env.WA_DAILY_CAP || MAX_DEFAULT);
+  const cap = resolveWaDailyCap();
   const normalized = String(phone || '').replace(/\s/g, '');
 
   if (!normalized) return { allowed: false, count: 0, cap };
@@ -94,7 +109,7 @@ async function checkWaSendCap(phone, pool, opts = {}) {
  * @param {object} pool
  */
 async function getWaDailyUsage(phone, pool) {
-  const cap = Number(process.env.WA_DAILY_CAP || MAX_DEFAULT);
+  const cap = resolveWaDailyCap();
   const normalized = String(phone || '').replace(/\s/g, '');
   try {
     const { rows } = await pool.query(`
@@ -113,7 +128,7 @@ async function getWaDailyUsage(phone, pool) {
  * @param {object} pool
  */
 async function getWaThrottleSummary(pool) {
-  const cap = Number(process.env.WA_DAILY_CAP || MAX_DEFAULT);
+  const cap = resolveWaDailyCap();
   try {
     const { rows } = await pool.query(`
       SELECT
@@ -128,9 +143,37 @@ async function getWaThrottleSummary(pool) {
     const total_blocked  = rows.filter(r => r.capped).length;
     const total_active   = rows.length;
     const total_messages = rows.reduce((s, r) => s + Number(r.daily_count), 0);
-    return { date: new Date().toLocaleDateString('es-VE', { timeZone: 'America/Caracas' }), cap, total_active, total_blocked, total_messages, phones: rows };
+    const blocked_phones   = rows.filter(r => r.capped).map(r => r.phone_e164);
+    return {
+      date: new Date().toLocaleDateString('es-VE', { timeZone: 'America/Caracas' }),
+      timezone: 'America/Caracas',
+      daily_limit: cap,
+      cap,
+      blocked_phone_count: total_blocked,
+      blocked_phones,
+      total_active,
+      total_blocked,
+      total_messages,
+      phones: rows.map((r) => ({
+        phone_e164:   r.phone_e164,
+        daily_count:  Number(r.daily_count),
+        daily_limit:  cap,
+        capped:       r.capped === true,
+        blocked:      r.capped === true,
+      })),
+    };
   } catch (_) {
-    return { cap, total_active: 0, total_blocked: 0, total_messages: 0, phones: [] };
+    return {
+      cap,
+      daily_limit: cap,
+      timezone: 'America/Caracas',
+      blocked_phone_count: 0,
+      blocked_phones: [],
+      total_active: 0,
+      total_blocked: 0,
+      total_messages: 0,
+      phones: [],
+    };
   }
 }
 

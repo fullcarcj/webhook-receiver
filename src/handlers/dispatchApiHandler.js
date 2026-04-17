@@ -358,9 +358,10 @@ async function handleDispatchApiRequest(req, res, url) {
         }
         throw e;
       }
-      const tracking = body.tracking_number != null ? String(body.tracking_number).trim() : "";
-      const notesIn = body.notes != null ? String(body.notes) : null;
-      const binMovements = Array.isArray(body.bin_movements) ? body.bin_movements : [];
+      const tracking        = body.tracking_number  != null ? String(body.tracking_number).trim()  : "";
+      const mlShipmentIdIn  = body.ml_shipment_id   != null ? String(body.ml_shipment_id).trim()   : "";
+      const notesIn         = body.notes             != null ? String(body.notes) : null;
+      const binMovements    = Array.isArray(body.bin_movements) ? body.bin_movements : [];
 
       const client = await pool.connect();
       try {
@@ -404,10 +405,11 @@ async function handleDispatchApiRequest(req, res, url) {
              dispatched_at = now(),
              tracking_number = CASE WHEN $3::text <> '' THEN $3 ELSE tracking_number END,
              notes = COALESCE($4, notes),
+             ml_shipment_id  = CASE WHEN $5::text <> '' THEN $5 ELSE ml_shipment_id END,
              updated_at = now()
            WHERE id = $1
            RETURNING *`,
-          [dispatchId, uname, tracking, notesIn]
+          [dispatchId, uname, tracking, notesIn, mlShipmentIdIn]
         );
 
         const saleId = Number(row.sale_id);
@@ -423,6 +425,44 @@ async function handleDispatchApiRequest(req, res, url) {
         const ch = String(row.channel || "").toLowerCase();
         if (ch === "mercadolibre" && tracking) {
           await logMlDispatchTracking(dispatchId, tracking, { sale_id: saleId, sale_table: saleTable });
+        }
+
+        // ── Post-commit: derivar ml_shipment_id desde ml_orders si no fue provisto ──
+        // Se ejecuta en setImmediate (no bloquea la respuesta).
+        // Cubre el caso donde el frontend no conoce el shipment_id en el momento del despacho.
+        if (ch === "mercadolibre" && !mlShipmentIdIn) {
+          setImmediate(async () => {
+            try {
+              let shipmentId = null;
+              if (saleTable === "sales_orders") {
+                const { rows: soRows } = await pool.query(
+                  `SELECT external_order_id FROM sales_orders WHERE id = $1 LIMIT 1`,
+                  [saleId]
+                );
+                const extId = soRows[0]?.external_order_id;
+                if (extId) {
+                  // external_order_id = "{ml_user_id}-{order_id}"
+                  const parts = String(extId).split("-");
+                  const mlOrderId = parts[parts.length - 1];
+                  const { rows: mlRows } = await pool.query(
+                    `SELECT raw_json FROM ml_orders WHERE order_id = $1 LIMIT 1`,
+                    [mlOrderId]
+                  );
+                  if (mlRows[0]?.raw_json) {
+                    const rj = typeof mlRows[0].raw_json === "string"
+                      ? JSON.parse(mlRows[0].raw_json) : mlRows[0].raw_json;
+                    if (rj?.shipping?.id != null) shipmentId = String(rj.shipping.id);
+                  }
+                }
+              }
+              if (shipmentId) {
+                await pool.query(
+                  `UPDATE dispatch_records SET ml_shipment_id = $1 WHERE id = $2 AND ml_shipment_id IS NULL`,
+                  [shipmentId, dispatchId]
+                );
+              }
+            } catch (_) {}
+          });
         }
 
         writeJson(res, 200, { ok: true, dispatch_record: upd[0] });

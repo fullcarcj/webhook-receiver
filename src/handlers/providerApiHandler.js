@@ -71,6 +71,37 @@ const limitsSchema = z.object({
 
 const RECEIPT_TEST_TIMEOUT_MS = 30_000;
 
+function mapExtractedForResponse(extracted) {
+  if (!extracted || typeof extracted !== "object") return null;
+  return {
+    reference_number: extracted.reference_number ?? null,
+    amount_bs: extracted.amount_bs ?? null,
+    tx_date: extracted.tx_date ?? null,
+    bank_name: extracted.bank_name ?? null,
+    payment_type: extracted.payment_type ?? null,
+    confidence: extracted.confidence ?? null,
+  };
+}
+
+async function loadReconciliationSnapshot(attemptId) {
+  const { rows: pa } = await pool.query(
+    `SELECT reconciliation_status, reconciled_order_id FROM payment_attempts WHERE id = $1`,
+    [attemptId]
+  );
+  if (!pa.length) {
+    return { status: null, matched_order_id: null, match_level: null };
+  }
+  const { rows: rl } = await pool.query(
+    `SELECT match_level FROM reconciliation_log WHERE payment_attempt_id = $1 ORDER BY id DESC LIMIT 1`,
+    [attemptId]
+  );
+  return {
+    status: pa[0].reconciliation_status,
+    matched_order_id: pa[0].reconciled_order_id,
+    match_level: rl[0]?.match_level ?? null,
+  };
+}
+
 /**
  * Ejecuta el pipeline completo de conciliación bancaria sobre una URL de imagen.
  * Etapas: prefiltro sharp → extracción Gemini → (opcional) persistencia + reconciliación.
@@ -122,7 +153,13 @@ async function runReceiptTest(req, res) {
 
     if (!prefiltro.isReceipt) {
       writeJson(res, 200, {
-        ok: true, dry_run: dryRun, url: imageUrl, stages,
+        ok: true,
+        dry_run: dryRun,
+        attempt_id: null,
+        extracted: null,
+        reconciliation: { status: null, matched_order_id: null, match_level: null },
+        url: imageUrl,
+        stages,
         summary: "prefiltro_rechazado",
         elapsed_ms: Date.now() - t0,
       });
@@ -146,7 +183,13 @@ async function runReceiptTest(req, res) {
 
     if (dryRun) {
       writeJson(res, 200, {
-        ok: true, dry_run: true, url: imageUrl, stages,
+        ok: true,
+        dry_run: true,
+        attempt_id: null,
+        extracted: mapExtractedForResponse(extracted),
+        reconciliation: { status: null, matched_order_id: null, match_level: null },
+        url: imageUrl,
+        stages,
         summary: extracted ? "extraction_ok_dry_run" : "extraction_failed_dry_run",
         elapsed_ms: Date.now() - t0,
       });
@@ -187,13 +230,8 @@ async function runReceiptTest(req, res) {
     if (attemptId && extracted?.amount_bs != null) {
       try {
         const { reconcileAttempt } = require("../services/reconciliationService");
-        const reconResult = await reconcileAttempt(attemptId);
-        stages.reconciliation = {
-          ran: true,
-          status: reconResult?.status ?? "desconocido",
-          matched_statement_id: reconResult?.bank_statement_id ?? null,
-          detail: reconResult,
-        };
+        await reconcileAttempt(attemptId);
+        stages.reconciliation = { ran: true };
       } catch (e) {
         stages.reconciliation = { ran: true, error: e.message };
       }
@@ -201,9 +239,25 @@ async function runReceiptTest(req, res) {
       stages.reconciliation = { ran: false, reason: "amount_bs_null" };
     }
 
+    let reconOut = { status: null, matched_order_id: null, match_level: null };
+    if (attemptId) {
+      try {
+        reconOut = await loadReconciliationSnapshot(attemptId);
+      } catch (_e) { /* ignore */ }
+    }
+
     writeJson(res, 200, {
-      ok: true, dry_run: false, url: imageUrl, stages,
-      summary: stages.reconciliation.ran ? `reconciliation_${stages.reconciliation.status}` : "persisted_no_reconciliation",
+      ok: true,
+      dry_run: false,
+      attempt_id: attemptId,
+      extracted: mapExtractedForResponse(extracted),
+      reconciliation: reconOut,
+      url: imageUrl,
+      stages,
+      summary:
+        attemptId && extracted?.amount_bs != null
+          ? `reconciliation_${reconOut.status || "ok"}`
+          : "persisted_no_reconciliation",
       elapsed_ms: Date.now() - t0,
     });
     return true;

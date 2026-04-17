@@ -12,7 +12,7 @@
 | Prefijo / área | Handler principal | Cobertura |
 |----------------|-------------------|-----------|
 | `/api/v1/*` | `public-frontend-api.js` | Catálogo público, health, compat motor (`/api/v1/catalog`, `/api/v1/catalog/compat/*`) |
-| `/api/config/*` | `src/routes/businessConfig.js` | Empresa, sucursales, monedas, tasas lectura, tax-rules (`settings`) |
+| `/api/config/*` | `src/routes/businessConfig.js` | Empresa (`PUT` con `logo_url`), integraciones (`GET /integrations`), sucursales, monedas, tasas, tax-rules (`settings`) |
 | `/api/auth/*` | `server.js` + `src/utils/authMiddleware.js` | Login JWT, logout, me, change-password |
 | `/api/users/*` | `server.js` + `src/services/authService.js` | Gestión usuarios + roles + sesiones |
 | `/api/currency/*` | `src/routes/currency.js` | Tasas, override, fetch BCV |
@@ -37,7 +37,9 @@
 | `/api/inbox/:chatId/identity-candidates` … | `inboxIdentityHandler.js` | Candidatos identidad, link-customer, link-ml-order |
 | `/api/inbox/quotations/*` | `inboxQuotationHandler.js` | Cotizaciones `inventario_presupuesto` |
 | `/api/inbox`, `/api/inbox/counts` | `inboxApiHandler.js` | Bandeja unificada |
-| `/api/stats/*` | `statsApiHandler.js` | Estadísticas (incl. resumen throttle WA) |
+| `/api/stats/*` | `statsApiHandler.js` | Reportes: `GET /sales` (vista `v_sales_unified`, incl. POS mostrador), `/sales/products`, `/customers`, `/sales/hourly` (heatmap), **`/inventory`** (WMS `bin_stock` + `products`), **`/wa-throttle`** (límite diario WA + contadores) |
+| `/api/automations/*` | `automationsApiHandler.js` | Logs y config mensajes automáticos (JWT + permiso `settings`): `GET /stats`, `GET /logs/ml`, `GET /logs/whatsapp`, `GET /logs/questions-ia`, `GET /config/post-sale`, `PATCH /config/post-sale/:id`, `GET /config/tipo-e`, `GET /config/tipo-f`, `GET /config/questions-ia`, `GET /config/wasender` |
+| `/api/finance/summary`, `/api/finance/comprobantes`, `/api/finance/reconciliation-status` | `statsApiHandler.js` | Resumen financiero, comprobantes WA, estado conciliación (`fiscal:read`) |
 | `/api/inventory/*` | `inventoryApiHandler.js` | Inventario inteligente (products/inventory) |
 | `/api/crm/*` | `routes/crm.js` | CRM: customers, ml_buyers, wallet, migración |
 | `/api/cash/*`, `/api/finance-settings/*` | `cashApiHandler.js` | Caja / ajustes financieros (admin) |
@@ -149,11 +151,20 @@ Auth: cabecera `X-API-KEY` igual a la variable `FRONTEND_API_KEY` (ver `.env.exa
 | `/api/users/:id` | GET | JWT/Secret (ADMIN+) | Usuario por ID con `permissions[]`. |
 | `/api/users/:id` | PATCH | JWT/Secret (ADMIN+) | Actualiza `full_name`, `email`, `role`, `status`. Cambio de `role` revoca sesiones. |
 | `/api/users/:id/reset-password` | POST | JWT/Secret (SUPERUSER) | Reset forzado. Body: `{ new_password }`. Revoca sesiones y desbloquea cuenta. |
+| `/api/users/:id/change-password` | POST | JWT (propio usuario o SUPERUSER) | Body: `{ current_password, new_password }`. SUPERUSER puede omitir `current_password`. Error `WRONG_PASSWORD` si la actual no coincide. Revoca sesiones. |
 | `/api/users/:id/unlock` | POST | JWT/Secret (ADMIN+) | Desbloquea cuenta bloqueada por intentos fallidos. |
 | `/api/users/:id/sessions` | GET | ADMIN+ o propio | Sesiones JWT activas del usuario. |
 | `/api/users/:id/revoke-sessions` | POST | JWT/Secret (ADMIN+) | Revoca todas las sesiones activas. |
 
 **Tablas:** `users`, `user_sessions`, `role_permissions`. **Roles:** `SUPERUSER(3) > ADMIN(2) > OPERATOR(1)`. **Módulos en permisos:** `wms | ventas | crm | catalog | settings | fiscal`. **Auth dual:** Bearer token + Cookie HttpOnly `SameSite=Strict` (Secure en producción). `checkAdminSecretOrJwt()` acepta ambos + `X-Admin-Secret` / `?k=` (legado). **Migración:** `npm run db:users`.
+
+### Configuración de negocio (`/api/config`)
+
+| Endpoint | Método | Auth | Descripción |
+|----------|--------|------|-------------|
+| `/api/config/company` | GET | `settings:read` (JWT/Secret) | Empresa `id=1`; incluye `logo_url`, `city`, `country` tras `npm run db:companies-logo`. |
+| `/api/config/company` | PUT | `settings:write` | Body admite `logo_url`, `city`, `country` además de `name`, `rif`, etc. |
+| `/api/config/integrations` | GET | JWT + `settings:read` | `{ data: { whatsapp, mercadolibre, banesco } }` — estado de integraciones (solo Bearer/Cookie, sin admin-secret). |
 
 ---
 
@@ -358,11 +369,22 @@ Código: `src/handlers/aiResponderApiHandler.js`, `src/services/aiResponder.js`,
 | Endpoint | Método | Auth | Descripción |
 |----------|--------|------|-------------|
 | `/banesco` | GET | `?k=` | Página HTML estado Banesco (`?format=json`) |
-| `/banesco-connection` | GET | `?k=` | Alias JSON estado conexión |
+| `/banesco-connection` | GET | JWT `fiscal:read` o `?k=` / `X-Admin-Secret` | Alias JSON estado conexión |
 | `/statements` | GET | `?k=` | Tabla HTML extractos (`?format=json`) |
-| `/api/bank/banesco/connection` | GET | Admin | Estado de conexión JSON |
-| `/api/bank/banesco/status` | GET | Admin | Estado detallado |
-| `/api/bank/statements` | GET | Admin | Listado extractos (`bank_account_id`, `from`, `to`, `reconciliation_status`, `limit`, `offset`) |
+| `/api/bank/banesco/connection` | GET | JWT `fiscal:read` o `?k=` / `X-Admin-Secret` | Estado de conexión JSON |
+| `/api/bank/banesco/status` | GET | JWT `fiscal:read` o `?k=` / `X-Admin-Secret` | Estado detallado |
+| `/api/bank/statements` | GET | JWT `fiscal:read` o `?k=` / `X-Admin-Secret` | Extractos: `bank_account_id`, `from`, `to`, `status` o `reconciliation_status`, `tx_type` (DEBIT\|CREDIT), `search`, `limit` (default 50, max 200), `offset`. Respuesta `{ ok, data, meta }`. |
+
+## Finanzas (resumen / comprobantes WA / conciliación)
+
+| Endpoint | Método | Auth | Descripción |
+|----------|--------|------|-------------|
+| `GET /api/finance/summary` | GET | JWT `fiscal:read` o admin | `?period=today\|week\|month\|year` — cashflow Banesco, pendientes caja, débitos sin justificar, IGTF, stats `payment_attempts`. |
+| `GET /api/finance/comprobantes` | GET | JWT `fiscal:read` o admin | Listado Gemini/WA: `?status=`, `from`, `to`, `limit`, `offset`. |
+| `GET /api/finance/reconciliation-status` | GET | JWT `fiscal:read` o admin | Agregados `bank_statements` por estado + `reconciliation_log` últimas 24h. |
+| `POST /api/admin/test/receipt` | POST | JWT `settings` o admin | Pipeline comprobante (Sharp + Gemini); `dry_run` evita persistir. Ver `providerApiHandler.js`. |
+
+Migración claves ERP: `npm run db:finance-settings` (`finance_settings`).
 
 ---
 
@@ -393,6 +415,7 @@ Código: `src/handlers/aiResponderApiHandler.js`, `src/services/aiResponder.js`,
 | `/api/users/:id` | GET | JWT/Secret (ADMIN+) | Usuario por ID con permisos del rol. |
 | `/api/users/:id` | PATCH | JWT/Secret (ADMIN+) | Actualizar `full_name`, `email`, `role`, `status`. Cambio de rol revoca sesiones. |
 | `/api/users/:id/reset-password` | POST | JWT/Secret (SUPERUSER) | Fuerza nueva contraseña y revoca sesiones. |
+| `/api/users/:id/change-password` | POST | JWT (propio o SUPERUSER) | Body: `current_password`, `new_password` (SUPERUSER puede omitir `current_password`). |
 | `/api/users/:id/unlock` | POST | JWT/Secret (ADMIN+) | Desbloquea cuenta con `status=LOCKED`. |
 | `/api/users/:id/sessions` | GET | JWT/Secret (ADMIN+ o propio) | Sesiones activas del usuario. |
 | `/api/users/:id/revoke-sessions` | POST | JWT/Secret (ADMIN+) | Revoca todas las sesiones activas. |
@@ -436,6 +459,7 @@ Aplicado en: `src/middleware/adminAuth.js` (`ensureAdmin`) + `server.js` (`rejec
 | `npm run purge:ai-responder-error-log` | Borrar filas `ai_response_log` con `action_taken=error` (requiere `CONFIRM_PURGE_AI_ERROR_LOGS=1`) |
 | `npm run test-wasender-text` | Prueba envío texto Wasender (`RUN_WA_TEST_CONFIRM=1`) |
 | `npm run db:users` | Tablas `users`, `user_sessions`, `role_permissions`; SUPERUSER inicial |
+| `npm run db:companies-logo` | Columnas `companies.logo_url`, `city`, `country` |
 | `npm run db:wms` | WMS base: warehouses, aisles, shelves, bins, bin_stock, audit |
 | `npm run db:wms-audit` | ENUM `movement_reason` + trigger auditoría v2 |
 | `npm run db:wms-products-canonical` | Funciones atómicas stock + vistas canónicas sobre `products` |

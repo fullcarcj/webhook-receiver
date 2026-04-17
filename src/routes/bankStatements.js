@@ -1,7 +1,6 @@
 "use strict";
 
 const {
-  ensureAdminJson,
   writeJson,
   ensureAdminHtml,
   escapeHtml,
@@ -10,7 +9,9 @@ const {
   listBankStatements,
   getLatestBalancesSnapshot,
   RECONCILIATION_STATUSES,
+  TX_TYPES,
 } = require("../services/bankStatementsService");
+const { requireBankRead } = require("./bankAuth");
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -51,7 +52,7 @@ function parseStatementQueryParams(url) {
   }
 
   let reconciliationStatus = null;
-  const rawSt = sp.get("reconciliation_status");
+  const rawSt = sp.get("status") || sp.get("reconciliation_status");
   if (rawSt != null && String(rawSt).trim() !== "") {
     const u = String(rawSt).trim().toUpperCase();
     if (!RECONCILIATION_STATUSES.has(u)) {
@@ -68,9 +69,26 @@ function parseStatementQueryParams(url) {
     reconciliationStatus = u;
   }
 
+  let txType = null;
+  const rawTx = sp.get("tx_type");
+  if (rawTx != null && String(rawTx).trim() !== "") {
+    const u = String(rawTx).trim().toUpperCase();
+    if (!TX_TYPES.has(u)) {
+      return {
+        ok: false,
+        status: 400,
+        body: { ok: false, error: "invalid_tx_type", allowed: [...TX_TYPES] },
+      };
+    }
+    txType = u;
+  }
+
+  const search = sp.get("search") || sp.get("q");
+  const searchTrim = search != null && String(search).trim() !== "" ? String(search).trim() : null;
+
   let limit = parseInt(sp.get("limit") || "50", 10);
   if (!Number.isFinite(limit) || limit < 1) limit = 50;
-  if (limit > 500) limit = 500;
+  if (limit > 200) limit = 200;
 
   let offset = parseInt(sp.get("offset") || "0", 10);
   if (!Number.isFinite(offset) || offset < 0) offset = 0;
@@ -82,6 +100,8 @@ function parseStatementQueryParams(url) {
       fromDate: fromDate ? fromDate.trim() : null,
       toDate: toDate ? toDate.trim() : null,
       reconciliationStatus,
+      txType,
+      search: searchTrim,
       limit,
       offset,
     },
@@ -97,6 +117,22 @@ function formatTxDate(row) {
   } catch (_) {
     return String(d);
   }
+}
+
+/** Campos estables para API JSON (sin joins extra). */
+function mapStatementApiRow(r) {
+  return {
+    id: r.id != null ? String(r.id) : r.id,
+    bank_account_id: r.bank_account_id != null ? Number(r.bank_account_id) : null,
+    tx_date: formatTxDate(r),
+    reference_number: r.reference_number ?? null,
+    description: r.description ?? "",
+    tx_type: r.tx_type ?? null,
+    amount: r.amount != null ? String(r.amount) : null,
+    balance_after: r.balance_after != null ? String(r.balance_after) : null,
+    payment_type: r.payment_type ?? null,
+    reconciliation_status: r.reconciliation_status ?? null,
+  };
 }
 
 function formatAmountEs(value) {
@@ -145,10 +181,8 @@ async function handleStatementsHtmlPage(req, res, url) {
       const { rows, total } = await listBankStatements(params);
       writeJson(res, 200, {
         ok: true,
-        total,
-        limit: params.limit,
-        offset: params.offset,
-        rows,
+        data: rows.map(mapStatementApiRow),
+        meta: { total, limit: params.limit, offset: params.offset },
       });
     } catch (e) {
       console.error("[bank statements]", e);
@@ -314,7 +348,7 @@ async function handleBankStatementsRequest(req, res, url) {
     return true;
   }
 
-  if (!ensureAdminJson(req, res, url)) return true;
+  if (!(await requireBankRead(req, res))) return true;
 
   try {
     if (url.pathname.replace(/\/+$/, "") !== "/api/bank/statements") {
@@ -332,10 +366,8 @@ async function handleBankStatementsRequest(req, res, url) {
 
     writeJson(res, 200, {
       ok: true,
-      total,
-      limit: parsed.params.limit,
-      offset: parsed.params.offset,
-      rows,
+      data: rows.map(mapStatementApiRow),
+      meta: { total, limit: parsed.params.limit, offset: parsed.params.offset },
     });
     return true;
   } catch (e) {

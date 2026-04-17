@@ -160,10 +160,12 @@ async function adjustStockDeltas({
 
 /**
  * `adjustStock`: si viene `delta` → `adjust_stock` en BD; si no, deltas legacy.
+ * Post-commit: dispara sync WMS→ML en setImmediate (no bloquea respuesta).
  */
 async function adjustStock(body) {
+  let result;
   if (body.delta != null && body.delta !== "") {
-    return adjustStockSql({
+    result = await adjustStockSql({
       binId: body.binId != null ? body.binId : body.bin_id,
       sku: body.sku || body.product_sku,
       delta: body.delta,
@@ -173,18 +175,34 @@ async function adjustStock(body) {
       userId: body.userId != null ? body.userId : body.user_id,
       notes: body.notes,
     });
+  } else {
+    result = await adjustStockDeltas({
+      binId: body.binId != null ? body.binId : body.bin_id,
+      sku: body.sku || body.product_sku,
+      deltaAvailable: body.deltaAvailable != null ? body.deltaAvailable : body.delta_available,
+      deltaReserved: body.deltaReserved != null ? body.deltaReserved : body.delta_reserved,
+      reason: body.reason,
+      referenceId: body.referenceId || body.reference_id,
+      referenceType: body.referenceType || body.reference_type,
+      userId: body.userId != null ? body.userId : body.user_id,
+      notes: body.notes,
+    });
   }
-  return adjustStockDeltas({
-    binId: body.binId != null ? body.binId : body.bin_id,
-    sku: body.sku || body.product_sku,
-    deltaAvailable: body.deltaAvailable != null ? body.deltaAvailable : body.delta_available,
-    deltaReserved: body.deltaReserved != null ? body.deltaReserved : body.delta_reserved,
-    reason: body.reason,
-    referenceId: body.referenceId || body.reference_id,
-    referenceType: body.referenceType || body.reference_type,
-    userId: body.userId != null ? body.userId : body.user_id,
-    notes: body.notes,
-  });
+
+  // ── Hook WMS→ML: post-commit, no bloquea ─────────────────────────────
+  const sku = String(body.sku || body.product_sku || "").trim();
+  if (sku) {
+    setImmediate(async () => {
+      try {
+        const { syncMlStockForSku } = require("./mlPublicationsService");
+        await syncMlStockForSku(sku, { updatedBy: "wms_adjust" });
+      } catch (err) {
+        console.error("[WMS→ML] adjustStock sync error:", err.message);
+      }
+    });
+  }
+
+  return result;
 }
 
 async function reserveStockSql({ binId, sku, qty, referenceType, referenceId, userId }) {
@@ -321,6 +339,7 @@ async function commitBinReservationSql({ binId, sku, qty, referenceType, referen
   const b = Number(binId);
   const q = Number(qty);
   const skuStr = String(sku || "").trim();
+  let result;
   try {
     const { rows } = await pool.query(
       `SELECT * FROM commit_reservation($1::bigint, $2::text, $3::numeric, $4::text, $5::text, $6::int)`,
@@ -333,7 +352,7 @@ async function commitBinReservationSql({ binId, sku, qty, referenceType, referen
         userId != null && userId !== "" ? Number(userId) : null,
       ]
     );
-    return rows[0];
+    result = rows[0];
   } catch (e) {
     const msg = e && e.message ? String(e.message) : "";
     if (msg.includes("INSUFFICIENT_RESERVATION")) {
@@ -344,6 +363,20 @@ async function commitBinReservationSql({ binId, sku, qty, referenceType, referen
     }
     throw e;
   }
+
+  // ── Hook WMS→ML: despacho → stock baja → sync ML post-commit ─────────
+  if (skuStr) {
+    setImmediate(async () => {
+      try {
+        const { syncMlStockForSku } = require("./mlPublicationsService");
+        await syncMlStockForSku(skuStr, { updatedBy: "wms_commit" });
+      } catch (err) {
+        console.error("[WMS→ML] commitBinReservationSql sync error:", err.message);
+      }
+    });
+  }
+
+  return result;
 }
 
 async function releaseBinReservationSql({ binId, sku, qty, referenceType, referenceId, userId }) {

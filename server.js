@@ -169,6 +169,7 @@ const {
   updateProducto,
   deleteProducto,
   dbPath,
+  pool,
 } = require("./db");
 const { enrichProductoConImagenesUrls, buildProductoImagenesUrls } = require("./producto-imagenes-urls");
 const { handlePublicFrontendRequest } = require("./public-frontend-api");
@@ -1328,6 +1329,16 @@ function scheduleTopicFetchFromWebhook(body) {
                         }),
                       });
                     }
+                    setImmediate(() => {
+                      (async () => {
+                        try {
+                          const { upsertMlQuestionChat } = require("./src/services/mlInboxBridge");
+                          await upsertMlQuestionChat(row, null);
+                        } catch (e) {
+                          console.error("[mlInboxBridge] question", e);
+                        }
+                      })();
+                    });
                     if (process.env.ML_WHATSAPP_TIPO_F_ENABLED === "1") {
                       const qidF = row.ml_question_id;
                       const uidF = mlUserId;
@@ -1616,6 +1627,25 @@ function scheduleTopicFetchFromWebhook(body) {
                       oidMsg,
                       pr0.ml_message_id
                     );
+                    setImmediate(() => {
+                      (async () => {
+                        try {
+                          const { upsertMlMessageChat } = require("./src/services/mlInboxBridge");
+                          const { rows: packRows } = await pool.query(
+                            `SELECT ml_message_id, ml_user_id, order_id, from_user_id, to_user_id, message_text, date_created
+                             FROM ml_order_pack_messages
+                             WHERE ml_user_id = $1 AND order_id = $2 AND ml_message_id = $3
+                             LIMIT 1`,
+                            [mlUserId, oidMsg, String(pr0.ml_message_id)]
+                          );
+                          if (packRows.length) {
+                            await upsertMlMessageChat(packRows[0], null);
+                          }
+                        } catch (e) {
+                          console.error("[mlInboxBridge] message persist", e);
+                        }
+                      })();
+                    });
                   }
                 } catch (e0) {
                   console.error("[ml pack webhook] persist mensaje GET:", e0.message || e0);
@@ -1649,6 +1679,33 @@ function scheduleTopicFetchFromWebhook(body) {
                       pr.upserted,
                       pr.empty === true ? "1" : "0"
                     );
+                    if (pr.upserted > 0) {
+                      const n = Math.min(Number(pr.upserted) || 0, 100);
+                      setImmediate(() => {
+                        (async () => {
+                          try {
+                            const { upsertMlMessageChat } = require("./src/services/mlInboxBridge");
+                            const { rows: syncRows } = await pool.query(
+                              `SELECT ml_message_id, ml_user_id, order_id, from_user_id, to_user_id, message_text, date_created
+                               FROM ml_order_pack_messages
+                               WHERE ml_user_id = $1 AND order_id = $2
+                               ORDER BY id DESC
+                               LIMIT $3`,
+                              [mlUserId, oidMsg, n]
+                            );
+                            for (const mr of syncRows) {
+                              try {
+                                await upsertMlMessageChat(mr, null);
+                              } catch (ie) {
+                                console.error("[mlInboxBridge] message sync row", ie);
+                              }
+                            }
+                          } catch (e) {
+                            console.error("[mlInboxBridge] message sync", e);
+                          }
+                        })();
+                      });
+                    }
                   } else {
                     console.warn(
                       "[ml pack webhook] ml_user_id=%s order_id=%s err=%s",

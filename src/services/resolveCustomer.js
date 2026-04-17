@@ -34,10 +34,25 @@ const identitySchema = z.object({
       email: z.string().optional(),
       id_type: z.string().optional(),
       id_number: z.string().optional(),
+      ml_buyer_id: z.union([z.string(), z.number()]).optional(),
+      company_id: z.coerce.number().int().positive().optional(),
     })
     .optional()
     .default({}),
 });
+
+/**
+ * @param {object} data
+ * @param {{ companyId?: number }} options
+ */
+function resolveCompanyIdForCustomer(data, options) {
+  const fromOpt = options.companyId != null ? Number(options.companyId) : NaN;
+  if (Number.isFinite(fromOpt) && fromOpt > 0) return fromOpt;
+  const fromData = data && data.company_id != null ? Number(data.company_id) : NaN;
+  if (Number.isFinite(fromData) && fromData > 0) return fromData;
+  console.warn("[resolveCustomer] company_id not provided, defaulting to 1 — fix caller");
+  return 1;
+}
 
 /**
  * @param {import("pg").Pool|import("pg").PoolClient} db
@@ -164,7 +179,7 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
 
 /**
  * @param {object} identity
- * @param {{ client?: import("pg").PoolClient }} [options] — usar mismo client si hay transacción abierta
+ * @param {{ client?: import("pg").PoolClient, companyId?: number }} [options] — usar mismo client si hay transacción abierta; `companyId` preferido sobre `identity.data.company_id`
  */
 async function resolveCustomer(identity, options = {}) {
   const parsed = identitySchema.safeParse(identity);
@@ -187,6 +202,13 @@ async function resolveCustomer(identity, options = {}) {
     if (c && !isWaContactNameBlockedForFullName(c)) data.contact_name = c;
     else delete data.contact_name;
   }
+
+  const companyId = resolveCompanyIdForCustomer(data, options);
+  delete data.company_id;
+
+  const mlBuyerIdRaw = data.ml_buyer_id;
+  delete data.ml_buyer_id;
+
   const db = options.client || pool;
 
   let normalizedExternalId = extRaw;
@@ -223,6 +245,34 @@ async function resolveCustomer(identity, options = {}) {
     };
   }
 
+  if (mlBuyerIdRaw != null && String(mlBuyerIdRaw).trim() !== "") {
+    const bid = Number(String(mlBuyerIdRaw).trim());
+    if (Number.isFinite(bid) && bid > 0) {
+      const { rows: mbRows } = await db.query(
+        `SELECT c.id
+         FROM customers c
+         INNER JOIN customer_ml_buyers cmb ON cmb.customer_id = c.id
+         INNER JOIN ml_buyers mb ON mb.buyer_id = cmb.ml_buyer_id
+         WHERE mb.buyer_id = $1 AND c.company_id = $2
+         LIMIT 1`,
+        [bid, companyId]
+      );
+      if (mbRows.length) {
+        const customerId = Number(mbRows[0].id);
+        await linkIdentity(db, customerId, source, normalizedExternalId);
+        await enrichCustomer(db, customerId, data, normalizedPhone, normalizedPhone2, source);
+        const waMlBuyerTipoECheck = buildWaMlBuyerTipoECheck(source, data, normalizedPhone, null);
+        return {
+          customerId,
+          isNew: false,
+          matchLevel: "ml_buyer_id",
+          healed: false,
+          ...(waMlBuyerTipoECheck ? { waMlBuyerTipoECheck } : {}),
+        };
+      }
+    }
+  }
+
   // DECISIÓN: solo usar external_id como “teléfono” en nivel 2 si la fuente es WhatsApp (evita matchear buyer_id ML como teléfono).
   const phoneToSearch =
     normalizedPhone ?? (source === "whatsapp" ? normalizePhone(extRaw) || String(extRaw).replace(/\D/g, "") : null);
@@ -233,13 +283,16 @@ async function resolveCustomer(identity, options = {}) {
        FROM customers c
        WHERE NULLIF(TRIM(c.phone), '') IS NOT NULL
          AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
+         AND c.company_id = $2
        UNION
-       SELECT ci.customer_id
+       SELECT c.id AS customer_id
        FROM crm_customer_identities ci
+       INNER JOIN customers c ON c.id = ci.customer_id
        WHERE ci.external_id = $1
          AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
+         AND c.company_id = $2
        LIMIT 1`,
-      [phoneToSearch]
+      [phoneToSearch, companyId]
     );
 
     if (phoneRows.length) {
@@ -261,9 +314,9 @@ async function resolveCustomer(identity, options = {}) {
   if (data.id_type && data.id_number) {
     const { rows: docRows } = await db.query(
       `SELECT id AS customer_id FROM customers
-       WHERE id_type = $1 AND id_number = $2
+       WHERE id_type = $1 AND id_number = $2 AND company_id = $3
        LIMIT 1`,
-      [data.id_type, data.id_number]
+      [data.id_type, data.id_number, companyId]
     );
 
     if (docRows.length) {
@@ -284,8 +337,10 @@ async function resolveCustomer(identity, options = {}) {
   if (data.email) {
     const em = String(data.email).toLowerCase().trim();
     const { rows: emailRows } = await db.query(
-      `SELECT id AS customer_id FROM customers WHERE LOWER(TRIM(email)) = $1 LIMIT 1`,
-      [em]
+      `SELECT id AS customer_id FROM customers
+       WHERE LOWER(TRIM(email)) = $1 AND company_id = $2
+       LIMIT 1`,
+      [em, companyId]
     );
 
     if (emailRows.length) {
@@ -372,9 +427,10 @@ async function resolveCustomer(identity, options = {}) {
       newRows = await conn.query(
         `INSERT INTO customers
            (company_id, full_name, phone, phone_2, email, id_type, id_number, crm_status, created_at, updated_at)
-         VALUES (1, $1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
          RETURNING id`,
         [
+          companyId,
           fullName,
           normalizedPhone,
           normalizedPhone2,
@@ -388,9 +444,10 @@ async function resolveCustomer(identity, options = {}) {
       newRows = await conn.query(
         `INSERT INTO customers
            (company_id, full_name, phone, email, id_type, id_number, crm_status, created_at, updated_at)
-         VALUES (1, $1, $2, $3, $4, $5, $6, NOW(), NOW())
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
          RETURNING id`,
         [
+          companyId,
           fullName,
           normalizedPhone,
           data.email ? String(data.email).toLowerCase().trim() : null,

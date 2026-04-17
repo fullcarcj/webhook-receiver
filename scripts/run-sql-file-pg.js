@@ -46,6 +46,10 @@ async function runSqlFile(sqlPathAbs) {
     connectionTimeoutMillis: Number(process.env.PG_POOL_CONNECTION_MS || 30_000),
   });
   await client.connect();
+  client.on("notice", (msg) => {
+    const t = msg && (msg.message || msg.toString());
+    if (t) process.stderr.write(`[pg-notice] ${t}\n`);
+  });
   try {
     await client.query(sql);
   } finally {

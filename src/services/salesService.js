@@ -40,6 +40,14 @@ const CHANNEL_FULFILLMENT_STATUS = {
 };
 const DEFAULT_ML_ACTIVE_MAX_DAYS = 10;
 
+/** Etapas de ciclo ML (feedback en `ml_orders`; NULL = pendiente). */
+const LIFECYCLE_STAGE_VALUES = new Set([
+  "waiting_buyer_feedback",
+  "waiting_seller_feedback",
+  "feedback_complete",
+  "unknown",
+]);
+
 function resolveMlActiveMaxDays() {
   const raw = Number(process.env.SALES_ML_ACTIVE_MAX_DAYS || DEFAULT_ML_ACTIVE_MAX_DAYS);
   if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_ML_ACTIVE_MAX_DAYS;
@@ -280,7 +288,7 @@ async function fetchOrderItems(client, salesOrderId) {
  * Venta omnicanal (transacción): orden + ítems + stock (kits vía atributos) + caja + fidelidad opcional.
  * @param {object} p
  * @param {'mostrador'|'social_media'} p.source
- * @param {number|undefined|null} [p.customerId] — omitir = consumidor final (sin puntos)
+ * @param {number|undefined|null} [p.customerId] — sin cliente en mostrador: doc+teléfono o `consumidor_final` (ver evaluateMostradorIdentity)
  * @param {Array<{sku:string,quantity:number,unit_price_usd:number}>} p.items
  * @param {string} [p.notes]
  * @param {string} [p.soldBy]
@@ -293,6 +301,10 @@ async function fetchOrderItems(client, salesOrderId) {
  * @param {number} [p.paymentAmount] — monto cobrado (USD o Bs según medio; opcional, default total orden)
  * @param {number} [p.exchangeRate] — tasa Bs/USD para EFECTIVO_BS (opcional)
  * @param {string} [p.proofUrl] — URL comprobante (opcional)
+ * @param {string} [p.id_type] — V/E/J/G/P (mostrador sin customer_id)
+ * @param {string} [p.id_number]
+ * @param {string} [p.phone] — teléfono contacto (mostrador sin customer_id)
+ * @param {boolean} [p.consumidor_final]
  */
 async function createOrder({
   source,
@@ -311,6 +323,10 @@ async function createOrder({
   paymentAmount,
   exchangeRate,
   proofUrl,
+  id_type,
+  id_number,
+  phone,
+  consumidor_final,
 }) {
   if (!MANUAL_SOURCES.has(source)) {
     const e = new Error("source no permitido para creación manual");
@@ -391,6 +407,26 @@ async function createOrder({
   }
   const insertStatus = needsCashApproval ? "pending_cash_approval" : st;
 
+  let orderNotes = notes;
+  if (source === "mostrador") {
+    const { evaluateMostradorIdentity } = require("../utils/mostradorIdentityGate");
+    const gate = evaluateMostradorIdentity({
+      customerId: cid,
+      id_type,
+      id_number,
+      phone,
+      consumidor_final,
+      notes: orderNotes,
+    });
+    if (!gate.ok) {
+      const e = new Error(gate.message || gate.reason || "identidad");
+      e.code = gate.code;
+      if (gate.reason) e.reason = gate.reason;
+      throw e;
+    }
+    orderNotes = gate.notes;
+  }
+
   const compId = Number(companyId || process.env.SALES_CURRENCY_COMPANY_ID || "1") || 1;
   let rate = null;
   let totalBs = null;
@@ -455,7 +491,7 @@ async function createOrder({
         pay,
         paymentSt,
         fulfillSt,
-        notes ?? null,
+        orderNotes ?? null,
         soldBy ?? null,
       ]
     );
@@ -513,7 +549,7 @@ async function createOrder({
         exchangeRate: exchangeRate != null ? Number(exchangeRate) : null,
         proofUrl: proofUrl != null ? String(proofUrl) : null,
         soldBy,
-        description: notes || `Venta ${source}`,
+        description: orderNotes || `Venta ${source}`,
       });
     }
 
@@ -862,9 +898,24 @@ async function listSalesOrders({
   to,
   /** Sin `status` explícito: oculta ventas ML ya cerradas por feedback (`completed`). `include_completed=1` en API. */
   excludeCompleted = true,
+  /** Filtro opcional por etapa ML (`ml_orders` vía JOIN). Vacío = todas. */
+  lifecycleStage,
 }) {
   const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
   const off = Math.max(Number(offset) || 0, 0);
+  const lcRaw = lifecycleStage != null ? String(lifecycleStage).trim() : "";
+  let lifecycleFilterParam = null;
+  if (lcRaw !== "") {
+    if (!LIFECYCLE_STAGE_VALUES.has(lcRaw)) {
+      const e = new Error(
+        `lifecycle_stage inválido: use ${Array.from(LIFECYCLE_STAGE_VALUES).join(", ")}`
+      );
+      e.code = "BAD_REQUEST";
+      throw e;
+    }
+    lifecycleFilterParam = lcRaw;
+  }
+
   const cond = [];
   const params = [];
   let n = 1;
@@ -895,47 +946,143 @@ async function listSalesOrders({
     `(vu.source <> 'mercadolibre' OR vu.created_at >= (NOW() - ($${n++}::text || ' days')::interval))`
   );
   params.push(String(mlActiveDays));
-  const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
-  params.push(lim, off);
+  const whereVu = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
+
+  const lifecycleStageExpr = `
+    CASE
+      WHEN vu.source_table = 'sales_orders'
+       AND so.source = 'mercadolibre'
+       AND mo.order_id IS NOT NULL THEN
+        CASE
+          WHEN mo.feedback_sale IS NOT NULL AND mo.feedback_purchase IS NULL
+            THEN 'waiting_buyer_feedback'
+          WHEN mo.feedback_sale IS NULL
+            THEN 'waiting_seller_feedback'
+          WHEN mo.feedback_sale IS NOT NULL AND mo.feedback_purchase IS NOT NULL
+            THEN 'feedback_complete'
+          ELSE 'unknown'
+        END
+      ELSE NULL
+    END`;
+
+  const waitingBuyerExpr = `
+    CASE
+      WHEN vu.source_table = 'sales_orders'
+       AND so.source = 'mercadolibre'
+       AND mo.order_id IS NOT NULL
+       AND mo.feedback_sale IS NOT NULL
+       AND mo.feedback_purchase IS NULL
+      THEN true ELSE false
+    END`;
+
+  const enrichedFrom = `
+    FROM v_sales_unified vu
+    LEFT JOIN sales_orders so
+      ON vu.source_table = 'sales_orders'
+     AND vu.source_id = so.id
+    LEFT JOIN ml_orders mo
+      ON so.source = 'mercadolibre'
+     AND so.ml_user_id IS NOT NULL
+     AND so.external_order_id ~ '^[0-9]+-[0-9]+$'
+     AND mo.ml_user_id = so.ml_user_id
+     AND mo.order_id = split_part(so.external_order_id, '-', 2)::bigint
+    ${whereVu}`;
+
+  const enrichedCte = `
+    enriched AS (
+      SELECT vu.id, vu.source, vu.external_order_id, vu.customer_id, vu.status,
+             vu.order_total_amount, vu.loyalty_points_earned,
+             vu.notes, vu.sold_by, vu.created_at,
+             vu.reconciled_statement_id,
+             (${lifecycleStageExpr}) AS lifecycle_stage,
+             (${waitingBuyerExpr}) AS waiting_buyer_feedback
+      ${enrichedFrom}
+    )`;
+
+  const lcIdx = n;
+  const filteredCte = `
+    filtered AS (
+      SELECT * FROM enriched e
+      WHERE ($${lcIdx}::text IS NULL OR trim(COALESCE($${lcIdx}::text, '')) = '' OR e.lifecycle_stage = $${lcIdx}::text)
+    )`;
+
+  const baseParams = params.slice();
+  const paramsWithLc = [...baseParams, lifecycleFilterParam];
+  const limitIdx = lcIdx + 1;
+  const offsetIdx = lcIdx + 2;
+  const paramsList = [...paramsWithLc, lim, off];
+
   try {
     const { rows } = await pool.query(
-      `SELECT vu.id, vu.source, vu.external_order_id, vu.customer_id, vu.status,
-              vu.order_total_amount, vu.loyalty_points_earned,
-              vu.notes, vu.sold_by, vu.created_at,
-              vu.reconciled_statement_id
-       FROM v_sales_unified vu
-       ${where}
-       ORDER BY vu.created_at DESC
-       LIMIT $${n++} OFFSET $${n}`,
-      params
+      `WITH ${enrichedCte},
+            ${filteredCte}
+       SELECT e.id, e.source, e.external_order_id, e.customer_id, e.status,
+              e.order_total_amount, e.loyalty_points_earned,
+              e.notes, e.sold_by, e.created_at,
+              e.reconciled_statement_id,
+              e.lifecycle_stage,
+              e.waiting_buyer_feedback
+       FROM filtered e
+       ORDER BY e.created_at DESC
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      paramsList
     );
     const { rows: countRows } = await pool.query(
-      `SELECT COUNT(*)::bigint AS c FROM v_sales_unified vu ${where}`,
-      params.slice(0, -2)
+      `WITH ${enrichedCte},
+            ${filteredCte}
+       SELECT COUNT(*)::bigint AS c FROM filtered`,
+      paramsWithLc
     );
+    const { rows: sumRows } = await pool.query(
+      `WITH ${enrichedCte}
+       SELECT
+         COALESCE(SUM(CASE WHEN e.lifecycle_stage = 'waiting_buyer_feedback' THEN 1 ELSE 0 END), 0)::int
+           AS waiting_buyer_feedback,
+         COALESCE(SUM(CASE WHEN e.lifecycle_stage = 'waiting_seller_feedback' THEN 1 ELSE 0 END), 0)::int
+           AS waiting_seller_feedback,
+         COALESCE(SUM(CASE WHEN e.lifecycle_stage = 'feedback_complete' THEN 1 ELSE 0 END), 0)::int
+           AS feedback_complete
+       FROM enriched e
+       WHERE e.lifecycle_stage IS NOT NULL`,
+      baseParams
+    );
+    const s0 = sumRows[0] || {};
+    const wbf = Number(s0.waiting_buyer_feedback) || 0;
+    const wsf = Number(s0.waiting_seller_feedback) || 0;
+    const fc = Number(s0.feedback_complete) || 0;
+    const lifecycle_summary = {
+      waiting_buyer_feedback: wbf,
+      waiting_seller_feedback: wsf,
+      feedback_complete: fc,
+      total_active: wbf + wsf + fc,
+    };
+
     return {
       rows: rows.map((o) => {
         const tot = Number(o.order_total_amount);
         return {
-        id: o.id,
-        source: o.source,
-        external_order_id: o.external_order_id,
-        customer_id: o.customer_id,
-        status: o.status,
-        order_total_amount: tot,
-        total_amount_usd: tot,
-        total_usd: tot,
-        loyalty_points_earned: o.loyalty_points_earned,
-        notes: o.notes,
-        sold_by: o.sold_by,
-        created_at: o.created_at,
-        reconciled_statement_id:
-          o.reconciled_statement_id != null ? Number(o.reconciled_statement_id) : null,
-      };
+          id: o.id,
+          source: o.source,
+          external_order_id: o.external_order_id,
+          customer_id: o.customer_id,
+          status: o.status,
+          order_total_amount: tot,
+          total_amount_usd: tot,
+          total_usd: tot,
+          loyalty_points_earned: o.loyalty_points_earned,
+          notes: o.notes,
+          sold_by: o.sold_by,
+          created_at: o.created_at,
+          reconciled_statement_id:
+            o.reconciled_statement_id != null ? Number(o.reconciled_statement_id) : null,
+          lifecycle_stage: o.lifecycle_stage != null ? String(o.lifecycle_stage) : null,
+          waiting_buyer_feedback: Boolean(o.waiting_buyer_feedback),
+        };
       }),
       total: Number(countRows[0].c),
       limit: lim,
       offset: off,
+      lifecycle_summary,
     };
   } catch (e) {
     throw mapErr(e);
@@ -1861,6 +2008,7 @@ async function importSalesOrdersFromMlTable({
 }
 
 module.exports = {
+  LIFECYCLE_STAGE_VALUES,
   createOrder,
   createSalesOrder,
   getSalesOrderById,

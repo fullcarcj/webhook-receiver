@@ -8,6 +8,17 @@ const {
   getPosPurchaseById,
   listPosPurchases,
 } = require("../services/posSalesService");
+const {
+  evaluateMostradorIdentity,
+  buildMissingMostradorIdentity422Body,
+} = require("../utils/mostradorIdentityGate");
+const { resolveCustomer } = require("../services/resolveCustomer");
+
+function hasPositivePosCustomerId(v) {
+  if (v == null || v === "") return false;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0;
+}
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -51,12 +62,77 @@ async function handlePosSalesApiRequest(req, res, url) {
     if (req.method === "POST" && (rest === "/api/pos/sales" || rest === "/api/pos/sales/")) {
       if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const body = await parseJsonBody(req);
+      const gate = evaluateMostradorIdentity({
+        customerId: body.customer_id,
+        id_type: body.id_type,
+        id_number: body.id_number,
+        phone: body.phone,
+        consumidor_final: body.consumidor_final,
+        notes: body.notes,
+      });
+      if (!gate.ok) {
+        if (gate.code === "MISSING_IDENTITY_MOSTRADOR") {
+          writeJson(res, 422, buildMissingMostradorIdentity422Body());
+        } else {
+          writeJson(res, 422, {
+            code: gate.code,
+            reason: gate.reason,
+          });
+        }
+        return true;
+      }
+
+      const hasCust = hasPositivePosCustomerId(body.customer_id);
+      const anonymousCf = body.consumidor_final === true;
+
+      let notesOut = gate.notes;
+      let customerIdForSale = hasCust ? Number(body.customer_id) : null;
+
+      if (!hasCust && !anonymousCf) {
+        const extId = String(body.id_number || body.phone || "").trim();
+        try {
+          const coRaw = body.company_id;
+          const co =
+            coRaw != null && String(coRaw).trim() !== "" ? Number(coRaw) : undefined;
+          const resolveOpts =
+            co != null && Number.isFinite(co) && co > 0 ? { companyId: co } : {};
+          const resolved = await resolveCustomer(
+            {
+              source: "mostrador",
+              external_id: extId,
+              data: {
+                phone: body.phone,
+                id_type: body.id_type,
+                id_number: body.id_number,
+                name: body.name || body.customer_name,
+                email: body.email,
+                company_id: co,
+              },
+            },
+            resolveOpts
+          );
+          customerIdForSale = resolved.customerId;
+        } catch (err) {
+          console.error("[POS] resolveCustomer failed", {
+            id_type: body.id_type,
+            id_number: body.id_number,
+            phone: body.phone,
+            error: err && err.message,
+          });
+          writeJson(res, 500, {
+            code: "IDENTITY_RESOLUTION_FAILED",
+            message: "No se pudo resolver la identidad del cliente. Intente de nuevo.",
+          });
+          return true;
+        }
+      }
+
       const data = await createPosSale({
         companyId: body.company_id,
-        customerId: body.customer_id,
+        customerId: customerIdForSale,
         mlOrderId: body.ml_order_id,
         saleDate: body.sale_date,
-        notes: body.notes,
+        notes: notesOut,
         status: body.status,
         igtfUsd: body.igtf_usd,
         lines: body.lines,

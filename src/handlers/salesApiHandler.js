@@ -7,6 +7,8 @@ const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const salesService = require("../services/salesService");
 const orderService = require("../services/orderService");
+const { pool } = require("../../db");
+const { resolveCustomer } = require("../services/resolveCustomer");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info", name: "salesApi" });
 
@@ -82,6 +84,11 @@ const createBodySchema = z.object({
   payment_amount: z.number().positive().optional(),
   exchange_rate: z.number().positive().optional(),
   proof_url: z.string().url().optional().or(z.literal("")),
+  /** Mostrador sin customer_id: doc, teléfono o consumidor_final */
+  id_type: z.enum(["V", "E", "J", "G", "P"]).optional(),
+  id_number: z.string().max(32).optional(),
+  phone: z.string().max(80).optional(),
+  consumidor_final: z.boolean().optional(),
 });
 
 const quoteCreateSchema = z.object({
@@ -154,6 +161,16 @@ function parseSalesPath(pathname) {
   return trimmed;
 }
 
+/** `sales_orders` no tiene `company_id` en todas las migraciones; se usa el de `customers` o env. */
+function resolveSalesCompanyIdFromUrl(url) {
+  const raw = url.searchParams.get("company_id");
+  if (raw != null && String(raw).trim() !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return Number(process.env.SALES_CURRENCY_COMPANY_ID || "1") || 1;
+}
+
 async function handleSalesApiRequest(req, res, url) {
   const pathname = url.pathname || "";
   if (!pathname.startsWith("/api/sales")) {
@@ -189,6 +206,7 @@ async function handleSalesApiRequest(req, res, url) {
       const from = url.searchParams.get("from") || undefined;
       const to = url.searchParams.get("to") || undefined;
       const includeCompleted = url.searchParams.get("include_completed") === "1";
+      const lifecycleStage = url.searchParams.get("lifecycle_stage") || undefined;
       const out = await salesService.listSalesOrders({
         limit: limit != null ? Number(limit) : undefined,
         offset: offset != null ? Number(offset) : undefined,
@@ -197,9 +215,11 @@ async function handleSalesApiRequest(req, res, url) {
         from,
         to,
         excludeCompleted: !includeCompleted,
+        lifecycleStage,
       });
       writeJson(res, 200, {
         data: out.rows,
+        lifecycle_summary: out.lifecycle_summary,
         meta: {
           total: out.total,
           limit: out.limit,
@@ -294,6 +314,10 @@ async function handleSalesApiRequest(req, res, url) {
         paymentAmount: d.payment_amount,
         exchangeRate: d.exchange_rate,
         proofUrl: d.proof_url,
+        id_type: d.id_type,
+        id_number: d.id_number,
+        phone: d.phone,
+        consumidor_final: d.consumidor_final,
       });
       const code = created.idempotent ? 200 : 201;
       writeJson(res, code, {
@@ -392,6 +416,146 @@ async function handleSalesApiRequest(req, res, url) {
       return true;
     }
 
+    const mResolvedCustomer = segment && segment.match(/^(\d+)\/resolved-customer\/?$/i);
+    if (req.method === "GET" && mResolvedCustomer) {
+      if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+      const saleId = Number(mResolvedCustomer[1]);
+      const companyId = resolveSalesCompanyIdFromUrl(url);
+      const { rows } = await pool.query(
+        `SELECT so.id,
+                so.customer_id,
+                so.source AS sale_source,
+                c.id AS cid,
+                c.full_name,
+                c.phone,
+                c.id_type,
+                c.id_number
+         FROM sales_orders so
+         LEFT JOIN customers c ON c.id = so.customer_id AND c.company_id = $2
+         WHERE so.id = $1`,
+        [saleId, companyId]
+      );
+      if (!rows.length) {
+        writeJson(res, 404, { code: "SALE_NOT_FOUND" });
+        return true;
+      }
+      const r = rows[0];
+      if (r.customer_id != null && r.cid == null) {
+        writeJson(res, 404, { code: "SALE_NOT_FOUND" });
+        return true;
+      }
+      if (r.customer_id == null || r.cid == null) {
+        writeJson(res, 200, { resolved: false, customer: null });
+        return true;
+      }
+      writeJson(res, 200, {
+        resolved: true,
+        customer: {
+          id: r.cid,
+          full_name: r.full_name,
+          phone: r.phone,
+          id_type: r.id_type,
+          id_number: r.id_number,
+        },
+      });
+      return true;
+    }
+
+    const mResolveCustomer = segment && segment.match(/^(\d+)\/resolve-customer\/?$/i);
+    if (req.method === "POST" && mResolveCustomer) {
+      if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+      const saleId = Number(mResolveCustomer[1]);
+      const companyId = resolveSalesCompanyIdFromUrl(url);
+      const { rows: orows } = await pool.query(
+        `SELECT so.id,
+                so.customer_id,
+                so.source,
+                so.ml_user_id,
+                so.external_order_id,
+                cu.id AS cu_id,
+                mo.buyer_id AS ml_buyer_id,
+                mb.phone_1 AS buyer_phone,
+                mb.nickname,
+                mb.nombre_apellido
+         FROM sales_orders so
+         LEFT JOIN customers cu ON cu.id = so.customer_id AND cu.company_id = $2
+         LEFT JOIN ml_orders mo ON so.source = 'mercadolibre'
+           AND so.ml_user_id IS NOT NULL
+           AND so.external_order_id ~ '^[0-9]+-[0-9]+$'
+           AND mo.ml_user_id = so.ml_user_id
+           AND mo.order_id = split_part(so.external_order_id, '-', 2)::bigint
+         LEFT JOIN ml_buyers mb ON mb.buyer_id = mo.buyer_id
+         WHERE so.id = $1`,
+        [saleId, companyId]
+      );
+      if (!orows.length) {
+        writeJson(res, 404, { code: "SALE_NOT_FOUND" });
+        return true;
+      }
+      const o = orows[0];
+      if (o.customer_id != null && o.cu_id == null) {
+        writeJson(res, 404, { code: "SALE_NOT_FOUND" });
+        return true;
+      }
+      if (o.customer_id != null) {
+        writeJson(res, 200, {
+          resolved: true,
+          already_had_customer: true,
+          customer_id: Number(o.customer_id),
+        });
+        return true;
+      }
+      const buyerId = o.ml_buyer_id != null ? Number(o.ml_buyer_id) : NaN;
+      if (!Number.isFinite(buyerId) || buyerId <= 0) {
+        writeJson(res, 422, {
+          code: "NO_BUYER_DATA",
+          message: "Esta orden no tiene datos de comprador para resolver",
+        });
+        return true;
+      }
+      const nameFromMl =
+        (o.nombre_apellido && String(o.nombre_apellido).trim()) ||
+        (o.nickname && String(o.nickname).trim()) ||
+        null;
+      try {
+        const resolved = await resolveCustomer(
+          {
+            source: "mercadolibre",
+            external_id: String(buyerId),
+            data: {
+              ml_buyer_id: buyerId,
+              phone: o.buyer_phone || undefined,
+              name: nameFromMl || undefined,
+              company_id: companyId,
+            },
+          },
+          { companyId }
+        );
+        const cid = Number(resolved.customerId);
+        await pool.query(`UPDATE sales_orders SET customer_id = $1, updated_at = NOW() WHERE id = $2`, [
+          cid,
+          saleId,
+        ]);
+        writeJson(res, 200, {
+          resolved: true,
+          already_had_customer: false,
+          customer_id: cid,
+          match_level: resolved.matchLevel,
+        });
+      } catch (err) {
+        console.error("[sales/resolve] failed", {
+          sale_id: saleId,
+          buyer_id: buyerId,
+          error: err && err.message,
+        });
+        writeJson(res, 500, {
+          code: "IDENTITY_RESOLUTION_FAILED",
+          message: "No se pudo resolver el cliente. Verifique datos del comprador.",
+        });
+      }
+      return true;
+    }
+
     if (req.method === "GET" && segment && /^(\d+|pos-\d+|so-\d+)$/i.test(segment)) {
       if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       const row = await salesService.getSalesOrderById(segment);
@@ -478,6 +642,17 @@ async function handleSalesApiRequest(req, res, url) {
     }
     if (e && e.code === "INSUFFICIENT_POINTS") {
       writeJson(res, 409, { error: "insufficient_points", message: String(e.message) });
+      return true;
+    }
+    if (e && e.code === "MISSING_IDENTITY_MOSTRADOR") {
+      writeJson(res, 422, buildMissingMostradorIdentity422Body());
+      return true;
+    }
+    if (e && e.code === "INVALID_ID_FORMAT") {
+      writeJson(res, 422, {
+        code: e.code,
+        reason: e.reason != null ? String(e.reason) : "",
+      });
       return true;
     }
     if (e && e.code === "BAD_REQUEST") {

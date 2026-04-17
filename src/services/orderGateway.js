@@ -245,6 +245,10 @@ class OrderGateway {
       paymentMethod: paymentMethod ?? null,
       externalOrderId: externalOrderId ?? null,
       companyId: companyId ?? null,
+      id_type: payload.id_type ?? undefined,
+      id_number: payload.id_number ?? undefined,
+      phone: payload.phone ?? undefined,
+      consumidor_final: payload.consumidor_final,
     });
 
     // Post-creación: vincular conversation_id y fulfillment_type

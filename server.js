@@ -2748,6 +2748,7 @@ const server = http.createServer(async (req, res) => {
     const from = url.searchParams.get("from") || undefined;
     const to = url.searchParams.get("to") || undefined;
     const includeCompleted = url.searchParams.get("include_completed") === "1";
+    const lifecycleStage = url.searchParams.get("lifecycle_stage") || undefined;
     let out;
     try {
       out = await salesService.listSalesOrders({
@@ -2758,6 +2759,7 @@ const server = http.createServer(async (req, res) => {
         from,
         to,
         excludeCompleted: !includeCompleted,
+        lifecycleStage,
       });
     } catch (e) {
       res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
@@ -2769,6 +2771,7 @@ const server = http.createServer(async (req, res) => {
       res.end(
         JSON.stringify({
           data: out.rows,
+          lifecycle_summary: out.lifecycle_summary,
           meta: {
             total: out.total,
             limit: out.limit,
@@ -2780,7 +2783,7 @@ const server = http.createServer(async (req, res) => {
       );
       return;
     }
-    const baseQs = `k=${encodeURIComponent(k)}${includeCompleted ? "&include_completed=1" : ""}${limit != null && String(limit).trim() !== "" ? `&limit=${encodeURIComponent(String(limit))}` : ""}${offset != null && String(offset).trim() !== "" ? `&offset=${encodeURIComponent(String(offset))}` : ""}${source ? `&source=${encodeURIComponent(source)}` : ""}${status ? `&status=${encodeURIComponent(status)}` : ""}${from ? `&from=${encodeURIComponent(from)}` : ""}${to ? `&to=${encodeURIComponent(to)}` : ""}`;
+    const baseQs = `k=${encodeURIComponent(k)}${includeCompleted ? "&include_completed=1" : ""}${limit != null && String(limit).trim() !== "" ? `&limit=${encodeURIComponent(String(limit))}` : ""}${offset != null && String(offset).trim() !== "" ? `&offset=${encodeURIComponent(String(offset))}` : ""}${source ? `&source=${encodeURIComponent(source)}` : ""}${status ? `&status=${encodeURIComponent(status)}` : ""}${from ? `&from=${encodeURIComponent(from)}` : ""}${to ? `&to=${encodeURIComponent(to)}` : ""}${lifecycleStage ? `&lifecycle_stage=${encodeURIComponent(lifecycleStage)}` : ""}`;
     const rowsHtml = out.rows
       .map(
         (r) => `<tr>

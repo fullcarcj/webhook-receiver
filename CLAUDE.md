@@ -13,8 +13,24 @@ Receptor HTTP de webhooks de Mercado Libre (órdenes, mensajes, preguntas, ítem
 
 ## Inventario HTTP (endpoints)
 
-- **Raíz del repo (versionado):** `endpoints-cubiertos-hasta-hoy.md` — resumen por prefijo (`/api/*`), páginas HTML admin, Banesco, **AI Responder Tipo M** (`/ai-responder`, `/api/ai-responder/*`), scripts npm operativos.
+- **Raíz del repo (versionado):** `endpoints-cubiertos-hasta-hoy.md` — resumen por prefijo (`/api/*`: stats, finance, ML, **automations**, inbox, etc.), páginas HTML admin, Banesco, **AI Responder Tipo M** (`/ai-responder`, `/api/ai-responder/*`), scripts npm operativos.
 - **Copia local para carpeta Banesco (no en git):** `data/BANESCO/endpoints-cubiertos-hasta-hoy.md` — la carpeta `data/` está en `.gitignore`; regenerar copiando desde la raíz cuando se actualice el inventario.
+
+### API `/api/automations` (mensajes automáticos, JWT)
+
+- **Handler:** `src/handlers/automationsApiHandler.js` — montado en `server.js` **antes** de `/api/admin/providers`.
+- **Auth:** `requireAdminOrPermission(req, res, 'settings')` (JWT/Cookie o `X-Admin-Secret` / `?k=` como el resto del panel).
+- **Rutas típicas:** `GET /stats`, `GET /logs/ml|whatsapp|questions-ia`, `GET|PATCH /config/post-sale`, `GET /config/tipo-e|tipo-f|questions-ia|wasender` — datos alineados al esquema real de tablas (`ml_message_kind_send_log`, `ml_whatsapp_wasender_log`, `ml_questions_ia_auto_log`, `post_sale_messages`, etc.). Los logs detallados HTML siguen bajo rutas `?k=ADMIN_SECRET` (`/envios-*`, `/preguntas-ia-auto-log`, etc.).
+- **BD:** `db-postgres.js` exporta **`ensureSchema`**; migración **`migratePostSaleMessagesUiColumns`** añade `is_active` y `message_order` en `post_sale_messages` si faltan.
+
+### Menú dinámico (`GET /api/menu`)
+
+- **`src/handlers/menuApiHandler.js`** + **`src/config/menuDefinition.js`**: menú filtrado por rol (`hasMinRole`) + `allowedRoles` horizontal + canal (`CANAL_BY_ROLE`). Los ítems pueden exponer **`icon`** y **`apiPath`** en JSON (p. ej. entradas **Automatizaciones** ML y **Mensajes automáticos WA** en config).
+- **Prueba:** `npm run test:menu-api-v2` (requiere servidor + `DATABASE_URL`, `JWT_SECRET`, usuarios de prueba).
+
+### Cola de llamadas ML (`mlQueue`)
+
+- **`src/utils/mlQueue.js`** — **`mlQueuedCall(fn)`**: limita concurrencia y espaciado entre llamadas a la API ML (`p-limit` o fallback). Usado por **`src/handlers/mlApiHandler.js`** y **`src/services/mlPublicationsService.js`** para no saturar rate limits.
 
 ## Archivos de entrada y scripts útiles
 
@@ -42,6 +58,7 @@ Definida en `ml-message-types.js` (tags lógicos, no campos de ML):
 - **D:** Respuestas automáticas a preguntas (`POST /answers`) — `ml-questions-ia-auto.js`.
 - **E/F:** WhatsApp Wasender — `ml-whatsapp-tipo-ef.js`; **F** ligado a `ml_question_id`, **E** a orden o seguimiento.
 - **G:** FileMaker → buyer + intento tipo E — `ml-filemaker-tipo-g.js`.
+- **H:** Bienvenida CRM WhatsApp (onboarding) — `src/services/crmWaWelcome.js`; en `ml_whatsapp_wasender_log` puede registrarse como **F** con `tipo_e_activation_source` = `tipo_h_crm_wa_welcome` (CHECK BD solo E/F).
 - **M:** Respuesta automática piloto CRM WhatsApp (plantilla + `context_line` GROQ) — `src/services/aiResponder.js`, worker `src/workers/aiResponderWorker.js`, convención `MESSAGE_TYPE_M` en `ml-message-types.js`. Ver flujo detallado más abajo.
 
 Convención de redacción vigente:
@@ -184,7 +201,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 
 - **Código:** login/export CSV Playwright en `src/services/banescoService.js`; monitor en `src/jobs/banescoMonitor.js` (`setInterval` → `runCycle`). Fuera de la ventana horaria (`BANESCO_MONITOR_WINDOW_*`) `runCycle` omite login/descarga sin tocar la sesión en `bank_accounts`.
 - **Tabla:** `bank_statements` (+ `bank_accounts`); inserción desde el parser CSV en `banescoService`; conciliación `run_reconciliation` cuando hay inserts.
-- **Rutas HTTP** (auth: cabecera `X-Admin-Secret` **o** query `?k=` / `?secret=` igual a `ADMIN_SECRET` en JSON; HTML solo con `?k=` donde aplique):
+- **Rutas HTTP** (auth: cabecera `X-Admin-Secret` **o** query `?k=` / `?secret=` igual a `ADMIN_SECRET` en JSON; HTML solo con `?k=` donde aplique; **JSON `/api/bank/*` también** con **JWT Bearer/Cookie** + permiso **`fiscal:read`** vía `src/routes/bankAuth.js` → `requireBankRead`):
   - `GET /banesco-connection?k=…` — alias JSON de estado de conexión (mismo cuerpo que `/api/bank/banesco/connection`).
   - `GET /api/bank/banesco/connection`, `GET /api/bank/banesco/status`.
   - `GET /banesco?k=…` — página HTML estado; `?format=json` devuelve JSON.
@@ -206,6 +223,9 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | Tema | Archivos |
 |------|----------|
 | Rutas HTTP y webhooks | `server.js`; inventario resumido `endpoints-cubiertos-hasta-hoy.md` |
+| API ML (publicaciones, órdenes, sku-map, `api-log`, permisos CRM) | `src/handlers/mlApiHandler.js` (montaje en `server.js` bajo `/api/ml/`); cola: `src/utils/mlQueue.js` |
+| API automatizaciones (logs/config mensajes) | `src/handlers/automationsApiHandler.js` — `/api/automations/*` |
+| Menú ERP (`GET /api/menu`) | `src/handlers/menuApiHandler.js`, `src/config/menuDefinition.js` |
 | OAuth y llamadas ML API | `oauth-token.js` |
 | Preguntas pending/answered | `ml-question-sync.js`, `ml-question-refresh.js`, `db-postgres.js` |
 | IA automática preguntas | `ml-questions-ia-auto.js` |
@@ -218,7 +238,7 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 | WMS (ubicaciones / stock) | `src/services/wmsService.js`, `src/routes/wms.js`, `sql/wms-bins.sql`; conteo cíclico: `sql/cycle-count.sql`, `cycleCountService.js`, `/api/count/*`, `npm run db:cycle-count`; lotes: `sql/lot-management.sql`, `lotService.js`, `/api/lots`, `npm run db:lots-management` (+ parche `npm run db:lots-management-products-patch`) |
 | Reservas ML ↔ bin_stock | `src/services/reservationService.js`, `sql/ml-reservations.sql`, enganche en `server.js` (topic `orders_v2` + fetch) |
 | Orden de migración SQL | `sql/run-migrations.md` |
-| Banesco monitor / CSV / statements | `src/services/banescoService.js`, `src/jobs/banescoMonitor.js`, `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`, `src/services/bankStatementsService.js`, `sql/bank-reconciliation.sql` |
+| Banesco monitor / CSV / statements + API JWT `fiscal:read` | `src/services/banescoService.js`, `src/jobs/banescoMonitor.js`, `src/routes/bankBanesco.js`, `src/routes/bankStatements.js`, `src/routes/bankAuth.js`, `src/services/bankStatementsService.js`, `sql/bank-reconciliation.sql` |
 | Ventas globales + import ML | `src/services/salesService.js`, `src/handlers/salesApiHandler.js`, `scripts/importMlOrdersToSales.js`, `scripts/import-ml-sales-http.js`, `sql/20260408_sales_orders*.sql`, `20260409_sales_global.sql`, `sql/20260411_sales_orders_rate_snapshot.sql`; kits/bundles (`npm run db:kits-bundles`, `sql/20260417_kits_bundles_productos.sql`, `/api/bundles`, `/api/price-review`) |
 | POS ventas + compras | `src/services/posSalesService.js`, `src/routes/posSales.js`, `sql/exchange-rates.sql`; compras: `GET /api/pos/purchases`, `GET /api/pos/purchases/:id`, `POST /api/pos/purchases` (con `rate_snapshot`) |
 | Seguridad / rate limiting | `src/utils/rateLimiter.js` (`rateLimit`, `getClientIp`, `adminRequestLimiter`, `adminAuthFailLimiter`); `src/middleware/adminAuth.js` (`ensureAdmin` con rate limiting); `server.js` → `rejectAdminSecret` con rate limiting |
@@ -226,4 +246,4 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 
 ---
 
-*Última revisión: 2026-04-11 (v4) — **Ronda 3 backend review:** módulos fiscales completamente migrados en BD (`payment_methods`, `igtf_config`, `sale_payments`, `igtf_declarations`, `tax_retention_globals`, `settings_tax`, `fiscal_periods`, `tax_transactions`, `retentions`, `fiscal_sequences`, `fiscal_documents`); rutas fiscales (`/igtf-panel`, `/api/igtf/*`, `/api/tax/*`, `/api/fiscal/*`, `/api/fiscal/documents/*`) verificadas — todas usan `ensureAdmin`; downtime cubierto en writes de `fiscalDocuments.js`; `catalogPublicPage` público intencional; `db:fiscal-all` añadido a `package.json`. — **Ronda 2:** corregidas FKs `lot_bin_stock→products(sku)`, `ml_order_reservations→products(sku)`; `landed-cost.sql` idempotente en BD limpia (patch histórico condicional); `cycleCountService.js`/`reservationService.js`/`mlOrderService.js` corregidos (`p.description AS descripcion`); migradas `db:shipping-providers`, `db:landed-cost`, `db:lots-management`, `db:ml-reservations`, `db:cycle-count` (10 tablas nuevas). — **Ronda 1:** WMS migrado; `producto_sku→product_sku`; `db:wms`, `db:wms-audit`, `db:wms-all`; downtime en `/api/catalog` y `/api/users`. — **Users+Roles+Permissions:** JWT + Cookie + `X-Admin-Secret`; `/api/auth/*`, `/api/users/*`; `npm run db:users`.*
+*Última revisión: 2026-04-17 (v5) — **`/api/automations/*`** (JWT + `settings`), menú ERP (`/api/menu` con `icon`/`apiPath`), **`mlQueue`**, **`bankAuth`** (Banesco `fiscal:read`), inventario actualizado en `endpoints-cubiertos-hasta-hoy.md`. — Histórico v4 (2026-04-11): módulos fiscales en BD; rutas fiscales con `ensureAdmin`; WMS/reservas/lotes; Users+Roles+JWT (`/api/auth/*`, `/api/users/*`, `npm run db:users`).*

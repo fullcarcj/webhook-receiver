@@ -34,6 +34,7 @@ async function main() {
       createOrder({
         source: "mostrador",
         customerId,
+        consumidor_final: customerId == null ? true : undefined,
         items: [{ sku, quantity: 1, unit_price_usd: 1 }],
         status: "paid",
         paymentMethod: "cash",

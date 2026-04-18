@@ -309,7 +309,7 @@ async function getInboxCounts() {
       ml: Number(r.ml) || 0,
       // BE-1.8: contadores nuevos — compatibles con shape anterior (campos adicionales)
       handed_over: Number(h.handed_over) || 0,
-      // Backlog: reemplazar con exceptionsService.countOpen() cuando exista tabla exceptions
+      // Sprint 2 creará tabla exceptions; por ahora placeholder en 0
       exceptions: 0,
     };
   } catch (err) {

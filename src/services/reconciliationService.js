@@ -335,6 +335,17 @@ async function applyMatch(order, match) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function applyManualReview(order, match) {
+  // L3: marcar la orden como pendiente de aprobación humana.
+  // Usamos approval_status (workflow de revisión) en lugar de payment_status (estado del dinero).
+  // Decisión 2026-04-20: ver ADR-006 amendment nota 2. payment_status permanece 'pending'.
+  await pool.query(
+    `UPDATE sales_orders
+     SET approval_status = 'pending',
+         updated_at = NOW()
+     WHERE id = $1`,
+    [order.id]
+  );
+
   if (match.sourceType === "bank") {
     await pool.query(
       `UPDATE bank_statements SET reconciliation_status = 'MANUAL_REVIEW' WHERE id = $1`,

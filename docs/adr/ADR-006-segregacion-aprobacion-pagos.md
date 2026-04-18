@@ -248,6 +248,20 @@ ADR-002 decide **cómo** ingieren los bancos. Este ADR decide **quién aprueba**
 - Es **reversible**: si en operación real la carga de caja es insostenible, se puede relajar bajando a "solo montos > X USD requieren aprobación". Pero esa decisión solo con datos de producción.
 - La regla 4 (no avisar al cliente intermedio) **protege la confianza** pero asume que caja responde rápido. Si caja tarda horas sistemáticamente, el cliente igual nota el retraso. Es un tema operativo, no técnico.
 
+## Nota de implementación · 2026-04-20
+
+**Decisión de campo — Tarea 3d del Paso 1 (BE-5.0 moneda canónica):**
+
+Durante la implementación se detectó que `payment_status_enum` no incluye `'pending_approval'`. En lugar de extender el enum, se decidió usar `approval_status = 'pending'` para marcar órdenes L3 (revisión manual):
+
+```sql
+UPDATE sales_orders SET approval_status = 'pending', updated_at = NOW() WHERE id = $1
+```
+
+**Razón:** mejor separación de conceptos. `payment_status` refleja el estado del dinero (¿se recibió el pago?); `approval_status` refleja el estado del workflow de revisión humana (¿fue revisado por caja?). La orden L3 queda con `payment_status = 'pending'` (dinero sin confirmar) + `approval_status = 'pending'` (esperando revisión de caja). Esto es semánticamente más preciso que mezclar ambos conceptos en `payment_status`.
+
+La `approval_status_enum` ya existía desde Sprint 1 con valores: `not_required | pending | approved | rejected`.
+
 ## Estado de revisión
 
 - **Trigger de revisión:** cambio regulatorio (obligatoriedad de doble firma para todos los montos), o evidencia de falsos positivos/negativos masivos en auto-aprobación.

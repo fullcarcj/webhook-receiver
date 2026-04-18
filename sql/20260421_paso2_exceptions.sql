@@ -20,14 +20,17 @@ CREATE TABLE IF NOT EXISTS exceptions (
   updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE exceptions DROP CONSTRAINT IF EXISTS exceptions_entity_type_check;
 ALTER TABLE exceptions
   ADD CONSTRAINT exceptions_entity_type_check
   CHECK (entity_type IN ('chat', 'order', 'payment', 'quote', 'product_match'));
 
+ALTER TABLE exceptions DROP CONSTRAINT IF EXISTS exceptions_severity_check;
 ALTER TABLE exceptions
   ADD CONSTRAINT exceptions_severity_check
   CHECK (severity IN ('low', 'medium', 'high', 'critical'));
 
+ALTER TABLE exceptions DROP CONSTRAINT IF EXISTS exceptions_status_check;
 ALTER TABLE exceptions
   ADD CONSTRAINT exceptions_status_check
   CHECK (status IN ('open', 'in_progress', 'resolved', 'ignored'));

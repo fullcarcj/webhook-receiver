@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS bot_actions (
 );
 
 ALTER TABLE bot_actions
+  DROP CONSTRAINT IF EXISTS bot_actions_action_type_check;
+ALTER TABLE bot_actions
   ADD CONSTRAINT bot_actions_action_type_check
   CHECK (action_type IN (
     'message_replied',

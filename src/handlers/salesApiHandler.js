@@ -8,8 +8,9 @@ const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const salesService = require("../services/salesService");
 const orderService = require("../services/orderService");
 const { pool } = require("../../db");
-const botActionsService = require("../services/botActionsService");
-const exceptionsService = require("../services/exceptionsService");
+const botActionsService  = require("../services/botActionsService");
+const exceptionsService  = require("../services/exceptionsService");
+const botHandoffsService = require("../services/botHandoffsService");
 const { resolveCustomer } = require("../services/resolveCustomer");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info", name: "salesApi" });
@@ -814,6 +815,25 @@ async function handleSalesApiRequest(req, res, url) {
     }
     logger.error({ err: e }, "sales_api_error");
     writeJson(res, 500, { error: "error", message: String(e.message) });
+    return true;
+  }
+
+  // ─── GET /api/sales/chats/:chatId/handoff-status ────────────────────────────
+  const handoffStatusMatch = pathname.match(/^\/api\/sales\/chats\/(\d+)\/handoff-status$/);
+  if (handoffStatusMatch && req.method === "GET") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const chatId = Number(handoffStatusMatch[1]);
+    const { active, handoff } = await botHandoffsService.isHandedOver(chatId);
+    writeJson(res, 200, {
+      chat_id:        chatId,
+      is_handed_over: active,
+      handoff: active ? {
+        id:          handoff.id,
+        to_user_id:  handoff.to_user_id,
+        started_at:  handoff.started_at,
+        reason:      handoff.reason || null,
+      } : null,
+    });
     return true;
   }
 

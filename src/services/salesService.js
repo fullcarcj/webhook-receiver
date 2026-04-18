@@ -2061,10 +2061,13 @@ async function lookupMlConversation({ buyerId, customerId }) {
 
     // Estrategia 2 · phone de ml_buyers normalizado a E.164 Venezuela
     if (buyerId) {
-      const rBuyer = await pool.query(
-        `SELECT phone_1 FROM ml_buyers WHERE buyer_id = $1 AND phone_1 IS NOT NULL LIMIT 1`,
-        [String(buyerId)]
-      );
+      const buyerIdNum = Number(buyerId);
+      const rBuyer = Number.isFinite(buyerIdNum)
+        ? await pool.query(
+            `SELECT phone_1 FROM ml_buyers WHERE buyer_id = $1 AND phone_1 IS NOT NULL LIMIT 1`,
+            [buyerIdNum]
+          )
+        : { rowCount: 0, rows: [] };
       if (rBuyer.rowCount > 0) {
         const raw = String(rBuyer.rows[0].phone_1 || "").replace(/\D/g, "");
         // Normalizar 04XXXXXXXXX → +584XXXXXXXXX

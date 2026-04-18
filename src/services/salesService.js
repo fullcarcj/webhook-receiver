@@ -1565,37 +1565,17 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     const ratingDays = Math.max(1, parseInt(process.env.ML_RATING_DEADLINE_DAYS || "30", 10) || 30);
     const notes = `Import ml_orders ml_user_id=${mUid} order_id=${oid}`;
 
-    // Snapshot de tasa: busca la tasa activa más cercana a la fecha de la orden ML.
-    // Si date_created no está disponible, usa la de hoy.
-    let rateRow = null;
     const mlOrderDate = ml.date_created
       ? new Date(ml.date_created).toISOString().slice(0, 10)
       : new Date().toISOString().slice(0, 10);
-    const compId = Number(process.env.SALES_CURRENCY_COMPANY_ID || "1") || 1;
-    try {
-      const { rows: rateRows } = await client.query(
-        `SELECT active_rate, active_rate_type, rate_date
-         FROM daily_exchange_rates
-         WHERE company_id = $1 AND rate_date <= $2::date
-         ORDER BY rate_date DESC LIMIT 1`,
-        [compId, mlOrderDate]
-      );
-      if (rateRows.length && rateRows[0].active_rate != null) {
-        rateRow = rateRows[0];
-      }
-    } catch (_e) {
-      rateRow = null;
-    }
-    const rateApplied = rateRow ? Number(rateRow.active_rate) : null;
-    const rateType    = rateRow ? String(rateRow.active_rate_type || "BCV").toUpperCase() : null;
-    const rateDate    = rateRow
-      ? (rateRow.rate_date instanceof Date
-          ? rateRow.rate_date.toISOString().slice(0, 10)
-          : String(rateRow.rate_date).slice(0, 10))
-      : null;
-    const totalBs = rateApplied && Number.isFinite(rateApplied) && rateApplied > 0
-      ? Number((totalUsd * rateApplied).toFixed(2))
-      : null;
+
+    // CH-3 ML Venezuela: total_amount ya está en VES nativo (pese al nombre "totalUsd").
+    // total_amount_bs = valor directo, rate = 1, sin multiplicar por BCV.
+    // ADR-008 regla 3. Para futuros canales ML en USD, agregar lógica de BCV aquí.
+    const rateApplied = 1;
+    const rateType    = "NATIVE_VES";
+    const rateDate    = mlOrderDate;
+    const totalBs     = Number(totalUsd.toFixed(2));
 
     let loyaltyPoints = 0;
     const earnLoyalty = process.env.SALES_ML_IMPORT_LOYALTY === "1";

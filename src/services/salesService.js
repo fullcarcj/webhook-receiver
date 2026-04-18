@@ -1598,6 +1598,10 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
     }
 
     const channelId = SOURCE_TO_CHANNEL["mercadolibre"] || 3;
+
+    // Lookup best-effort de chat CRM vinculado al comprador ML
+    const mlConvId = await lookupMlConversation({ buyerId: ml.buyer_id, customerId });
+
     const hasLifecycle = await salesOrdersHasLifecycleColumns(client);
     let ins;
     const mlCreatedAt = ml.date_created || null;
@@ -1606,11 +1610,11 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
         `INSERT INTO sales_orders (source, external_order_id, customer_id, channel_id, status, order_total_amount,
           total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
           notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned,
-          lifecycle_status, ml_status, rating_deadline_at, created_at)
+          lifecycle_status, ml_status, rating_deadline_at, conversation_id, created_at)
          VALUES ('mercadolibre', $1, $2, $3, $4, $5,
           $6, $7, $8, $9::date,
           $10, NULL, FALSE, FALSE, $11, $12,
-          $13, $14, NOW() + ($15::text || ' days')::interval, COALESCE($16::timestamptz, NOW()))
+          $13, $14, NOW() + ($15::text || ' days')::interval, $16, COALESCE($17::timestamptz, NOW()))
          RETURNING id`,
         [
           extId,
@@ -1628,6 +1632,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
           lifecycle,
           mlStatusRaw,
           String(ratingDays),
+          mlConvId,
           mlCreatedAt,
         ]
       );
@@ -1635,10 +1640,12 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
       ins = await client.query(
         `INSERT INTO sales_orders (source, external_order_id, customer_id, channel_id, status, order_total_amount,
           total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
-          notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned, created_at)
+          notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned,
+          conversation_id, created_at)
          VALUES ('mercadolibre', $1, $2, $3, $4, $5,
           $6, $7, $8, $9::date,
-          $10, NULL, FALSE, FALSE, $11, $12, COALESCE($13::timestamptz, NOW()))
+          $10, NULL, FALSE, FALSE, $11, $12,
+          $13, COALESCE($14::timestamptz, NOW()))
          RETURNING id`,
         [
           extId,
@@ -1653,6 +1660,7 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
           notes,
           mUid,
           loyaltyPoints,
+          mlConvId,
           mlCreatedAt,
         ]
       );
@@ -2022,6 +2030,69 @@ async function importSalesOrdersFromMlTable({
     }
   }
   return summary;
+}
+
+/**
+ * Intenta vincular una orden ML a un crm_chat existente.
+ *
+ * Estrategia (en orden de preferencia):
+ * 1. customer_id directo en crm_chats (más confiable)
+ * 2. Fallback por phone: ml_buyers.phone_1 normalizado a E.164 Venezuela (+58XXXXXXXXX)
+ *    vs crm_chats.phone  (solo si Estrategia 1 falla)
+ *
+ * Retorna null si no encuentra match · nunca lanza excepción.
+ *
+ * @param {{ buyerId: string|number|null, customerId: number|null }} param
+ * @returns {Promise<number|null>}
+ */
+async function lookupMlConversation({ buyerId, customerId }) {
+  try {
+    // Estrategia 1 · customer_id directo (más preciso)
+    if (customerId) {
+      const r1 = await pool.query(
+        `SELECT id FROM crm_chats
+         WHERE customer_id = $1
+         ORDER BY updated_at DESC NULLS LAST, id DESC
+         LIMIT 1`,
+        [customerId]
+      );
+      if (r1.rowCount > 0) return r1.rows[0].id;
+    }
+
+    // Estrategia 2 · phone de ml_buyers normalizado a E.164 Venezuela
+    if (buyerId) {
+      const rBuyer = await pool.query(
+        `SELECT phone_1 FROM ml_buyers WHERE buyer_id = $1 AND phone_1 IS NOT NULL LIMIT 1`,
+        [String(buyerId)]
+      );
+      if (rBuyer.rowCount > 0) {
+        const raw = String(rBuyer.rows[0].phone_1 || "").replace(/\D/g, "");
+        // Normalizar 04XXXXXXXXX → +584XXXXXXXXX
+        const e164 =
+          raw.length === 11 && raw.startsWith("0")
+            ? `+58${raw.slice(1)}`
+            : raw.length === 10
+            ? `+58${raw}`
+            : raw.startsWith("58") && raw.length === 12
+            ? `+${raw}`
+            : null;
+        if (e164) {
+          const r2 = await pool.query(
+            `SELECT id FROM crm_chats
+             WHERE phone = $1
+             ORDER BY updated_at DESC NULLS LAST, id DESC
+             LIMIT 1`,
+            [e164]
+          );
+          if (r2.rowCount > 0) return r2.rows[0].id;
+        }
+      }
+    }
+  } catch (err) {
+    // Lookup no debe bloquear la creación de la orden
+    console.warn("[lookupMlConversation] error:", err.message);
+  }
+  return null;
 }
 
 module.exports = {

@@ -563,6 +563,157 @@ async function handleSalesApiRequest(req, res, url) {
       return true;
     }
 
+    // ─── BE-1.6 · POST /api/sales/chats/:chatId/take-over ─────────────────────
+    // Vendedor toma una conversación que estaba en manos del bot.
+    // Requiere tabla bot_handoffs (npm run db:bot-handoffs).
+    const takeOverMatch = pathname.match(/^\/api\/sales\/chats\/(\d+)\/take-over$/);
+    if (takeOverMatch && req.method === "POST") {
+      if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+      const chatId = Number(takeOverMatch[1]);
+      let body = {};
+      try { body = await parseJsonBody(req); } catch (_) {
+        writeJson(res, 400, { error: "invalid_json" }); return true;
+      }
+      const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 500) || null : null;
+      const user = req._authUser || null;
+      const userId = user?.id ?? null;
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        const chatRow = await client.query("SELECT id FROM crm_chats WHERE id = $1", [chatId]);
+        if (!chatRow.rowCount) {
+          await client.query("ROLLBACK");
+          writeJson(res, 404, { error: "chat_not_found" }); return true;
+        }
+
+        const active = await client.query(
+          "SELECT id, to_user_id FROM bot_handoffs WHERE chat_id = $1 AND ended_at IS NULL",
+          [chatId]
+        );
+        if (active.rowCount > 0) {
+          await client.query("ROLLBACK");
+          writeJson(res, 409, {
+            error: "handoff_already_active",
+            message: `Chat ya tomado por usuario ${active.rows[0].to_user_id}`,
+            existing_handoff_id: active.rows[0].id,
+          }); return true;
+        }
+
+        const insert = await client.query(
+          `INSERT INTO bot_handoffs (chat_id, from_bot, to_user_id, reason)
+           VALUES ($1, TRUE, $2, $3)
+           RETURNING id, started_at`,
+          [chatId, userId, reason]
+        );
+
+        // Nombre del agente para mensaje system en crm_messages
+        let agentName = `Agente ${userId ?? "?"}`;
+        if (userId) {
+          const uRow = await client.query("SELECT full_name FROM users WHERE id = $1", [userId]);
+          if (uRow.rowCount) agentName = uRow.rows[0].full_name || agentName;
+        }
+
+        await client.query(
+          `INSERT INTO crm_messages (chat_id, type, content, created_at)
+           VALUES ($1, 'system', $2, NOW())`,
+          [chatId, `${agentName} se unió a la conversación`]
+        );
+
+        await client.query("COMMIT");
+        writeJson(res, 200, {
+          data: {
+            handoff_id: insert.rows[0].id,
+            chat_id: chatId,
+            taken_by: { id: userId, name: agentName },
+            started_at: insert.rows[0].started_at,
+          },
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        // Tabla bot_handoffs aún no migrada
+        if (err.code === "42P01") {
+          writeJson(res, 503, {
+            error: "schema_missing",
+            detail: "Ejecutar: npm run db:bot-handoffs",
+          }); return true;
+        }
+        throw err;
+      } finally {
+        client.release();
+      }
+      return true;
+    }
+
+    // ─── BE-1.7 · POST /api/sales/chats/:chatId/return-to-bot ─────────────────
+    // Cierra el handoff activo y devuelve la conversación al bot.
+    // Política: cualquier usuario con permiso 'ventas' puede devolver (no solo quien tomó).
+    const returnToBotMatch = pathname.match(/^\/api\/sales\/chats\/(\d+)\/return-to-bot$/);
+    if (returnToBotMatch && req.method === "POST") {
+      if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+      const chatId = Number(returnToBotMatch[1]);
+      const user = req._authUser || null;
+      const userId = user?.id ?? null;
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        const active = await client.query(
+          "SELECT id FROM bot_handoffs WHERE chat_id = $1 AND ended_at IS NULL",
+          [chatId]
+        );
+        if (!active.rowCount) {
+          await client.query("ROLLBACK");
+          writeJson(res, 404, {
+            error: "handoff_not_found",
+            message: "No hay handoff activo para este chat",
+          }); return true;
+        }
+
+        const handoffId = active.rows[0].id;
+        await client.query(
+          "UPDATE bot_handoffs SET ended_at = NOW() WHERE id = $1",
+          [handoffId]
+        );
+
+        let agentName = `Agente ${userId ?? "?"}`;
+        if (userId) {
+          const uRow = await client.query("SELECT full_name FROM users WHERE id = $1", [userId]);
+          if (uRow.rowCount) agentName = uRow.rows[0].full_name || agentName;
+        }
+
+        await client.query(
+          `INSERT INTO crm_messages (chat_id, type, content, created_at)
+           VALUES ($1, 'system', $2, NOW())`,
+          [chatId, `${agentName} devolvió la conversación al asistente automático`]
+        );
+
+        await client.query("COMMIT");
+        writeJson(res, 200, {
+          data: {
+            handoff_id: handoffId,
+            chat_id: chatId,
+            returned_by: { id: userId, name: agentName },
+            ended_at: new Date().toISOString(),
+          },
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        if (err.code === "42P01") {
+          writeJson(res, 503, {
+            error: "schema_missing",
+            detail: "Ejecutar: npm run db:bot-handoffs",
+          }); return true;
+        }
+        throw err;
+      } finally {
+        client.release();
+      }
+      return true;
+    }
+
     if (req.method === "PATCH" && segment && /^\d+$/.test(segment)) {
       if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
       let body = {};

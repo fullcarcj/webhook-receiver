@@ -321,6 +321,11 @@ Cada 30s. Pausado cuando pestaña no visible (Page Visibility API).
 ## SPRINT 4 · Cotización automática
 **Semanas 7-8 · Objetivo:** el bot lee mensajes entrantes de WA/ML y genera cotizaciones sin intervención humana cuando la confianza es alta.
 
+### Deuda técnica heredada de Sprint 1
+
+**BE-4.0-pre · Rename `producto_id` → `product_id` en `inventario_detallepresupuesto`** (0.5 día)
+Diferido desde BE-1.4 (commit `10255cb`). La FK ya apunta a `products`; solo falta renombrar la columna y actualizar `inboxQuotationHandler.js` (6 ocurrencias: INSERT, SELECT, JOIN, validación). Hacer en el mismo PR que BE-4.2 (motor de cotización) para no abrir el handler dos veces.
+
 ### Tickets backend
 
 **BE-4.1 · Servicio NLU con GROQ** (3 días)

@@ -13,6 +13,7 @@ const { pool } = require("../../db");
 const { callChatBasic } = require("./aiGateway");
 const { emit } = require("./sseService");
 const { MESSAGE_TYPE_M } = require("../../ml-message-types");
+const handoffGuard = require("../middleware/handoffGuard");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder" });
 
@@ -386,6 +387,20 @@ async function processOneMessage(message) {
     transcription,
     receipt_data: receiptDataRaw,
   } = message;
+
+  // Guard: si un vendedor tomó el control del chat, no responder automáticamente.
+  // bot_actions registra 'handoff_triggered' con contexto completo (fire-and-forget).
+  const skipByHandoff = await handoffGuard.shouldSkipBotReply({
+    chatId,
+    correlationId: String(messageId),
+  });
+  if (skipByHandoff) {
+    await pool.query(
+      `UPDATE crm_messages SET ai_reply_status = 'skipped', ai_processed_at = NOW() WHERE id = $1`,
+      [messageId]
+    );
+    return;
+  }
 
   const rowContent = content;
   let inputText = extractInboundText({ content: rowContent, transcription });

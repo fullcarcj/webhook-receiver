@@ -11,6 +11,7 @@ const { pool } = require("../../db");
 const botActionsService  = require("../services/botActionsService");
 const exceptionsService  = require("../services/exceptionsService");
 const botHandoffsService = require("../services/botHandoffsService");
+const supervisorService  = require("../services/supervisorService");
 const { resolveCustomer } = require("../services/resolveCustomer");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info", name: "salesApi" });
@@ -815,6 +816,30 @@ async function handleSalesApiRequest(req, res, url) {
     }
     logger.error({ err: e }, "sales_api_error");
     writeJson(res, 500, { error: "error", message: String(e.message) });
+    return true;
+  }
+
+  // ─── GET /api/sales/supervisor/kpis ─────────────────────────────────────────
+  if (req.method === "GET" && pathname === "/api/sales/supervisor/kpis") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const data = await supervisorService.getSupervisorKPIs();
+    writeJson(res, 200, data);
+    return true;
+  }
+
+  // ─── GET /api/sales/supervisor/waiting ──────────────────────────────────────
+  if (req.method === "GET" && pathname === "/api/sales/supervisor/waiting") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const data = await supervisorService.getSupervisorWaiting();
+    writeJson(res, 200, data);
+    return true;
+  }
+
+  // ─── GET /api/sales/supervisor/exceptions ───────────────────────────────────
+  if (req.method === "GET" && pathname === "/api/sales/supervisor/exceptions") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const data = await supervisorService.getSupervisorExceptions();
+    writeJson(res, 200, data);
     return true;
   }
 

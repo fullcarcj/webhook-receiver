@@ -93,6 +93,8 @@ const createBodySchema = z.object({
   id_number: z.string().max(32).optional(),
   phone: z.string().max(80).optional(),
   consumidor_final: z.boolean().optional(),
+  /** ID de crm_chats · vincula la orden al chat de origen (opcional) */
+  conversation_id: z.number().int().positive().optional(),
 });
 
 const quoteCreateSchema = z.object({
@@ -322,6 +324,7 @@ async function handleSalesApiRequest(req, res, url) {
         id_number: d.id_number,
         phone: d.phone,
         consumidor_final: d.consumidor_final,
+        conversationId: d.conversation_id ?? null,
       });
       const code = created.idempotent ? 200 : 201;
       writeJson(res, code, {

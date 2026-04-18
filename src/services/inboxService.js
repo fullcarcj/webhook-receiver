@@ -6,7 +6,29 @@ const { mapSchemaError } = require("./crmIdentityService");
 const FILTERS = new Set(["unread", "payment_pending", "quote", "dispatch"]);
 const SRCS = new Set(["wa", "ml", "ml_question", "ml_message", "wa_ml_linked"]);
 
-/** Una orden activa por chat (evita duplicar filas si hay varias sales_orders). */
+/**
+ * Etapas canónicas del pipeline de un chat (8 valores).
+ * Distinto de LIFECYCLE_STAGE_VALUES (salesService.js) que es feedback ML post-venta.
+ *
+ * Orden de avance del pipeline:
+ *   contact → ml_answer → quote → approved → order → payment → dispatch → closed
+ *
+ * 'order': orden existe y está activa, pero payment_status no es 'pending' ni
+ *          ('approved' con fulfillment_type). Caso típico: pago confirmado pero
+ *          fulfillment_type aún sin asignar, u orden recién creada sin payment_status.
+ */
+const CHAT_STAGE_VALUES = new Set([
+  "contact",
+  "ml_answer",
+  "quote",
+  "approved",
+  "order",
+  "payment",
+  "dispatch",
+  "closed",
+]);
+
+/** Orden activa por chat (excluye completed/cancelled — usada para filtros de lista). */
 const JOIN_ORDER = `
   LEFT JOIN LATERAL (
     SELECT so2.id, so2.payment_status, so2.fulfillment_type, so2.channel_id, so2.status
@@ -16,6 +38,51 @@ const JOIN_ORDER = `
     ORDER BY so2.created_at DESC NULLS LAST
     LIMIT 1
   ) so ON true
+`;
+
+/** Orden más reciente por chat sin filtro de estado — usada solo para calcular chat_stage. */
+const JOIN_ORDER_LATEST = `
+  LEFT JOIN LATERAL (
+    SELECT so3.id, so3.payment_status, so3.fulfillment_type, so3.status
+    FROM sales_orders so3
+    WHERE so3.conversation_id = cc.id
+    ORDER BY so3.created_at DESC NULLS LAST
+    LIMIT 1
+  ) sol ON true
+`;
+
+/** Cotización activa más reciente por chat — usada solo para calcular chat_stage. */
+const JOIN_QUOTE_ACTIVE = `
+  LEFT JOIN LATERAL (
+    SELECT ip2.status AS quote_status
+    FROM inventario_presupuesto ip2
+    WHERE ip2.chat_id = cc.id
+      AND ip2.status NOT IN ('converted', 'expired')
+    ORDER BY ip2.fecha_creacion DESC NULLS LAST
+    LIMIT 1
+  ) iq ON true
+`;
+
+/**
+ * Expresión SQL que calcula el chat_stage.
+ * Requiere los alias sol (JOIN_ORDER_LATEST) e iq (JOIN_QUOTE_ACTIVE).
+ * Prioridad de evaluación (primera rama que aplica gana):
+ *   closed → dispatch → payment → order → approved → quote → ml_answer → contact
+ *
+ * Nota: 'order' se emite cuando hay orden activa pero payment_status no es 'pending'
+ * ni ('approved' + fulfillment_type). Ejemplo: pago aprobado sin tipo de despacho aún.
+ */
+const CHAT_STAGE_EXPR = `
+  CASE
+    WHEN sol.status IN ('completed', 'cancelled')                                       THEN 'closed'
+    WHEN sol.payment_status = 'approved' AND sol.fulfillment_type IS NOT NULL           THEN 'dispatch'
+    WHEN sol.payment_status = 'pending'                                                 THEN 'payment'
+    WHEN sol.id IS NOT NULL                                                             THEN 'order'
+    WHEN iq.quote_status = 'approved'                                                   THEN 'approved'
+    WHEN iq.quote_status IN ('draft', 'borrador', 'sent')                               THEN 'quote'
+    WHEN cc.source_type = 'ml_question'                                                 THEN 'ml_answer'
+    ELSE 'contact'
+  END
 `;
 
 function clampLimit(raw) {
@@ -99,10 +166,22 @@ async function listInbox(opts) {
 
   const { where, params } = buildFilters(filter, src, search, cursorIso);
 
+  // fromSql usa JOIN_ORDER (filtra completed/cancelled) para que los filtros de lista sean correctos.
   const fromSql = `
     FROM crm_chats cc
     LEFT JOIN customers c ON cc.customer_id = c.id
     ${JOIN_ORDER}
+    WHERE 1=1
+    ${where}
+  `;
+
+  // fromExtSql añade los joins adicionales para chat_stage (solo en el SELECT, no en COUNT ni filtros).
+  const fromExtSql = `
+    FROM crm_chats cc
+    LEFT JOIN customers c ON cc.customer_id = c.id
+    ${JOIN_ORDER}
+    ${JOIN_ORDER_LATEST}
+    ${JOIN_QUOTE_ACTIVE}
     WHERE 1=1
     ${where}
   `;
@@ -129,8 +208,9 @@ async function listInbox(opts) {
         so.id AS order_id,
         so.payment_status::text AS payment_status,
         so.fulfillment_type,
-        so.channel_id
-      ${fromSql}
+        so.channel_id,
+        (${CHAT_STAGE_EXPR}) AS chat_stage
+      ${fromExtSql}
       ORDER BY cc.last_message_at DESC NULLS LAST, cc.id DESC
       LIMIT $${limPos}
     `;
@@ -162,6 +242,7 @@ async function listInbox(opts) {
         assigned_to: r.assigned_to != null ? Number(r.assigned_to) : null,
         customer_name: r.customer_name || null,
         order,
+        chat_stage: r.chat_stage || "contact",
       };
     });
 
@@ -198,9 +279,26 @@ async function getInboxCounts() {
     ${JOIN_ORDER}
   `;
 
+  // BE-1.8: chats con handoff activo en este momento
+  // Tabla bot_handoffs creada en BE-1.5 (npm run db:bot-handoffs).
+  // Si aún no existe, retorna 0 sin romper el endpoint.
+  const handoffSql = `
+    SELECT COUNT(DISTINCT chat_id) AS handed_over
+    FROM bot_handoffs
+    WHERE ended_at IS NULL
+  `;
+
   try {
-    const { rows } = await pool.query(sql);
+    const [{ rows }, handoffResult] = await Promise.all([
+      pool.query(sql),
+      pool.query(handoffSql).catch((err) => {
+        // Tabla bot_handoffs aún no migrada — degradar a 0 sin error
+        if (err.code === "42P01") return { rows: [{ handed_over: "0" }] };
+        throw err;
+      }),
+    ]);
     const r = rows[0] || {};
+    const h = handoffResult.rows[0] || {};
     return {
       total: Number(r.total) || 0,
       unread: Number(r.unread) || 0,
@@ -209,10 +307,14 @@ async function getInboxCounts() {
       dispatch: Number(r.dispatch) || 0,
       wa: Number(r.wa) || 0,
       ml: Number(r.ml) || 0,
+      // BE-1.8: contadores nuevos — compatibles con shape anterior (campos adicionales)
+      handed_over: Number(h.handed_over) || 0,
+      // Sprint 2 creará tabla exceptions; por ahora placeholder en 0
+      exceptions: 0,
     };
   } catch (err) {
     throw mapSchemaError(err);
   }
 }
 
-module.exports = { listInbox, getInboxCounts, FILTERS, SRCS };
+module.exports = { listInbox, getInboxCounts, FILTERS, SRCS, CHAT_STAGE_VALUES };

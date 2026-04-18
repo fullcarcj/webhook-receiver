@@ -137,6 +137,7 @@
     "db:presupuesto-inbox": "node scripts/run-sql-file-pg.js sql/20260423_presupuesto_inbox.sql",
     "db:presupuesto-extensions": "node scripts/run-sql-file-pg.js sql/20260419_sprint1_presupuesto_extensions.sql",
     "db:bot-handoffs": "node scripts/run-sql-file-pg.js sql/20260419_sprint1_bot_handoffs.sql",
+    "db:detallepresupuesto-products-fk": "node scripts/run-sql-file-pg.js sql/20260419_sprint1_detallepresupuesto_products_fk.sql",
     "db:presupuesto-cliente-fk": "node scripts/run-sql-file-pg.js sql/20260426_inventario_presupuesto_cliente_fk_customers.sql",
     "db:crm-candidates": "node scripts/run-sql-file-pg.js sql/20260424_crm_chats_candidates.sql",
     "db:financial-tables": "node scripts/run-financial-tables-migration.js",

@@ -10,6 +10,9 @@ Documentos de decisión para el módulo de ventas omnicanal. Firmar en **Sprint 
 | [ADR-004-naming-api.md](./ADR-004-naming-api.md) | Naming API: `/api/sales` vs `/api/ventas` | Aceptado · 2026-04-18 · Backend inglés, UI español |
 | [ADR-005-catalogo-products-canonico.md](./ADR-005-catalogo-products-canonico.md) | Catálogo canónico `products` vs legacy (`productos`, `inventario_producto`) y FKs | Aceptado · 2026-04-18 · `products` canónico |
 | [ADR-006-segregacion-aprobacion-pagos.md](./ADR-006-segregacion-aprobacion-pagos.md) | Segregación vendedor/caja: auto-aprobación solo alta confianza; manual → `payment_match_proposals` | Aceptado · 2026-04-18 |
+| [ADR-007-politica-omnicanal-pagos.md](./ADR-007-politica-omnicanal-pagos.md) | Política omnicanal (canales, métodos, split, triggers); **Regla 10** moneda canónica vía amendment | Aceptado · 2026-04-19 |
+| [ADR-007-amendment-moneda-canonica.md](./ADR-007-amendment-moneda-canonica.md) | Amendment: motor compara `total_amount_bs` (duplicado como nota; ver también final de ADR-007) | Aceptado · 2026-04-19 |
+| [ADR-008-moneda-canonica-matching.md](./ADR-008-moneda-canonica-matching.md) | `total_amount_bs` canónico vs `bank_statements.amount`; backfill CH-3; `order_total_amount` fiscal | Aceptado · 2026-04-19 |
 
 Plan de ejecución: [plan-sprints-v2-ventas-omnicanal.md](../plan-sprints-v2-ventas-omnicanal.md).
 

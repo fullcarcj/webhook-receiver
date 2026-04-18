@@ -101,6 +101,10 @@ El plan v1 asumía respuestas a estas preguntas. La auditoría del repo mostró 
 | ADR-004 Naming API | ✓ Aceptado | 2026-04-18 | Opción B · backend inglés, UI español |
 | ADR-005 Catálogo canónico | ✓ Aceptado | 2026-04-18 | `products` canónico; caso Sprint 1 `inventario_detallepresupuesto` · ver [ADR-005](./adr/ADR-005-catalogo-products-canonico.md) |
 | ADR-006 Aprobación de pagos | ✓ Aceptado | 2026-04-18 | Alta confianza auto-aprueba; manual → propuesta + caja; ver [ADR-006](./adr/ADR-006-segregacion-aprobacion-pagos.md). Alinea Sprint 5 con ADR-002 |
+| ADR-006 amendment (L1/L2 auto · L3 caja) | ✓ Aceptado | 2026-04-18 | Consolidado en segregación + [prompt Sprint 5 v3](./prompts/prompt-sprint-5.md) |
+| ADR-007 Política omnicanal pagos | ✓ Aceptado | 2026-04-19 | Whitelist canales, split, pipelines — [ADR-007](./adr/ADR-007-politica-omnicanal-pagos.md) |
+| ADR-007 amendment (moneda motor) | ✓ Aceptado | 2026-04-19 | Matching vs `total_amount_bs` — [amendment](./adr/ADR-007-amendment-moneda-canonica.md) |
+| ADR-008 Moneda canónica matching | ✓ Aceptado | 2026-04-19 | `total_amount_bs` vs banco; BE-5.0 — [ADR-008](./adr/ADR-008-moneda-canonica-matching.md) |
 
 **Pendiente operativo:** ejecutar queries DDL del archivo `ADR-001-auditoria-estructural-2026-04-18.md` cuando haya `DATABASE_URL` local, antes de la primera migración de Sprint 1.
 

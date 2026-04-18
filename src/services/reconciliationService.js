@@ -197,7 +197,11 @@ async function applyMatch(order, match) {
     await client.query("BEGIN");
 
     await client.query(
-      `UPDATE sales_orders SET status = 'paid', updated_at = NOW() WHERE id = $1`,
+      `UPDATE sales_orders
+       SET status         = 'paid',
+           payment_status = 'approved',
+           updated_at     = NOW()
+       WHERE id = $1`,
       [order.id]
     );
 

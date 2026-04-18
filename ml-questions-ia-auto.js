@@ -25,6 +25,8 @@
  * solo aplica en local si el archivo existe; no sustituye env del panel si allí sigue ENABLED=1.
  */
 const { mercadoLibrePostJsonForUser } = require("./oauth-token");
+const handoffGuard = require("./src/middleware/handoffGuard");
+const { pool } = require("./db");
 const {
   computeResponseTimeSec,
   extractQuestionDateCreatedIso,
@@ -551,6 +553,32 @@ async function tryQuestionIaAutoAnswer(args) {
     }
   } else if (await wasMlQuestionsIaAutoSent(qid)) {
     return { ok: true, skip: "already_sent" };
+  }
+
+  // Guard: si el comprador tiene un chat WA activo con handoff humano, no responder automáticamente.
+  // Lookup: buyer_id → ml_buyers.phone_1 → crm_chats.phone (puede ser null si no hay chat vinculado).
+  try {
+    const { rows: chatRows } = await pool.query(
+      `SELECT c.id FROM crm_chats c
+       INNER JOIN ml_buyers b ON b.phone_1 = c.phone
+       WHERE b.buyer_id = $1
+       LIMIT 1`,
+      [pendingRow.buyer_id]
+    );
+    const linkedChatId = chatRows[0]?.id || null;
+    if (linkedChatId) {
+      const skip = await handoffGuard.shouldSkipBotReply({
+        chatId: linkedChatId,
+        correlationId: String(qid),
+      });
+      if (skip) {
+        console.log("[questions ia-auto] skipped by handoff guard: question_id=%s chat_id=%s", qid, linkedChatId);
+        return { ok: true, skip: "handoff_active", ia_outcome: "handoff_active" };
+      }
+    }
+  } catch (guardErr) {
+    // Si el lookup falla (ej: tabla no migrada), seguir con respuesta normal — no bloquear
+    console.warn("[questions ia-auto] handoff guard lookup falló (no crítico):", guardErr.message);
   }
 
   console.log("[questions ia-auto] intento POST /answers question_id=%s ml_user_id=%s", qid, mlUid);

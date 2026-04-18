@@ -35,50 +35,81 @@
 
 ### Tarea 1 · Backfill
 
+**Advertencia antes de ejecutar:** `importSalesOrderFromMlOrder` en `salesService.js` ya populaba
+`total_amount_bs = order_total_amount × BCV_rate` para todas las órdenes ML. Para CH-3 Venezuela
+(VES nativo) ese valor es incorrecto (es `VES × Bs/USD`, ~34× más grande). El UPDATE debe
+sobreescribir sin filtro `IS NULL`.
+
 ```sql
 BEGIN;
 
--- Verificación previa
-SELECT channel_id, COUNT(*) AS orders_sin_total_bs
+-- Verificación previa: ver cuántos CH-3 tienen total_amount_bs ya populado (posiblemente mal)
+SELECT channel_id,
+       COUNT(*) AS total,
+       COUNT(*) FILTER (WHERE total_amount_bs IS NULL)     AS sin_bs,
+       COUNT(*) FILTER (WHERE total_amount_bs IS NOT NULL) AS con_bs_ya_populado
 FROM sales_orders
-WHERE total_amount_bs IS NULL
 GROUP BY channel_id;
 
--- Backfill CH-3 (ML Venezuela, ya está en VES)
+-- Backfill CH-3 (ML Venezuela, VES nativo)
+-- SIN filtro IS NULL: sobreescribe cualquier valor incorrecto previo.
+-- exchange_rate_bs_per_usd = 1 porque ML Venezuela cotiza directamente en Bs.
 UPDATE sales_orders
-SET total_amount_bs = order_total_amount,
-    exchange_rate_bs_per_usd = COALESCE(exchange_rate_bs_per_usd, 1),
-    rate_date = COALESCE(rate_date, DATE(created_at))
+SET total_amount_bs          = order_total_amount,
+    exchange_rate_bs_per_usd = 1,
+    rate_date                = COALESCE(rate_date, DATE(created_at))
 WHERE channel_id = 3
-  AND total_amount_bs IS NULL
   AND order_total_amount IS NOT NULL;
 
 -- Verificación post-backfill
-SELECT channel_id, COUNT(*) FILTER (WHERE total_amount_bs IS NULL) AS sin_bs,
-                    COUNT(*) AS total
+SELECT channel_id,
+       COUNT(*) FILTER (WHERE total_amount_bs IS NULL) AS sin_bs,
+       COUNT(*) AS total
 FROM sales_orders
 GROUP BY channel_id;
 
 COMMIT;
 ```
 
-**Si el count post-backfill muestra órdenes sin `total_amount_bs` en canales 1/2/4/5**, significa que hay datos históricos no esperados. Parar y documentar antes de continuar.
+**Si post-backfill aparecen filas CH-3 con `total_amount_bs IS NULL`**, significa que `order_total_amount`
+también era NULL — revisar esas órdenes manualmente antes de continuar.
+
+**Si aparecen órdenes sin `total_amount_bs` en canales 1/2/4/5**, son datos históricos no esperados.
+Parar y documentar antes de continuar.
 
 ### Tarea 2 · Populate al crear órdenes
 
 Modificar los handlers de creación en cada canal:
 
-**CH-3 ML webhook** (probablemente `src/handlers/mlWebhookHandler.js` o similar):
+**CH-3 ML** — archivo real: `src/services/salesService.js`, función `importSalesOrderFromMlOrder`.
+El bug actual está en las líneas que calculan `totalBs = totalUsd * rateApplied`: para ML Venezuela
+(VES nativo) eso multiplica Bs × (Bs/USD), produciendo un valor ~34× incorrecto.
 
 ```javascript
-// Al crear sales_order desde webhook ML
-const order = {
-  // ...campos existentes
-  order_total_amount: mlData.total_amount,  // ya es VES
-  total_amount_bs: mlData.total_amount,     // mismo valor (es VES nativo)
-  exchange_rate_bs_per_usd: 1,              // ML Venezuela = Bs
-  rate_date: new Date().toISOString().split('T')[0]
-};
+// En importSalesOrderFromMlOrder (salesService.js), reemplazar el cálculo de totalBs:
+
+// Antes (incorrecto para CH-3 Venezuela — multiplica VES × tasa):
+// const totalBs = rateApplied > 0 ? Number((totalUsd * rateApplied).toFixed(2)) : null;
+
+// Después:
+const channelId = SOURCE_TO_CHANNEL["mercadolibre"] || 3;
+let totalBs, exchangeRate, rateApplied, rateType, rateDate;
+
+if (channelId === 3) {
+  // ML Venezuela cotiza en VES/Bs directamente — tasa = 1, no hay conversión
+  totalBs      = Number(ml.total_amount);
+  exchangeRate = 1;
+  rateApplied  = 1;
+  rateType     = 'VES_NATIVE';
+  rateDate     = mlOrderDate;
+} else {
+  // Otros canales ML (futuro): buscar tasa BCV
+  rateApplied = rateRow ? Number(rateRow.active_rate) : null;
+  rateType    = rateRow ? String(rateRow.active_rate_type || 'BCV').toUpperCase() : null;
+  rateDate    = rateRow ? String(rateRow.rate_date).slice(0, 10) : null;
+  totalBs     = rateApplied > 0 ? Number((totalUsd * rateApplied).toFixed(2)) : null;
+  exchangeRate = rateApplied;
+}
 ```
 
 **CH-2 WhatsApp manual + CH-5 Fuerza de ventas** (donde el vendedor ingresa la orden):
@@ -134,11 +165,57 @@ WHERE so.payment_status = 'pending'
 Cambiar cada `findBestMatch` / `checkAmount` para comparar contra `total_amount_bs` en lugar de `order_total_amount`:
 
 ```javascript
-// Antes:
-const amountDiff = Math.abs(order.total_orden - bankStatement.amount);
+// Antes (reconciliationService.js línea ~135):
+const diff = Math.abs(amount - Number(order.total_orden));
 
 // Después:
-const amountDiff = Math.abs(order.total_amount_bs - bankStatement.amount);
+const diff = Math.abs(amount - Number(order.total_amount_bs));
+```
+
+También actualizar el SELECT de órdenes en las tres funciones (`runReconciliation`, `reconcileStatements`, `reconcileAttempt`) para incluir `total_amount_bs` en el resultado:
+
+```sql
+-- Antes:
+SELECT so.id, ..., so.order_total_amount AS total_orden, ...
+
+-- Después:
+SELECT so.id, ..., so.order_total_amount AS total_orden,
+       so.total_amount_bs, so.channel_id, ...
+```
+
+### Tarea 3b · Actualizar `applyMatch` y `applyManualReview`
+
+`applyMatch()` solo actualiza la columna `status` (legacy). Con el schema nuevo de
+`20260422_sales_channels.sql`, la columna canónica de pago es `payment_status`. Agregar:
+
+```javascript
+// En applyMatch() — reemplazar la UPDATE de sales_orders:
+await client.query(
+  `UPDATE sales_orders
+   SET status         = 'paid',
+       payment_status = 'approved',   -- columna canónica (payment_status_enum)
+       updated_at     = NOW()
+   WHERE id = $1`,
+  [order.id]
+);
+```
+
+```javascript
+// En applyManualReview() — agregar junto al UPDATE existente de bank_statements/payment_attempts:
+// (no cambia el status de la orden aquí, pero sí debe quedar en reconciliation_log)
+// El approval_state 'pending_approval' se gestiona en BE-5.8 sobre la propuesta,
+// no directamente en sales_orders desde el motor.
+```
+
+Asimismo, la columna `amount_order_bs` del `reconciliation_log` debe usar `total_amount_bs`,
+no `order.total_orden`:
+
+```javascript
+// En el INSERT a reconciliation_log dentro de applyMatch() y applyManualReview():
+// Antes:
+order.total_orden,
+// Después:
+order.total_amount_bs,
 ```
 
 ### Tarea 4 · Tests
@@ -452,7 +529,14 @@ El filtro `channel_id IN (2, 5)` ya está en BE-5.0 tarea 3. Este ticket no exis
 
 ## Ticket BE-5.11 · Alertas post-match L1/L2 (1 día)
 
-**Objetivo:** cuando L1 o L2 auto-aprueban, alertar a vendedor asignado + caja (sin mensaje al cliente).
+**Objetivo:** cuando L1 o L2 auto-aprueban, alertar a vendedor asignado + caja mediante
+notificaciones in-app.
+
+**Nota sobre WA al cliente:** `applyMatch()` ya envía hoy un mensaje WhatsApp al cliente
+("✅ Pago confirmado") como comportamiento preexistente. **BE-5.11 no elimina ese flujo.**
+Lo que BE-5.11 agrega es una notificación interna separada hacia el vendedor y caja.
+Si en el futuro se decide suprimir el WA al cliente, es una decisión de producto independiente
+que requiere su propio ticket (condicionar con env `RECONCILIATION_WA_CUSTOMER_NOTIFY_ENABLED`).
 
 ### Tabla de notificaciones in-app
 
@@ -512,10 +596,10 @@ POST /api/notifications/read-all
 ```
 
 **Criterios:**
-- [ ] Tabla creada
-- [ ] Vendedor asignado recibe notificación
-- [ ] Cada usuario con `finance.approve_payment` recibe notificación
-- [ ] Cliente NO recibe mensaje automático (confirmar en tests)
+- [ ] Tabla `in_app_notifications` creada
+- [ ] Vendedor asignado recibe notificación in-app
+- [ ] Cada usuario con `finance.approve_payment` recibe notificación in-app
+- [ ] El WA preexistente al cliente en `applyMatch()` no se modifica en este ticket
 
 ---
 
@@ -646,7 +730,7 @@ Campana de notificaciones en topbar de `/bandeja` (y eventualmente global):
 - [ ] **Backend BE-5.0:** motor usa `total_amount_bs`, backfill CH-3 ejecutado, populate en todos los canales
 - [ ] **Backend BE-5.8:** tabla proposals + approval_state + endpoints funcionan
 - [ ] **Backend BE-5.9:** permisos creados y asignados
-- [ ] **Backend BE-5.11:** alertas post-match L1/L2 a vendedor + caja (cliente NO recibe mensaje)
+- [ ] **Backend BE-5.11:** notificaciones in-app post-match L1/L2 a vendedor + caja (WA cliente preexistente no modificado)
 - [ ] **Backend BE-5.12:** ventana configurable por canal
 - [ ] **Backend BE-5.13:** `channel_id` en `payment_attempts`
 - [ ] **Frontend:** los 6 tickets completos

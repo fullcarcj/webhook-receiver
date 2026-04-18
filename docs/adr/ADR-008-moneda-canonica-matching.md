@@ -102,12 +102,24 @@ Consecuencia: una orden creada con tasa 34.5 y pagada una semana después con ta
 Se ejecuta como parte del Sprint 5 (ticket BE-5.0):
 
 ```sql
+-- Verificación previa: detectar total_amount_bs ya populados (posiblemente con valor incorrecto)
+SELECT channel_id,
+       COUNT(*) AS total,
+       COUNT(*) FILTER (WHERE total_amount_bs IS NULL)     AS sin_bs,
+       COUNT(*) FILTER (WHERE total_amount_bs IS NOT NULL) AS con_bs
+FROM sales_orders
+GROUP BY channel_id;
+
 -- Backfill CH-3 (ML Venezuela, ya está en VES)
+-- IMPORTANTE: sin filtro IS NULL porque importSalesOrderFromMlOrder ya populaba
+-- total_amount_bs = order_total_amount × BCV_rate (incorrecto para VES nativo).
+-- Este UPDATE sobreescribe todos los CH-3 para garantizar el valor correcto.
 UPDATE sales_orders
-SET total_amount_bs = order_total_amount,
-    exchange_rate_bs_per_usd = 1,  -- es VES nativo
-    rate_date = DATE(created_at)
-WHERE channel_id = 3 AND total_amount_bs IS NULL;
+SET total_amount_bs         = order_total_amount,
+    exchange_rate_bs_per_usd = 1,  -- ML Venezuela es VES nativo; tasa = 1
+    rate_date               = COALESCE(rate_date, DATE(created_at))
+WHERE channel_id = 3
+  AND order_total_amount IS NOT NULL;
 ```
 
 **Si en el futuro aparecen órdenes históricas sin `total_amount_bs` en otros canales:**

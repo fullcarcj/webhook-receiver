@@ -41,17 +41,19 @@ async function runReconciliation() {
     manual:    0, no_match:   0, errors: 0,
   };
 
-  // Órdenes pendientes con datos del cliente (order_total_amount = monto en moneda de la orden)
+  // Órdenes pendientes · solo canales de pago bancario (CH-2 WA/redes, CH-5 fuerza ventas).
+  // Comparar total_amount_bs (VES canónico, ADR-008) contra bank_statements.amount (siempre VES).
   const { rows: orders } = await pool.query(`
     SELECT so.id, so.source, so.external_order_id,
-           so.customer_id, so.order_total_amount AS total_orden, so.notes,
+           so.customer_id, so.total_amount_bs AS total_orden, so.notes,
            so.created_at, so.payment_method, so.wa_payment_reminder_at,
            c.phone AS customer_phone
     FROM sales_orders so
     LEFT JOIN customers c ON c.id = so.customer_id
-    WHERE so.status = 'pending'
-      AND so.order_total_amount IS NOT NULL
-      AND so.order_total_amount > 0
+    WHERE so.payment_status = 'pending'
+      AND so.channel_id IN (2, 5)
+      AND so.total_amount_bs IS NOT NULL
+      AND so.total_amount_bs > 0
     ORDER BY so.created_at ASC
   `);
 
@@ -459,17 +461,18 @@ async function reconcileStatements(bankStatementIds) {
 
   if (!statements.length) return;
 
-  // Órdenes pendientes activas para cruzar
+  // Órdenes pendientes · solo canales bancarios (CH-2, CH-5) · total_amount_bs canónico (ADR-008)
   const { rows: orders } = await pool.query(`
     SELECT so.id, so.source, so.external_order_id,
-           so.customer_id, so.order_total_amount AS total_orden, so.notes,
+           so.customer_id, so.total_amount_bs AS total_orden, so.notes,
            so.created_at, so.payment_method, so.wa_payment_reminder_at,
            c.phone AS customer_phone
     FROM sales_orders so
     LEFT JOIN customers c ON c.id = so.customer_id
-    WHERE so.status = 'pending'
-      AND so.order_total_amount IS NOT NULL
-      AND so.order_total_amount > 0
+    WHERE so.payment_status = 'pending'
+      AND so.channel_id IN (2, 5)
+      AND so.total_amount_bs IS NOT NULL
+      AND so.total_amount_bs > 0
     ORDER BY so.created_at ASC
   `);
 
@@ -526,16 +529,18 @@ async function reconcileAttempt(paymentAttemptId) {
   if (!attempts.length) return;
   const attempt = attempts[0];
 
+  // Órdenes pendientes · solo canales bancarios (CH-2, CH-5) · total_amount_bs canónico (ADR-008)
   const { rows: orders } = await pool.query(`
     SELECT so.id, so.source, so.external_order_id,
-           so.customer_id, so.order_total_amount AS total_orden, so.notes,
+           so.customer_id, so.total_amount_bs AS total_orden, so.notes,
            so.created_at, so.payment_method, so.wa_payment_reminder_at,
            c.phone AS customer_phone
     FROM sales_orders so
     LEFT JOIN customers c ON c.id = so.customer_id
-    WHERE so.status = 'pending'
-      AND so.order_total_amount IS NOT NULL
-      AND so.order_total_amount > 0
+    WHERE so.payment_status = 'pending'
+      AND so.channel_id IN (2, 5)
+      AND so.total_amount_bs IS NOT NULL
+      AND so.total_amount_bs > 0
     ORDER BY so.created_at ASC
   `);
 

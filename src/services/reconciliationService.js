@@ -1,5 +1,8 @@
 "use strict";
 
+const botActionsService = require("./botActionsService");
+const exceptionsService = require("./exceptionsService");
+
 /**
  * Servicio de Conciliación Automática de Pagos.
  *
@@ -328,6 +331,23 @@ async function applyMatch(order, match) {
   } catch (_) {
     /* delivery opcional */
   }
+
+  // Log de trazabilidad (Paso 2 · fire-and-forget, no revierte el match)
+  botActionsService.log({
+    chatId:       null,
+    orderId:      order.id,
+    actionType:   "payment_reconciled",
+    inputContext: {
+      matchLevel:  match.level,
+      sourceType:  match.sourceType,
+      sourceRowId: match.row.id,
+      diff:        match.diff,
+      tolerance:   match.tolerance,
+    },
+    outputResult: { payment_status: "approved", total_amount_bs: order.total_orden },
+    provider:     "rule_engine",
+    confidence:   match.score,
+  }).catch((err) => log.warn({ err: err.message }, "reconciliation: bot_action log falló (no crítico)"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -385,6 +405,33 @@ async function applyManualReview(order, match) {
     amountBs:   order.total_orden,
     source:     match.sourceType,
   });
+
+  // Registrar excepción + bot_action para vista supervisor (Paso 4 · fire-and-forget)
+  Promise.all([
+    exceptionsService.raise({
+      entityType: "payment",
+      entityId:   order.id,
+      reason:     "payment_no_match",
+      severity:   "medium",
+      context:    {
+        matchLevel:  match.level,
+        score:       match.score,
+        sourceType:  match.sourceType,
+        sourceRowId: match.row.id,
+        diff:        match.diff,
+      },
+      chatId: null,
+    }),
+    botActionsService.log({
+      chatId:       null,
+      orderId:      order.id,
+      actionType:   "manual_review_required",
+      inputContext: { matchLevel: match.level, score: match.score, sourceType: match.sourceType },
+      outputResult: { approval_status: "pending" },
+      provider:     "rule_engine",
+      confidence:   match.score,
+    }),
+  ]).catch((err) => log.warn({ err: err.message }, "reconciliation: L3 logging falló (no crítico)"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

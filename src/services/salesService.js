@@ -327,6 +327,7 @@ async function createOrder({
   id_number,
   phone,
   consumidor_final,
+  conversationId = null,
 }) {
   if (!MANUAL_SOURCES.has(source)) {
     const e = new Error("source no permitido para creación manual");
@@ -469,14 +470,19 @@ async function createOrder({
       totalBs = Number((totalAmountUsd * rate).toFixed(2));
     }
 
+    const convId =
+      conversationId != null && Number.isFinite(Number(conversationId)) && Number(conversationId) > 0
+        ? Number(conversationId)
+        : null;
+
     const ins = await client.query(
       `INSERT INTO sales_orders (
          source, channel_id, seller_id, external_order_id, customer_id, status,
          order_total_amount, total_amount_bs, exchange_rate_bs_per_usd, payment_method,
          payment_status, fulfillment_status,
-         notes, sold_by, applies_stock, records_cash
+         notes, sold_by, conversation_id, applies_stock, records_cash
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE, TRUE)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, TRUE, TRUE)
        RETURNING id, created_at`,
       [
         source,
@@ -493,6 +499,7 @@ async function createOrder({
         fulfillSt,
         orderNotes ?? null,
         soldBy ?? null,
+        convId,
       ]
     );
     const orderId = ins.rows[0].id;

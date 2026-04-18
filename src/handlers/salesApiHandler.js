@@ -8,6 +8,8 @@ const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const salesService = require("../services/salesService");
 const orderService = require("../services/orderService");
 const { pool } = require("../../db");
+const botActionsService = require("../services/botActionsService");
+const exceptionsService = require("../services/exceptionsService");
 const { resolveCustomer } = require("../services/resolveCustomer");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info", name: "salesApi" });
@@ -812,6 +814,56 @@ async function handleSalesApiRequest(req, res, url) {
     }
     logger.error({ err: e }, "sales_api_error");
     writeJson(res, 500, { error: "error", message: String(e.message) });
+    return true;
+  }
+
+  // ─── GET /api/sales/bot-actions ─────────────────────────────────────────────
+  if (req.method === "GET" && pathname === "/api/sales/bot-actions") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const chatId  = url.searchParams.get("chat_id")  ? Number(url.searchParams.get("chat_id"))  : null;
+    const orderId = url.searchParams.get("order_id") ? Number(url.searchParams.get("order_id")) : null;
+    const limit   = Math.min(Number(url.searchParams.get("limit") || "50"), 100);
+    const offset  = Number(url.searchParams.get("offset") || "0");
+    if (!chatId && !orderId) {
+      writeJson(res, 400, { error: "bad_request", message: "Requerido: chat_id o order_id" });
+      return true;
+    }
+    const rows = chatId
+      ? await botActionsService.getByChat(chatId, { limit, offset })
+      : await botActionsService.getByOrder(orderId, { limit, offset });
+    writeJson(res, 200, { data: rows });
+    return true;
+  }
+
+  // ─── GET /api/sales/exceptions ───────────────────────────────────────────────
+  if (req.method === "GET" && pathname === "/api/sales/exceptions") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const status = url.searchParams.get("status") || "open";
+    const limit  = Math.min(Number(url.searchParams.get("limit")  || "50"), 100);
+    const offset = Number(url.searchParams.get("offset") || "0");
+    const rows = await exceptionsService.list({ status, limit, offset });
+    writeJson(res, 200, { data: rows });
+    return true;
+  }
+
+  // ─── PATCH /api/sales/exceptions/:id/resolve ────────────────────────────────
+  const exResolveMatch = pathname.match(/^\/api\/sales\/exceptions\/(\d+)\/resolve$/);
+  if (exResolveMatch && req.method === "PATCH") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const exId = Number(exResolveMatch[1]);
+    let body = {};
+    try { body = await parseJsonBody(req); } catch (_) {
+      writeJson(res, 400, { error: "invalid_json" }); return true;
+    }
+    const user = req._authUser || null;
+    const resolvedBy = user?.id ?? null;
+    const note = typeof body.resolution_note === "string" ? body.resolution_note.trim().slice(0, 2000) || null : null;
+    const updated = await exceptionsService.resolve(exId, { resolvedBy, resolutionNote: note });
+    if (!updated) {
+      writeJson(res, 404, { error: "not_found_or_already_resolved" });
+      return true;
+    }
+    writeJson(res, 200, { data: { id: exId, status: "resolved" } });
     return true;
   }
 

@@ -136,6 +136,8 @@
     "db:omnichannel-audit": "node scripts/run-omnichannel-audit.js",
     "db:presupuesto-inbox": "node scripts/run-sql-file-pg.js sql/20260423_presupuesto_inbox.sql",
     "db:be50-backfill-ch3": "node scripts/run-sql-file-pg.js sql/20260420_be50_backfill_total_amount_bs_ch3.sql",
+    "db:bot-actions": "node scripts/run-sql-file-pg.js sql/20260421_paso2_bot_actions.sql",
+    "db:exceptions": "node scripts/run-sql-file-pg.js sql/20260421_paso2_exceptions.sql",
     "db:presupuesto-extensions": "node scripts/run-sql-file-pg.js sql/20260419_sprint1_presupuesto_extensions.sql",
     "db:bot-handoffs": "node scripts/run-sql-file-pg.js sql/20260419_sprint1_bot_handoffs.sql",
     "db:detallepresupuesto-products-fk": "node scripts/run-sql-file-pg.js sql/20260419_sprint1_detallepresupuesto_products_fk.sql",

@@ -7,7 +7,7 @@
 
 const pino = require("pino");
 const { pool } = require("../../db");
-const { processOneMessage, isEnabled } = require("../services/aiResponder");
+const { processOneMessage, isEnabled, setImmediateTrigger } = require("../services/aiResponder");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder_worker" });
 
@@ -102,6 +102,9 @@ function startAiResponderWorker() {
   const STUCK_MS = 5 * 60 * 1000;
   workerHandle = setInterval(responderCycle, CYCLE_MS);
   stuckHandle = setInterval(cleanStuckProcessing, STUCK_MS);
+  // Registrar callback para disparar ciclos inmediatos desde maybeQueueInboundText
+  // y eliminar el delay de hasta CYCLE_MS entre que llega un mensaje y se procesa.
+  setImmediateTrigger(responderCycle);
   log.info({ intervalMs: CYCLE_MS }, "ai_responder worker iniciado");
 }
 

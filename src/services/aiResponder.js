@@ -22,6 +22,26 @@ function providerAuditTipoM(gatewayId) {
   return `${MESSAGE_TYPE_M}|${gatewayId != null && String(gatewayId).trim() ? String(gatewayId).trim() : "n/a"}`;
 }
 
+/**
+ * Callback registrado por el worker para disparar un ciclo inmediato.
+ * Evita la dependencia circular aiResponder ↔ aiResponderWorker.
+ */
+let _immediateTrigger = null;
+
+/** Registrar la función que dispara un ciclo del worker sin esperar el próximo intervalo. */
+function setImmediateTrigger(fn) {
+  _immediateTrigger = typeof fn === "function" ? fn : null;
+}
+
+/** Disparar el worker ahora mismo (si está registrado). Seguro llamarlo varias veces. */
+function triggerResponderNow() {
+  if (_immediateTrigger) {
+    setImmediate(() => {
+      _immediateTrigger().catch(() => {});
+    });
+  }
+}
+
 function isEnabled() {
   return String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
 }
@@ -238,11 +258,15 @@ async function generateResponse({ messageId, customerId, chatId, inputText, rece
 
 /**
  * Marca texto entrante para la cola IA (misma transacción que INSERT).
+ * Tras marcar el mensaje, dispara el worker inmediatamente para evitar el delay
+ * del intervalo de polling (hasta AI_RESPONDER_INTERVAL_MS, default 8 s).
+ * El setImmediate garantiza que el COMMIT de la transacción ya se completó
+ * antes de que el worker intente reclamar la fila.
  */
 async function maybeQueueInboundText(client, crmMessageId) {
   if (!isEnabled() || !crmMessageId) return;
   try {
-    await client.query(
+    const r = await client.query(
       `UPDATE crm_messages
        SET ai_reply_status = 'pending_ai_reply'
        WHERE id = $1
@@ -250,6 +274,9 @@ async function maybeQueueInboundText(client, crmMessageId) {
          AND (ai_reply_status IS NULL)`,
       [crmMessageId]
     );
+    if (r.rowCount > 0) {
+      triggerResponderNow();
+    }
   } catch (e) {
     if (e && e.code === "42703") return;
     log.warn({ err: e.message, crmMessageId }, "maybeQueueInboundText");
@@ -720,6 +747,8 @@ module.exports = {
   confidenceMin,
   isForceSend,
   isHumanReviewGateOn,
+  setImmediateTrigger,
+  triggerResponderNow,
   maybeQueueInboundText,
   generateResponse,
   processOneMessage,

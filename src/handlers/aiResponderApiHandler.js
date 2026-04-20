@@ -721,14 +721,16 @@ async function approve(mid) {
     try {
       // El drawer de revisión humana (Sprint 6B FE) consume este endpoint. Los mensajes en estado
       // 'legacy_archived' quedan excluidos por diseño (backlog pre-Sprint 6A archivado).
-      // channel_id: no hay columna en crm_chats; viene de la orden más reciente (sales_orders.conversation_id).
-      // Sin orden vinculada → NULL (típico en consultas previas a venta). source_type (crm_chats) sirve de
-      // fallback visual para badge/canal cuando channel_id es NULL (wa_inbound, ml_question, …).
+      // channel_id: viene de sales_orders.conversation_id = chat (orden más reciente); sin orden → NULL.
+      // source_type: fallback para ChannelBadge del drawer de revisión humana (Sprint 6B FE). Cuando
+      // channel_id viene NULL (chat sin orden vinculada), el FE cae a source_type para el canal visual.
+      // channel_id sigue siendo preferido cuando está disponible (info más precisa · ADR-007). Valores
+      // típicos en BD: wa_inbound, ml_question, ml_message, wa_ml_linked (chk_crm_chats_source_type).
       const { rows } = await pool.query(
         `SELECT m.id, m.chat_id, m.customer_id, m.ai_reply_status, m.ai_confidence, m.ai_reply_text,
                 m.ai_reasoning, m.content, m.created_at, m.transcription,
                 NULLIF(TRIM(ch.phone), '') AS chat_phone,
-                ch.source_type,
+                ch.source_type AS source_type,
                 NULLIF(TRIM(cu.full_name), '') AS customer_full_name,
                 cu.client_segment AS customer_segment,
                 so_ch.channel_id,

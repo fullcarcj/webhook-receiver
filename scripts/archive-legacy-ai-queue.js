@@ -46,7 +46,8 @@ SELECT
     'chat_phone', COALESCE(NULLIF(TRIM(ch.phone), ''), ''),
     'archived_reason', 'pre_sprint6a_backlog_cleanup',
     'archived_at', NOW(),
-    'archived_by', 'archive-legacy-ai-queue.js'
+    'archived_by', 'archive-legacy-ai-queue.js',
+    'sprint', '6A'
   ))::text,
   'system',
   0,

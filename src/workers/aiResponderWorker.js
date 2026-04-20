@@ -11,6 +11,9 @@ const { processOneMessage, isEnabled, setImmediateTrigger } = require("../servic
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder_worker" });
 
+/** Estados elegibles para la cola automática Tipo M (excluye legacy_archived y needs_human_review). */
+const INBOUND_AI_QUEUE_STATUSES = Object.freeze(["pending_ai_reply", "pending_receipt_confirm"]);
+
 let isRunning = false;
 let workerHandle = null;
 let stuckHandle = null;
@@ -48,13 +51,14 @@ async function responderCycle() {
       return;
     }
 
+    const statusIn = INBOUND_AI_QUEUE_STATUSES.map((s) => `'${String(s).replace(/'/g, "''")}'`).join(", ");
     const { rows: claimed } = await pool.query(`
       UPDATE crm_messages AS m
       SET ai_reply_status = 'processing',
           ai_processed_at = NOW()
       WHERE m.id = (
         SELECT id FROM crm_messages
-        WHERE ai_reply_status IN ('pending_ai_reply', 'pending_receipt_confirm')
+        WHERE ai_reply_status IN (${statusIn})
           AND direction = 'inbound'
           AND created_at >= NOW() - INTERVAL '24 hours'
         ORDER BY created_at ASC
@@ -120,4 +124,10 @@ function stopAiResponderWorker() {
   log.info("ai_responder worker detenido");
 }
 
-module.exports = { startAiResponderWorker, stopAiResponderWorker, responderCycle, cleanStuckProcessing };
+module.exports = {
+  startAiResponderWorker,
+  stopAiResponderWorker,
+  responderCycle,
+  cleanStuckProcessing,
+  INBOUND_AI_QUEUE_STATUSES,
+};

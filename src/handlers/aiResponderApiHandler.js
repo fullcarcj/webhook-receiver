@@ -35,6 +35,52 @@ async function getActorLabel(req) {
   return "admin";
 }
 
+const LEGACY_ARCHIVED_DETAIL =
+  "Este mensaje fue archivado como backlog histórico y no puede ser procesado.";
+
+/**
+ * Bloquea approve/override/draft/reject sobre mensajes archivados (backlog pre–6A).
+ * Registra `legacy_archived_block_attempt` en ai_response_log; no modifica crm_messages ni Wasender.
+ */
+async function logAndRespondLegacyArchivedBlocked(req, res, id, row, endpoint) {
+  const sentBy = await getActorLabel(req);
+  log.warn(
+    { messageId: Number(id), endpoint, user_sent_by: sentBy },
+    "Intento de operación sobre mensaje legacy_archived · bloqueado"
+  );
+  const reasoning = JSON.stringify({
+    endpoint,
+    message_id: Number(id),
+    attempted_at: new Date().toISOString(),
+    user_sent_by: sentBy,
+  });
+  try {
+    await logAiResponse(pool, {
+      crm_message_id: Number(id),
+      customer_id: row.customer_id,
+      chat_id: row.chat_id,
+      input_text: null,
+      receipt_data: null,
+      reply_text: null,
+      confidence: null,
+      reasoning,
+      provider_used: "system",
+      tokens_used: 0,
+      action_taken: "legacy_archived_block_attempt",
+      error_message: null,
+    });
+  } catch (e) {
+    log.warn({ err: e.message, messageId: id }, "legacy_archived_block_attempt log insert falló");
+  }
+  writeJson(res, 409, {
+    ok: false,
+    error: "invalid_state",
+    code: "legacy_archived_blocked",
+    detail: LEGACY_ARCHIVED_DETAIL,
+    message_id: Number(id),
+  });
+}
+
 async function parseJsonBody(req) {
   const chunks = [];
   let total = 0;
@@ -72,6 +118,9 @@ async function getStats() {
     GROUP BY action_taken
   `);
   const groqKeyOk = !!process.env.GROQ_API_KEY;
+  const legacyArchived = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM crm_messages WHERE ai_reply_status = 'legacy_archived'`
+  );
   return {
     ok: true,
     ai_responder_enabled: String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1",
@@ -80,6 +129,7 @@ async function getStats() {
     tipo_m_mode: "plantilla + context_line (IA no elige flujo)",
     today_messages: today.rows[0] || {},
     today_log_by_action: Object.fromEntries(logc.rows.map((r) => [r.action_taken, r.n])),
+    legacy_archived_count: legacyArchived.rows[0]?.n ?? 0,
     provider: { groq_key_ok: groqKeyOk },
   };
 }
@@ -103,6 +153,10 @@ async function handleReject(req, res, id, body) {
     return;
   }
   const m = rows[0];
+  if (m.ai_reply_status === "legacy_archived") {
+    await logAndRespondLegacyArchivedBlocked(req, res, id, m, "reject");
+    return;
+  }
   if (m.ai_reply_status !== "needs_human_review") {
     writeJson(res, 409, { ok: false, error: "invalid_state" });
     return;
@@ -152,12 +206,6 @@ async function handleReject(req, res, id, body) {
 
 async function handleDraft(req, res, id, body) {
   const actor = await getActorLabel(req);
-  const replyText = body && body.reply_text != null ? String(body.reply_text).trim() : "";
-  if (!replyText || replyText.length > 4000) {
-    writeJson(res, 400, { ok: false, error: "invalid_reply_text" });
-    return;
-  }
-
   const { rows } = await pool.query(
     `SELECT m.id, m.ai_reply_status, m.customer_id, m.chat_id, m.ai_reply_text,
             COALESCE(NULLIF(TRIM(ch.phone), ''), '') AS chat_phone
@@ -171,8 +219,18 @@ async function handleDraft(req, res, id, body) {
     return;
   }
   const m = rows[0];
+  if (m.ai_reply_status === "legacy_archived") {
+    await logAndRespondLegacyArchivedBlocked(req, res, id, m, "draft");
+    return;
+  }
   if (m.ai_reply_status !== "needs_human_review") {
     writeJson(res, 409, { ok: false, error: "invalid_state" });
+    return;
+  }
+
+  const replyText = body && body.reply_text != null ? String(body.reply_text).trim() : "";
+  if (!replyText || replyText.length > 4000) {
+    writeJson(res, 400, { ok: false, error: "invalid_reply_text" });
     return;
   }
 
@@ -227,9 +285,9 @@ async function handleDraft(req, res, id, body) {
 
 async function handleApprove(req, res, id) {
   const { rows } = await pool.query(
-    `SELECT m.id, m.ai_reply_text, m.customer_id, m.chat_id
+    `SELECT m.id, m.ai_reply_status, m.ai_reply_text, m.customer_id, m.chat_id
      FROM crm_messages m
-     WHERE m.id = $1 AND m.ai_reply_status = 'needs_human_review'`,
+     WHERE m.id = $1`,
     [id]
   );
   if (!rows.length) {
@@ -237,6 +295,14 @@ async function handleApprove(req, res, id) {
     return;
   }
   const m = rows[0];
+  if (m.ai_reply_status === "legacy_archived") {
+    await logAndRespondLegacyArchivedBlocked(req, res, id, m, "approve");
+    return;
+  }
+  if (m.ai_reply_status !== "needs_human_review") {
+    writeJson(res, 404, { ok: false, error: "not_found_or_not_review" });
+    return;
+  }
   const text = m.ai_reply_text;
   if (!text || !String(text).trim()) {
     writeJson(res, 400, { ok: false, error: "no_ai_reply_text" });
@@ -285,11 +351,11 @@ async function handleOverride(req, res, id, body) {
     return;
   }
   const { rows } = await pool.query(
-    `SELECT m.id, m.customer_id, m.chat_id, m.ai_reply_text,
+    `SELECT m.id, m.ai_reply_status, m.customer_id, m.chat_id, m.ai_reply_text,
             COALESCE(NULLIF(TRIM(ch.phone), ''), '') AS chat_phone
      FROM crm_messages m
      LEFT JOIN crm_chats ch ON ch.id = m.chat_id
-     WHERE m.id = $1 AND m.ai_reply_status = 'needs_human_review'`,
+     WHERE m.id = $1`,
     [id]
   );
   if (!rows.length) {
@@ -297,6 +363,14 @@ async function handleOverride(req, res, id, body) {
     return;
   }
   const m = rows[0];
+  if (m.ai_reply_status === "legacy_archived") {
+    await logAndRespondLegacyArchivedBlocked(req, res, id, m, "override");
+    return;
+  }
+  if (m.ai_reply_status !== "needs_human_review") {
+    writeJson(res, 404, { ok: false, error: "not_found_or_not_review" });
+    return;
+  }
   const originalAi = m.ai_reply_text != null ? String(m.ai_reply_text) : "";
   const actor = await getActorLabel(req);
   const sentBy =
@@ -638,8 +712,8 @@ async function approve(mid) {
   if (req.method === "GET" && path === "/api/ai-responder/pending") {
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 200);
     try {
-      // ai_reply_status = 'needs_human_review' · los legacy_archived quedan excluidos por diseño
-      // (backlog pre-Sprint 6A archivado con scripts/archive-legacy-ai-queue.js).
+      // El drawer de revisión humana (Sprint 6B FE) consume este endpoint. Los mensajes en estado
+      // 'legacy_archived' quedan excluidos por diseño (backlog pre-Sprint 6A archivado).
       const { rows } = await pool.query(
         `SELECT id, chat_id, customer_id, ai_reply_status, ai_confidence, ai_reply_text, ai_reasoning,
                 content, created_at

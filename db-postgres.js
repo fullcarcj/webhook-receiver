@@ -255,6 +255,21 @@ async function runSchemaAndSeed() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_retiro_log_created ON ml_retiro_broadcast_log(created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_retiro_log_user ON ml_retiro_broadcast_log(ml_user_id)`,
+    `CREATE TABLE IF NOT EXISTS ml_retiro_sunday_deferred (
+      id BIGSERIAL PRIMARY KEY,
+      ml_user_id BIGINT NOT NULL,
+      buyer_id BIGINT NOT NULL,
+      order_id BIGINT NOT NULL,
+      original_slot TEXT NOT NULL,
+      target_date DATE NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      processed_at TIMESTAMPTZ,
+      CONSTRAINT chk_ml_retiro_def_slot CHECK (original_slot IN ('morning','afternoon'))
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_ml_retiro_def_key
+      ON ml_retiro_sunday_deferred (ml_user_id, buyer_id, target_date, order_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_retiro_def_pending
+      ON ml_retiro_sunday_deferred (ml_user_id, target_date) WHERE processed_at IS NULL`,
     `CREATE TABLE IF NOT EXISTS ml_message_kind_send_log (
       id BIGSERIAL PRIMARY KEY,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -3757,6 +3772,82 @@ async function wasRetiroBroadcastSentToBuyerTodaySlot(mlUserId, buyerId, slot, t
   return rows.length > 0;
 }
 
+/**
+ * Fecha civil siguiente en `tz` (para domingo → lunes).
+ */
+async function getCaracasNextCalendarDateYmd(tz) {
+  await ensureSchema();
+  const zone = tz != null && String(tz).trim() !== "" ? String(tz).trim() : "America/Caracas";
+  const { rows } = await pool.query(
+    `SELECT to_char((NOW() AT TIME ZONE $1::text)::date + 1, 'YYYY-MM-DD') AS ymd`,
+    [zone]
+  );
+  return rows[0]?.ymd || null;
+}
+
+/**
+ * Fecha civil hoy en `tz` (YYYY-MM-DD).
+ */
+async function getCaracasTodayYmd(tz) {
+  await ensureSchema();
+  const zone = tz != null && String(tz).trim() !== "" ? String(tz).trim() : "America/Caracas";
+  const { rows } = await pool.query(
+    `SELECT to_char((NOW() AT TIME ZONE $1::text)::date, 'YYYY-MM-DD') AS ymd`,
+    [zone]
+  );
+  return rows[0]?.ymd || null;
+}
+
+async function insertMlRetiroSundayDeferred(row) {
+  await ensureSchema();
+  const mlUid = Number(row.ml_user_id);
+  const bid = row.buyer_id != null ? Number(row.buyer_id) : NaN;
+  const oid = row.order_id != null ? Number(row.order_id) : NaN;
+  const sl = row.original_slot != null ? String(row.original_slot).trim().toLowerCase() : "";
+  const td = row.target_date != null ? String(row.target_date).trim() : "";
+  if (!Number.isFinite(mlUid) || mlUid <= 0 || !Number.isFinite(bid) || bid <= 0) return null;
+  if (!Number.isFinite(oid) || oid <= 0) return null;
+  if (sl !== "morning" && sl !== "afternoon") return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(td)) return null;
+  const { rows } = await pool.query(
+    `INSERT INTO ml_retiro_sunday_deferred (
+       ml_user_id, buyer_id, order_id, original_slot, target_date
+     ) VALUES ($1,$2,$3,$4,$5::date)
+     ON CONFLICT (ml_user_id, buyer_id, target_date, order_id) DO NOTHING
+     RETURNING id`,
+    [mlUid, bid, oid, sl, td]
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+async function listMlRetiroSundayDeferredPending(mlUserId, targetDateYmd, tz) {
+  await ensureSchema();
+  const mlUid = Number(mlUserId);
+  if (!Number.isFinite(mlUid) || mlUid <= 0) return [];
+  const ymd = targetDateYmd != null ? String(targetDateYmd).trim() : await getCaracasTodayYmd(tz);
+  if (!ymd) return [];
+  const { rows } = await pool.query(
+    `SELECT id, ml_user_id, buyer_id, order_id, original_slot
+     FROM ml_retiro_sunday_deferred
+     WHERE ml_user_id = $1 AND target_date = $2::date AND processed_at IS NULL
+     ORDER BY id ASC`,
+    [mlUid, ymd]
+  );
+  return rows;
+}
+
+async function markMlRetiroSundayDeferredProcessed(ids) {
+  await ensureSchema();
+  if (!Array.isArray(ids) || ids.length === 0) return 0;
+  const clean = ids.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0);
+  if (!clean.length) return 0;
+  const r = await pool.query(
+    `UPDATE ml_retiro_sunday_deferred SET processed_at = NOW() WHERE id = ANY($1::bigint[])`,
+    [clean]
+  );
+  return r.rowCount || 0;
+}
+
 async function insertMlRetiroBroadcastSent(row) {
   await ensureSchema();
   const mlUid = Number(row.ml_user_id);
@@ -4677,6 +4768,11 @@ module.exports = {
   listMlOrdersEligibleForRetiroBroadcast,
   wasRetiroBroadcastSentToBuyerTodaySlot,
   insertMlRetiroBroadcastSent,
+  getCaracasNextCalendarDateYmd,
+  getCaracasTodayYmd,
+  insertMlRetiroSundayDeferred,
+  listMlRetiroSundayDeferredPending,
+  markMlRetiroSundayDeferredProcessed,
   insertMlRetiroBroadcastLog,
   countMlAutoMessagesForBuyerToday,
   /** Cierra el pool (tests). */

@@ -1,0 +1,6 @@
+fix(salesService): importML popula total_amount_bs sin multiplicar por BCV
+
+- CH-3 ML Venezuela cotiza en VES nativo (variable mal llamada totalUsd)
+- Eliminar query BCV y calculo incorrecto totalUsd * rateApplied
+- rate = 1, rate_type = NATIVE_VES, total_amount_bs = total_amount directo
+- Ver ADR-008 regla 3

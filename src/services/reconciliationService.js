@@ -16,6 +16,11 @@ const exceptionsService = require("./exceptionsService");
  *   NIVEL 1 — monto + referencia + fecha (0–1 día) → confidence 1.00 → auto-aprobado
  *   NIVEL 2 — monto + fecha (0–2 días)             → confidence 0.85 → auto-aprobado
  *   NIVEL 3 — monto + fecha > 2 días               → confidence 0.60 → revisión manual
+ *
+ * Recordatorio WA si no hay match (entre 6 h y 24 h desde la orden): RECONCILIATION_WA_REMINDERS_ENABLED=1 (por defecto apagado).
+ *
+ * Educación “ingreso detectado en banco, envía comprobante” (L3 desde extracto): RECONCILIATION_BANK_PROOF_EDUCATION_ENABLED=1.
+ * Dedup: columna sales_orders.wa_bank_proof_education_at (ADD COLUMN IF NOT EXISTS en runtime).
  */
 
 const { pool } = require("../../db");
@@ -351,6 +356,104 @@ async function applyMatch(order, match) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WA educativo: ingreso en extracto coincide (L3) → pedir comprobante para cerrar rápido
+// ─────────────────────────────────────────────────────────────────────────────
+
+let waBankProofColumnPromise = null;
+function ensureWaBankProofEducationColumn() {
+  if (!waBankProofColumnPromise) {
+    waBankProofColumnPromise = pool
+      .query(
+        `ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS wa_bank_proof_education_at TIMESTAMPTZ`
+      )
+      .catch((err) => {
+        log.warn({ err: err.message }, "reconciliation: ALTER wa_bank_proof_education_at falló");
+      });
+  }
+  return waBankProofColumnPromise;
+}
+
+/**
+ * Solo si el match problemático viene del **banco** (hay movimiento CREDIT relacionado por monto).
+ * No enviar si el cliente ya subió algún comprobante tras crear la orden, ni si mandamos el mismo aviso hace menos de 7 días.
+ */
+async function maybeSendBankProofEducationWa(order, match) {
+  if (match.sourceType !== "bank") return;
+  if (process.env.RECONCILIATION_BANK_PROOF_EDUCATION_ENABLED !== "1") return;
+
+  await ensureWaBankProofEducationColumn();
+
+  let phone = order.customer_phone;
+  if (!phone && order.customer_id) {
+    const { rows } = await pool.query(`SELECT phone FROM customers WHERE id = $1 LIMIT 1`, [
+      order.customer_id,
+    ]);
+    phone = rows[0]?.phone;
+  }
+  if (!phone || String(phone).replace(/\D/g, "").length < 10) {
+    log.warn({ orderId: order.id }, "reconciliation: bank_proof_education sin teléfono cliente");
+    return;
+  }
+
+  const { rows: attemptRows } = await pool.query(
+    `SELECT 1 FROM payment_attempts
+     WHERE customer_id = $1 AND created_at >= $2
+     LIMIT 1`,
+    [order.customer_id, order.created_at]
+  );
+  if (attemptRows.length) {
+    log.info({ orderId: order.id }, "reconciliation: bank_proof_education omitido (ya hay comprobante WA)");
+    return;
+  }
+
+  const { rows: soRows } = await pool.query(
+    `SELECT wa_bank_proof_education_at FROM sales_orders WHERE id = $1`,
+    [order.id]
+  );
+  const last = soRows[0]?.wa_bank_proof_education_at;
+  if (last) {
+    const hours = (Date.now() - new Date(last).getTime()) / 3_600_000;
+    if (hours < 168) {
+      log.info({ orderId: order.id, hoursSince: Math.round(hours) }, "reconciliation: bank_proof_education omitido (cooldown 7d)");
+      return;
+    }
+  }
+
+  const apiKey = process.env.WASENDER_API_KEY;
+  const apiBaseUrl = process.env.WASENDER_API_BASE_URL || "https://www.wasenderapi.com";
+  if (!apiKey) return;
+
+  const totalFmt = Number(order.total_orden).toLocaleString("es-VE");
+  const amtBank = Number(match.row.amount != null ? match.row.amount : order.total_orden).toLocaleString("es-VE");
+  const text =
+    `Detectamos un ingreso en el banco por *Bs ${amtBank}* que coincide con tu orden *#${order.id}* (monto orden *Bs ${totalFmt}*).\n` +
+    `Para que la conciliación sea automática y tu pedido avance más rápido, envíanos una *foto legible del comprobante* (captura o print) por aquí.`;
+
+  try {
+    const { sendWasenderTextMessage } = require("../../wasender-client");
+    const waRes = await sendWasenderTextMessage({
+      apiKey,
+      apiBaseUrl,
+      to: `+${String(phone).replace(/\D/g, "")}`,
+      text,
+      messageType: "REMINDER",
+      customerId: order.customer_id != null ? Number(order.customer_id) : undefined,
+    });
+    if (waRes && waRes.ok) {
+      await pool.query(
+        `UPDATE sales_orders SET wa_bank_proof_education_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [order.id]
+      );
+      log.info({ orderId: order.id }, "reconciliation: bank_proof_education WA enviado");
+    } else if (waRes && waRes.status === "blocked" && waRes.reason) {
+      log.warn({ orderId: order.id, reason: waRes.reason }, "reconciliation: bank_proof_education bloqueado");
+    }
+  } catch (e) {
+    log.error({ err: e.message, orderId: order.id }, "reconciliation: bank_proof_education WA falló");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Revisión manual (L3)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -432,6 +535,10 @@ async function applyManualReview(order, match) {
       confidence:   match.score,
     }),
   ]).catch((err) => log.warn({ err: err.message }, "reconciliation: L3 logging falló (no crítico)"));
+
+  maybeSendBankProofEducationWa(order, match).catch((err) =>
+    log.warn({ err: err.message, orderId: order.id }, "reconciliation: bank_proof_education async falló")
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -456,8 +563,7 @@ async function handleNoMatch(order) {
     return;
   }
 
-  // Recordatorios deshabilitados hasta nuevo aviso.
-  // Para reactivar: RECONCILIATION_WA_REMINDERS_ENABLED=1
+  // Refuerzo por WA (comprobante): solo si RECONCILIATION_WA_REMINDERS_ENABLED=1 en el servidor.
   if (process.env.RECONCILIATION_WA_REMINDERS_ENABLED === "1" && hoursOld >= 6 && order.customer_phone) {
     // Dedup: solo enviar recordatorio si nunca se envió O si han pasado >= 6h desde el último
     const lastReminder = order.wa_payment_reminder_at
@@ -479,7 +585,7 @@ async function handleNoMatch(order) {
               apiKey,
               apiBaseUrl,
               to:   `+${String(order.customer_phone).replace(/\D/g, "")}`,
-              text: `⏳ Hola, aún no hemos recibido tu pago de la orden *#${order.id}*.\nMonto: *Bs ${totalFmt}*\nPor favor envía tu comprobante cuando puedas. 📸`,
+              text: `⏳ Hola, aún no registramos el pago de tu orden *#${order.id}*.\nMonto: *Bs ${totalFmt}*\nPara conciliar, envía una *foto legible del comprobante* (captura de pantalla o foto del print) por aquí. 📸`,
               messageType: "REMINDER",
               customerId: order.customer_id != null ? Number(order.customer_id) : undefined,
             });

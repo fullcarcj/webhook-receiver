@@ -205,12 +205,24 @@ async function listInbox(opts) {
         cc.unread_count,
         cc.ml_order_id,
         cc.assigned_to,
+        cc.status,
+        cc.sla_deadline_at,
+        cc.last_outbound_at,
         c.full_name AS customer_name,
         so.id AS order_id,
         so.payment_status::text AS payment_status,
         so.fulfillment_type,
         so.channel_id,
-        (${CHAT_STAGE_EXPR}) AS chat_stage
+        (${CHAT_STAGE_EXPR}) AS chat_stage,
+        EXISTS (
+          SELECT 1 FROM exceptions ex
+          WHERE ex.chat_id = cc.id AND ex.status = 'open'
+        ) AS has_active_exception,
+        (
+          SELECT ex2.reason FROM exceptions ex2
+          WHERE ex2.chat_id = cc.id AND ex2.status = 'open'
+          ORDER BY ex2.created_at DESC LIMIT 1
+        ) AS top_exception_reason
       ${fromExtSql}
       ORDER BY cc.last_message_at DESC NULLS LAST, cc.id DESC
       LIMIT $${limPos}
@@ -244,6 +256,14 @@ async function listInbox(opts) {
         customer_name: r.customer_name || null,
         order,
         chat_stage: r.chat_stage || "contact",
+        status: r.status != null ? String(r.status) : "UNASSIGNED",
+        sla_deadline_at:
+          r.sla_deadline_at != null ? new Date(r.sla_deadline_at).toISOString() : null,
+        last_outbound_at:
+          r.last_outbound_at != null ? new Date(r.last_outbound_at).toISOString() : null,
+        has_active_exception: r.has_active_exception === true,
+        top_exception_reason: r.top_exception_reason || null,
+        top_exception_code: r.top_exception_reason || null,
       };
     });
 
@@ -289,17 +309,44 @@ async function getInboxCounts() {
     WHERE ended_at IS NULL
   `;
 
+  // BE-2.8: acciones del bot sin revisar en las últimas 48h (supervisor backlog)
+  const unreviewedSql = `
+    SELECT COUNT(*)::int AS bot_actions_unreviewed
+    FROM bot_actions
+    WHERE is_reviewed = FALSE
+      AND created_at > NOW() - INTERVAL '48 hours'
+  `;
+
+  // BE-2.8: acciones marcadas incorrectas hoy
+  const incorrectTodaySql = `
+    SELECT COUNT(*)::int AS bot_actions_incorrect_today
+    FROM bot_actions
+    WHERE is_correct = FALSE
+      AND created_at > CURRENT_DATE
+  `;
+
   try {
-    const [{ rows }, handoffResult] = await Promise.all([
+    const [{ rows }, handoffResult, unreviewedResult, incorrectResult] = await Promise.all([
       pool.query(sql),
       pool.query(handoffSql).catch((err) => {
         // Tabla bot_handoffs aún no migrada — degradar a 0 sin error
         if (err.code === "42P01") return { rows: [{ handed_over: "0" }] };
         throw err;
       }),
+      // Columna is_reviewed añadida en db:bot-actions-review — degradar si aún no existe
+      pool.query(unreviewedSql).catch((err) => {
+        if (err.code === "42703" || err.code === "42P01") return { rows: [{ bot_actions_unreviewed: 0 }] };
+        throw err;
+      }),
+      pool.query(incorrectTodaySql).catch((err) => {
+        if (err.code === "42703" || err.code === "42P01") return { rows: [{ bot_actions_incorrect_today: 0 }] };
+        throw err;
+      }),
     ]);
-    const r = rows[0] || {};
-    const h = handoffResult.rows[0] || {};
+    const r  = rows[0] || {};
+    const h  = handoffResult.rows[0] || {};
+    const u  = unreviewedResult.rows[0] || {};
+    const ic = incorrectResult.rows[0] || {};
     return {
       total: Number(r.total) || 0,
       unread: Number(r.unread) || 0,
@@ -308,9 +355,12 @@ async function getInboxCounts() {
       dispatch: Number(r.dispatch) || 0,
       wa: Number(r.wa) || 0,
       ml: Number(r.ml) || 0,
-      // BE-1.8: contadores nuevos — compatibles con shape anterior (campos adicionales)
+      // BE-1.8
       handed_over: Number(h.handed_over) || 0,
       exceptions: await exceptionsService.countOpen().catch(() => 0),
+      // BE-2.8
+      bot_actions_unreviewed: Number(u.bot_actions_unreviewed) || 0,
+      bot_actions_incorrect_today: Number(ic.bot_actions_incorrect_today) || 0,
     };
   } catch (err) {
     throw mapSchemaError(err);

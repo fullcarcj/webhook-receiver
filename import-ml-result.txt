@@ -1,0 +1,814 @@
+[import-ml-sales] diagnóstico: {
+  "scope": "all_accounts",
+  "ml_user_id": null,
+  "ml_feedback_filter": "none",
+  "ml_active_max_days": 10,
+  "total_ml_orders": 120,
+  "matching_filter": 120,
+  "sample": [
+    {
+      "ml_user_id": "212631694",
+      "order_id": "2000016029760232",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016028780068",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016028621138",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "663838076",
+      "order_id": "2000016028456160",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000016027127288",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016026581962",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "3003017190",
+      "order_id": "2000016025884108",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016025809268",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    }
+  ]
+}
+{
+  "imported": 0,
+  "idempotent": 0,
+  "rows_in_batch": 120,
+  "errors": [
+    {
+      "ml_user_id": "212631694",
+      "order_id": "2000016029760232",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016028780068",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016028621138",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "663838076",
+      "order_id": "2000016028456160",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000016027127288",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016026581962",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "3003017190",
+      "order_id": "2000016025884108",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016025809268",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016025454372",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "663838076",
+      "order_id": "2000016025294812",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016025268452",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016021950242",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000016017360632",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016016572438",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016015396646",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016014224178",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "212631694",
+      "order_id": "2000016013539694",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "3002951516",
+      "order_id": "2000016013077790",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016013076394",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000016012246978",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016010823496",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000016009905546",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "3002951516",
+      "order_id": "2000016006922610",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016004133874",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016001794330",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "3002951516",
+      "order_id": "2000016000655200",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015999007436",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015998964722",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015998317652",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015997408394",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015997221080",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015996998132",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "3002951516",
+      "order_id": "2000015995361140",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015994472532",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015993667372",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "3003017190",
+      "order_id": "2000015992982134",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015989079206",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015985276768",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015985053236",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015984782514",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "3002951516",
+      "order_id": "2000015983558684",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015983473834",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015981681396",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015980647518",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015980439408",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015978779490",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015978729556",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015978466520",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015978188542",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015977089334",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015977089090",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015975760410",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015967252958",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015965765140",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015965275802",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015964263976",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015964115476",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015963344762",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015963007652",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015962767256",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015962603150",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "3002951516",
+      "order_id": "2000015962094332",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015962073460",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015960786198",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015960306554",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015960069726",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015959841212",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015959479532",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015951875090",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015951607922",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015945272516",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015942859506",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015940422274",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015937597698",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015937551646",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015936667216",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015936305012",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015934789902",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015934699370",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015934585752",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015927162934",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015926079232",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015925279098",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "3002951516",
+      "order_id": "2000015924987234",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015924391930",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015922973044",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015922790710",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "3002951516",
+      "order_id": "2000015922375424",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015922131484",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015921814762",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015921528796",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015921342692",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "663838076",
+      "order_id": "2000015921033070",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015913276370",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015912357744",
+      "message": "id inválido",
+      "code": "BAD_REQUEST"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015912341148",
+      "message": "id inválido",
+      "code": "BAD_REQUEST"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015912238884",
+      "message": "id inválido",
+      "code": "BAD_REQUEST"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015911768582",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015911422368",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015910177716",
+      "message": "id inválido",
+      "code": "BAD_REQUEST"
+    },
+    {
+      "ml_user_id": "212631694",
+      "order_id": "2000015907698740",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015907502096",
+      "message": "id inválido",
+      "code": "BAD_REQUEST"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015907089908",
+      "message": "id inválido",
+      "code": "BAD_REQUEST"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015904876266",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015897488420",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015896785682",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015896535128",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "3002951516",
+      "order_id": "2000015894004364",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015893319174",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "212631694",
+      "order_id": "2000015892746462",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015892506510",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015890517858",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015890386098",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015890107460",
+      "message": "id inválido",
+      "code": "BAD_REQUEST"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015889283022",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015888873694",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015888452152",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015879773656",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000015879086622",
+      "message": "new row for relation \"customers\" violates check constraint \"chk_phone_format\"",
+      "code": "23514"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000015879074042",
+      "message": "null value in column \"channel_id\" of relation \"sales_orders\" violates not-null constraint",
+      "code": "23502"
+    }
+  ],
+  "ml_feedback_filter": "none",
+  "ml_active_max_days": 10,
+  "scope": "all_accounts",
+  "ml_user_id": null
+}
+[import-ml-sales] Fallos en órdenes (la fila puede haberse insertado igual si el error fue después del COMMIT): 120
+  order 2000016029760232 (ml_user 212631694): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016028780068 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016028621138 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016028456160 (ml_user 663838076): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016027127288 (ml_user 1335920698): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016026581962 (ml_user 9309737): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016025884108 (ml_user 3003017190): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016025809268 (ml_user 9309737): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016025454372 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016025294812 (ml_user 663838076): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016025268452 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016021950242 (ml_user 9309737): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016017360632 (ml_user 1335920698): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016016572438 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016015396646 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  … y 105 más

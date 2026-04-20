@@ -6,7 +6,8 @@ const { findCustomerIdByPhoneAndPersonName } = require("./customerDedupPhoneName
 
 function isSchemaMissing(err) {
   const c = err && err.code;
-  return c === "42P01" || c === "42P04" || c === "42704";
+  // 42P01 undefined_table · 42703 undefined_column · 42704 undefined_object
+  return c === "42P01" || c === "42703" || c === "42P04" || c === "42704";
 }
 
 function mapSchemaError(err) {

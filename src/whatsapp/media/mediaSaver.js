@@ -2,6 +2,7 @@
 
 const pino = require("pino");
 const { pool } = require("../../../db");
+const { applyInboundOmnichannelHook } = require("../../services/omnichannelInboundHook");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "mediaSaver" });
 
@@ -86,6 +87,15 @@ async function saveInboundMedia({
        WHERE id = $3`,
       [lastText, mediaType, chatId]
     );
+
+    // Bloque 1 · Motor omnicanal — inbound (omnichannelInboundHook); mismo client que esta transacción.
+    if (ins.rows.length) {
+      await applyInboundOmnichannelHook(client, chatId, {
+        sourceType: "wa_inbound",
+        previewText: null,
+        messageType: mediaType,
+      });
+    }
 
     await client.query("COMMIT");
     log.info(

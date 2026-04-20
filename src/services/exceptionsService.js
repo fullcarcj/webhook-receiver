@@ -74,4 +74,26 @@ async function countOpen() {
   return rows[0].n;
 }
 
-module.exports = { raise, resolve, list, countOpen };
+/**
+ * Devuelve la excepción abierta más reciente para un chat, o null si no hay.
+ * Usada en BE-2.3 (inboxService ya tiene la subquery inline, esta función es
+ * para uso puntual por chatId desde otros servicios).
+ */
+async function getActiveExceptionForChat(chatId, client = null) {
+  if (!chatId) return null;
+  const db = client || pool;
+  const { rows } = await db.query(
+    `SELECT id, reason, severity, context, created_at
+     FROM exceptions
+     WHERE chat_id = $1 AND status = 'open'
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [chatId]
+  );
+  return rows[0] || null;
+}
+
+/** Alias semántico de raise() para compatibilidad con el spec de BE-2.2. */
+const openException = raise;
+
+module.exports = { raise, openException, resolve, list, countOpen, getActiveExceptionForChat };

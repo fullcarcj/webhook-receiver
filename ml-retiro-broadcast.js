@@ -33,6 +33,8 @@
  *   ML_RETIRO_SEND_AT_WINDOW_MINUTES=8 — ventana alrededor de la hora esperada del slot
  *   ML_RETIRO_DELAY_MS=400
  *   ML_RETIRO_OPTION_ID=OTHER         — tipo B (OTHER o SEND_INVOICE_LINK; independiente de ML_POST_SALE_OPTION_ID)
+ *   ML_RETIRO_SKIP_SUNDAYS=1          — por defecto (o ausente): no envía domingo según ML_RETIRO_TIMEZONE. Pon 0 para permitir domingo (p. ej. pruebas).
+ *   ML_RETIRO_SUNDAY_DEFER_TO_MONDAY=1 — si 1 (default): en domingo encola elegibles en BD para enviar el lunes en slot mañana. Pon 0 para no encolar (solo no enviar domingo).
  *
  * Uso:
  *   ML_RETIRO_ENABLED=1 ML_RETIRO_SLOT=morning node ml-retiro-broadcast.js --all
@@ -51,6 +53,11 @@ const {
   insertMlRetiroBroadcastLog,
   insertMlMessageKindSendLog,
   wasRetiroBroadcastSentToBuyerTodaySlot,
+  getCaracasNextCalendarDateYmd,
+  getCaracasTodayYmd,
+  insertMlRetiroSundayDeferred,
+  listMlRetiroSundayDeferredPending,
+  markMlRetiroSundayDeferredProcessed,
 } = require("./db");
 
 /** Mañana: ya puede retirar el producto ofertado. */
@@ -183,6 +190,234 @@ function circularDiffMinutes(a, b) {
 }
 
 /**
+ * Día civil local en `tz` (p. ej. America/Caracas) — domingo = true.
+ * Usa `weekday: "short"` ("Sun") como comprobación principal: en algunos runtimes
+ * `formatToParts` no incluye `weekday` y antes fallábamos abierto (se enviaba en domingo).
+ * @param {string} tz IANA
+ */
+function isLocalSundayInTimezone(tz) {
+  const zone = tz != null && String(tz).trim() !== "" ? String(tz).trim() : "America/Caracas";
+  try {
+    const short = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "short" })
+      .format(new Date())
+      .trim();
+    if (short === "Sun") return true;
+
+    const longStr = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "long" })
+      .format(new Date())
+      .trim();
+    if (/^Sunday$/i.test(longStr)) return true;
+
+    const part = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "long" })
+      .formatToParts(new Date())
+      .find((p) => p.type === "weekday")?.value;
+    return part === "Sunday";
+  } catch (e) {
+    console.warn("[retiro-broadcast] isLocalSundayInTimezone: tz inválido (%s): %s", zone, e.message);
+    return false;
+  }
+}
+
+/**
+ * Si ML_RETIRO_SKIP_SUNDAYS no es "0", no se envía retiro en domingo (hora local del timezone ML).
+ */
+function shouldSkipRetiroDueToSunday(tz) {
+  if (process.env.ML_RETIRO_SKIP_SUNDAYS === "0") return false;
+  return isLocalSundayInTimezone(tz);
+}
+
+/** Si distinto de "0", los elegibles del domingo se guardan para el lunes (slot mañana). Default: activo. */
+function sundayDeferToMondayEnabled() {
+  return process.env.ML_RETIRO_SUNDAY_DEFER_TO_MONDAY !== "0";
+}
+
+/**
+ * Domingo sin envío: misma elegibilidad que el flujo normal; inserta filas para target_date = lunes.
+ * @returns {Promise<{ eligible: number, inserted: number, target_date: string|null }>}
+ */
+async function enqueueSundayDeferralsForUser(mlUserId, slot, orderStatusRaw) {
+  const mlUid = Number(mlUserId);
+  const tz = defaultTimezone();
+  const targetDate = await getCaracasNextCalendarDateYmd(tz);
+  if (!targetDate) {
+    console.warn("[retiro-broadcast] defer domingo: no se pudo calcular fecha objetivo (tz=%s).", tz);
+    return { eligible: 0, inserted: 0, target_date: null };
+  }
+  const rows = await listMlOrdersEligibleForRetiroBroadcast(
+    mlUid,
+    sinceIso(),
+    orderStatusRaw,
+    slot,
+    tz
+  );
+  const buyersSeen = new Set();
+  let inserted = 0;
+  for (const o of rows) {
+    const orderId = o.order_id != null ? Number(o.order_id) : NaN;
+    const buyerId = o.buyer_id != null ? Number(o.buyer_id) : NaN;
+    if (!Number.isFinite(orderId) || orderId <= 0 || !Number.isFinite(buyerId) || buyerId <= 0) {
+      continue;
+    }
+    if (buyersSeen.has(buyerId)) continue;
+    if (await wasRetiroBroadcastSentToBuyerTodaySlot(mlUid, buyerId, slot, tz)) continue;
+    if ((await getAutoMessageBudgetForBuyerToday(mlUid, buyerId)) <= 0) continue;
+    const newId = await insertMlRetiroSundayDeferred({
+      ml_user_id: mlUid,
+      buyer_id: buyerId,
+      order_id: orderId,
+      original_slot: slot,
+      target_date: targetDate,
+    });
+    if (newId != null) {
+      inserted++;
+      buyersSeen.add(buyerId);
+      console.log(
+        "[retiro-broadcast] domingo → cola lunes %s order_id=%s buyer_id=%s (slot orig.=%s)",
+        targetDate,
+        orderId,
+        buyerId,
+        slot
+      );
+    }
+  }
+  return { eligible: rows.length, inserted, target_date: targetDate };
+}
+
+/**
+ * Lunes (u otro día) slot mañana: envía pendientes con fecha objetivo = hoy (cola domingo).
+ * @returns {Promise<number>} cantidad enviados con éxito
+ */
+async function processSundayDeferredSendsForUser(mlUserId, tz) {
+  const mlUid = Number(mlUserId);
+  const todayYmd = await getCaracasTodayYmd(tz);
+  if (!todayYmd) return 0;
+  const pending = await listMlRetiroSundayDeferredPending(mlUid, todayYmd, tz);
+  if (!pending.length) return 0;
+  const bodies = poolForSlot("morning");
+  if (bodies.length === 0) return 0;
+  const delayMs = defaultDelayMs();
+  let sent = 0;
+  const buyersMessaged = new Set();
+  let lastPoolIndex = null;
+
+  for (const row of pending) {
+    const rowId = row.id != null ? Number(row.id) : NaN;
+    const orderId = row.order_id != null ? Number(row.order_id) : NaN;
+    const buyerId = row.buyer_id != null ? Number(row.buyer_id) : NaN;
+    if (!Number.isFinite(rowId) || rowId <= 0) continue;
+    if (!Number.isFinite(orderId) || orderId <= 0 || !Number.isFinite(buyerId) || buyerId <= 0) {
+      await markMlRetiroSundayDeferredProcessed([rowId]);
+      continue;
+    }
+
+    if (buyersMessaged.has(buyerId)) {
+      await markMlRetiroSundayDeferredProcessed([rowId]);
+      continue;
+    }
+
+    if (await wasRetiroBroadcastSentToBuyerTodaySlot(mlUid, buyerId, "morning", tz)) {
+      await markMlRetiroSundayDeferredProcessed([rowId]);
+      continue;
+    }
+
+    if ((await getAutoMessageBudgetForBuyerToday(mlUid, buyerId)) <= 0) {
+      continue;
+    }
+
+    const picked = pickRandomTemplate(bodies, lastPoolIndex);
+    lastPoolIndex = picked.index;
+    let text = applyPostSalePlaceholders(picked.template, {
+      orderId,
+      buyerId,
+      sellerId: mlUid,
+    });
+    text = String(text).trim();
+    if (text.length > MAX_OTHER) {
+      text = text.slice(0, MAX_OTHER);
+    }
+
+    const res = await sendRetiroBroadcastMessage(mlUid, orderId, buyerId, text);
+    const now = new Date().toISOString();
+
+    if (res.ok) {
+      await insertMlRetiroBroadcastLog({
+        created_at: now,
+        ml_user_id: mlUid,
+        order_id: orderId,
+        buyer_id: buyerId,
+        slot: "morning",
+        outcome: "success",
+        template_index: picked.index,
+        http_status: res.status,
+        request_path: res.path != null ? String(res.path) : null,
+        response_body: responseBodyForLog(res),
+      });
+      await insertMlMessageKindSendLog({
+        message_kind: "B",
+        ml_user_id: mlUid,
+        buyer_id: buyerId,
+        order_id: orderId,
+        outcome: "success",
+        http_status: res.status,
+        detail: "slot=morning deferred_from_sunday",
+        created_at: now,
+      });
+      await insertMlRetiroBroadcastSent({
+        ml_user_id: mlUid,
+        buyer_id: buyerId,
+        order_id: orderId,
+        slot: "morning",
+        sent_at: now,
+        http_status: res.status,
+        template_index: picked.index,
+      });
+      await markMlRetiroSundayDeferredProcessed([rowId]);
+      buyersMessaged.add(buyerId);
+      sent++;
+      console.log(
+        "[retiro-broadcast] tipo=B (cola domingo→lunes) enviado order_id=%s ml_user_id=%s",
+        orderId,
+        mlUid
+      );
+    } else {
+      await insertMlRetiroBroadcastLog({
+        created_at: now,
+        ml_user_id: mlUid,
+        order_id: orderId,
+        buyer_id: buyerId,
+        slot: "morning",
+        outcome: "api_error",
+        template_index: picked.index,
+        http_status: res.status,
+        request_path: res.path != null ? String(res.path) : null,
+        response_body: responseBodyForLog(res),
+        error_message: mlRetiroApiErrorLine(res.data) || `HTTP ${res.status}`,
+      });
+      await insertMlMessageKindSendLog({
+        message_kind: "B",
+        ml_user_id: mlUid,
+        buyer_id: buyerId,
+        order_id: orderId,
+        outcome: "api_error",
+        skip_reason: mlRetiroApiErrorLine(res.data) || `HTTP ${res.status}`,
+        http_status: res.status,
+        detail: "slot=morning deferred_from_sunday",
+        created_at: now,
+      });
+      console.warn(
+        "[retiro-broadcast] tipo=B cola domingo fallo order_id=%s HTTP %s",
+        orderId,
+        res.status
+      );
+    }
+
+    if (delayMs > 0) await sleep(delayMs);
+  }
+
+  return sent;
+}
+
+/**
  * Si ML_RETIRO_ENFORCE_SEND_AT=1 y hay HH:MM para el slot, devuelve true cuando NO debe enviarse (salir 0).
  * @param {'morning'|'afternoon'} slot
  * @param {string} tz
@@ -282,11 +517,58 @@ async function runRetiroBroadcastForUser(mlUserId, options = {}) {
     };
   }
 
-  const tz = defaultTimezone();
   const orderStatusRaw =
     options.orderStatus != null && String(options.orderStatus).trim() !== ""
       ? String(options.orderStatus).trim()
       : null;
+
+  const tz = defaultTimezone();
+
+  if (shouldSkipRetiroDueToSunday(tz)) {
+    if (sundayDeferToMondayEnabled()) {
+      const enq = await enqueueSundayDeferralsForUser(mlUid, slot, orderStatusRaw);
+      console.log(
+        "[retiro-broadcast] Domingo %s: encolados %s / elegibles %s → target_date=%s",
+        tz,
+        enq.inserted,
+        enq.eligible,
+        enq.target_date || "?"
+      );
+      return {
+        ok: true,
+        eligible: enq.eligible,
+        sent: 0,
+        failed: 0,
+        skipped_sunday: true,
+        deferred_inserted: enq.inserted,
+        deferred_target_date: enq.target_date,
+        skipped_buyer: 0,
+        skipped_auto_cap_day: 0,
+        order_status_filter: orderStatusRaw,
+        slot,
+        error: null,
+      };
+    }
+    console.log(
+      "[retiro-broadcast] Domingo (%s): sin envíos tipo B (ML_RETIRO_SKIP_SUNDAYS distinto de 0).",
+      tz
+    );
+    return {
+      ok: true,
+      eligible: 0,
+      sent: 0,
+      failed: 0,
+      skipped_sunday: true,
+      error: null,
+      order_status_filter: orderStatusRaw,
+      slot,
+    };
+  }
+
+  let deferredSent = 0;
+  if (slot === "morning" && sundayDeferToMondayEnabled()) {
+    deferredSent = await processSundayDeferredSendsForUser(mlUid, tz);
+  }
 
   const rows = await listMlOrdersEligibleForRetiroBroadcast(
     mlUid,
@@ -437,7 +719,8 @@ async function runRetiroBroadcastForUser(mlUserId, options = {}) {
   return {
     ok: true,
     eligible: rows.length,
-    sent,
+    sent: sent + deferredSent,
+    deferred_from_sunday_sent: deferredSent,
     failed,
     skipped_buyer: skippedBuyer,
     skipped_auto_cap_day: skippedAutoCapDay,
@@ -542,6 +825,30 @@ async function main() {
   }
 
   const tzLog = defaultTimezone();
+  const weekdayShort = (() => {
+    try {
+      return new Intl.DateTimeFormat("en-US", { timeZone: tzLog, weekday: "short" }).format(new Date()).trim();
+    } catch {
+      return "?";
+    }
+  })();
+  const skipSundayEnv = process.env.ML_RETIRO_SKIP_SUNDAYS;
+  console.log(
+    "[retiro-broadcast] Calendario local: tz=%s weekday=%s ML_RETIRO_SKIP_SUNDAYS=%s",
+    tzLog,
+    weekdayShort,
+    skipSundayEnv === undefined || skipSundayEnv === "" ? "(omitir domingo si weekday=Sun)" : JSON.stringify(skipSundayEnv)
+  );
+  if (shouldSkipRetiroDueToSunday(tzLog)) {
+    console.log(
+      "[retiro-broadcast] Domingo en %s: sin envío directo (ML_RETIRO_SKIP_SUNDAYS≠0).%s",
+      tzLog,
+      sundayDeferToMondayEnabled()
+        ? " Elegibles se pueden encolar para el lunes (slot mañana)."
+        : " Sin cola diferida (ML_RETIRO_SUNDAY_DEFER_TO_MONDAY=0)."
+    );
+  }
+
   const sendAtRef =
     slot === "morning" ? process.env.ML_RETIRO_MORNING_SEND_AT : process.env.ML_RETIRO_AFTERNOON_SEND_AT;
   if (sendAtRef != null && String(sendAtRef).trim() !== "") {
@@ -554,7 +861,7 @@ async function main() {
     );
   }
 
-  if (shouldSkipDueToSendAtEnforcement(slot, tzLog)) {
+  if (!shouldSkipRetiroDueToSunday(tzLog) && shouldSkipDueToSendAtEnforcement(slot, tzLog)) {
     process.exit(0);
   }
 
@@ -563,10 +870,11 @@ async function main() {
     const r = await runRetiroBroadcastForUser(uid, { orderStatus, slot });
     results.push({ ml_user_id: uid, ...r });
     console.log(
-      "[retiro-broadcast] tipo=B ml_user_id=%s eligible=%s sent=%s skipped_mismo_comprador=%s skipped_auto_cap_dia=%s failed=%s err=%s",
+      "[retiro-broadcast] tipo=B ml_user_id=%s eligible=%s sent=%s deferred_dom→lun=%s skipped_mismo_comprador=%s skipped_auto_cap_dia=%s failed=%s err=%s",
       uid,
       r.eligible,
       r.sent,
+      r.deferred_from_sunday_sent ?? r.deferred_inserted ?? 0,
       r.skipped_buyer ?? 0,
       r.skipped_auto_cap_day ?? 0,
       r.failed,
@@ -588,11 +896,16 @@ if (require.main === module) {
 module.exports = {
   runRetiroBroadcastForUser,
   sendRetiroBroadcastMessage,
+  enqueueSundayDeferralsForUser,
+  processSundayDeferredSendsForUser,
+  sundayDeferToMondayEnabled,
   RETIRO_MORNING_BODIES,
   RETIRO_AFTERNOON_BODIES,
   lookbackDays,
   parseHHMM,
   shouldSkipDueToSendAtEnforcement,
+  shouldSkipRetiroDueToSunday,
+  isLocalSundayInTimezone,
   sinceIso,
   pickRandomTemplate,
 };

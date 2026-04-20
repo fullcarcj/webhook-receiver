@@ -43,6 +43,8 @@ const {
   deleteCrmChatState,
 } = require("../../services/crmChatStates");
 const { maybeQueueInboundText } = require("../../services/aiResponder");
+const { applyInboundOmnichannelHook } = require("../../services/omnichannelInboundHook");
+const { isPhoneWhitelisted } = require("../../handlers/inboxWhitelistHandler");
 
 const msgLog = pino({ level: process.env.LOG_LEVEL || "info", name: "whatsapp_messages" });
 
@@ -248,6 +250,23 @@ async function saveMessageAndUpdateChat(client, { chatId, customerId, normalized
     if (isInboundMessagesReceived(eventType) && t === "text") {
       await maybeQueueInboundText(client, ins.rows[0].id);
     }
+
+    // Bloque 1 · Motor omnicanal — inbound (omnichannelInboundHook)
+    // Mismo client que la transacción del hub; fuera de Wasender.
+    const cont = normalized.content || {};
+    const rawPrev =
+      cont.text != null
+        ? String(cont.text)
+        : cont.body != null
+          ? String(cont.body)
+          : cont.caption != null
+            ? String(cont.caption)
+            : "";
+    await applyInboundOmnichannelHook(client, chatId, {
+      sourceType: "wa_inbound",
+      previewText: rawPrev,
+      messageType: t,
+    });
   }
 }
 
@@ -257,6 +276,15 @@ async function handle(normalized) {
     msgLog.warn(
       { fromPhone: normalized.fromPhone, messageId: normalized.messageId, eventType },
       "tipo_h_skip: fromPhone o messageId ausente"
+    );
+    return;
+  }
+
+  // Whitelist de números operativos: propietario, admin, pruebas → ignorar
+  if (await isPhoneWhitelisted(normalized.fromPhone)) {
+    msgLog.info(
+      { fromPhone: normalized.fromPhone, messageId: normalized.messageId },
+      "tipo_h_skip: número en whitelist operativo"
     );
     return;
   }

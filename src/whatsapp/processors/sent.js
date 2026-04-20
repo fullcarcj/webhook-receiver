@@ -6,6 +6,7 @@ const { upsertChat } = require("./_shared");
 const { normalizePhone } = require("../../utils/phoneNormalizer");
 
 const sentLog = pino({ level: process.env.LOG_LEVEL || "info", name: "whatsapp_sent" });
+const { applyOutboundOmnichannelHook } = require("../../services/omnichannelOutboundHook");
 
 async function handle(normalized) {
   const phone = normalized.toPhone || normalized.fromPhone;
@@ -54,11 +55,12 @@ async function handle(normalized) {
       lastMessageType: normalized.type || "text",
     });
 
-    await client.query(
+    const ins = await client.query(
       `INSERT INTO crm_messages
          (chat_id, customer_id, external_message_id, direction, type, content, sent_by, created_at)
        VALUES ($1, $2, $3, 'outbound', $4, $5::jsonb, $6, NOW())
-       ON CONFLICT (external_message_id) DO NOTHING`,
+       ON CONFLICT (external_message_id) DO NOTHING
+       RETURNING id`,
       [
         chatRow.id,
         customerId,
@@ -70,6 +72,9 @@ async function handle(normalized) {
     );
 
     await client.query("COMMIT");
+    if (ins.rows.length) {
+      await applyOutboundOmnichannelHook(pool, chatRow.id);
+    }
     sentLog.info({ phone, customerId, messageId: normalized.messageId }, "sent: mensaje saliente guardado");
   } catch (e) {
     try {

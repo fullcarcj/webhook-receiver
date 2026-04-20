@@ -214,6 +214,7 @@ async function handleListQuotations(res, url) {
       p.id,
       ${refExpr} AS reference,
       p.status,
+      p.pipeline_stage,
       p.total,
       p.fecha_vencimiento,
       p.fecha_creacion,
@@ -222,6 +223,8 @@ async function handleListQuotations(res, url) {
       p.cliente_id,
       c.full_name AS cliente_nombre,
       p.created_by,
+      p.conversion_document_id,
+      p.converted_at,
       (SELECT COUNT(*)::int FROM inventario_detallepresupuesto d WHERE d.presupuesto_id = p.id) AS items_count
     FROM inventario_presupuesto p
     LEFT JOIN customers c ON c.id = p.cliente_id
@@ -243,6 +246,7 @@ async function handleListQuotations(res, url) {
     id: r.id,
     reference: r.reference,
     status: r.status,
+    pipeline_stage: r.pipeline_stage || "lead",
     total: r.total != null ? Number(r.total) : null,
     fecha_vencimiento: r.fecha_vencimiento,
     fecha_creacion: r.fecha_creacion,
@@ -251,6 +255,8 @@ async function handleListQuotations(res, url) {
     cliente_id: r.cliente_id,
     cliente_nombre: r.cliente_nombre,
     created_by: r.created_by,
+    conversion_document_id: r.conversion_document_id || null,
+    converted_at: r.converted_at || null,
     items_count: r.items_count != null ? Number(r.items_count) : 0,
   }));
 
@@ -541,6 +547,101 @@ async function handleInboxQuotationRequest(req, res, url) {
         presupuesto: { ...header, reference },
         items: det.rows,
       });
+      return true;
+    }
+
+    // ─── PATCH /api/inbox/quotations/:id/convert (Bloque 4) ─────────────────────
+    // Marca la cotización como convertida, registra el documento formal (obligatorio).
+    const convertMatch = pathname.match(/^\/api\/inbox\/quotations\/(\d+)\/convert$/);
+    if (convertMatch && req.method === "PATCH") {
+      const pId = Number(convertMatch[1]);
+      let body;
+      try { body = await parseJsonBody(req); } catch (_) {
+        writeJson(res, 400, { error: "invalid_json" }); return true;
+      }
+      const docId =
+        body.document_id != null && String(body.document_id).trim() !== ""
+          ? String(body.document_id).trim().slice(0, 200)
+          : null;
+      if (!docId) {
+        writeJson(res, 400, {
+          error: "bad_request",
+          message: "document_id es obligatorio (N° de orden, referencia de pago, nota de entrega, etc.)",
+        });
+        return true;
+      }
+      const note =
+        body.note != null && String(body.note).trim() !== ""
+          ? String(body.note).trim().slice(0, 2000)
+          : null;
+      const uid = user.userId != null ? Number(user.userId) : null;
+      const { rows: cur } = await pool.query(
+        `SELECT id, status, channel_id FROM inventario_presupuesto WHERE id = $1`, [pId]
+      );
+      if (!cur.length) {
+        writeJson(res, 404, { error: "not_found" }); return true;
+      }
+      const allowedFrom = ["sent", "approved", "draft"];
+      if (!allowedFrom.includes(cur[0].status)) {
+        writeJson(res, 409, {
+          error: "conflict",
+          message: `No se puede convertir una cotización en estado '${cur[0].status}'.`,
+          current_status: cur[0].status,
+        });
+        return true;
+      }
+      await pool.query(
+        `UPDATE inventario_presupuesto
+         SET status                 = 'converted',
+             pipeline_stage         = 'converted',
+             conversion_document_id = $1,
+             conversion_note        = $2,
+             converted_at           = NOW(),
+             converted_by           = $3,
+             updated_at             = NOW()
+         WHERE id = $4`,
+        [docId, note, uid, pId]
+      );
+      const ref = buildReference(cur[0].channel_id, pId);
+      writeJson(res, 200, {
+        ok: true,
+        id: pId,
+        reference: ref,
+        status: "converted",
+        pipeline_stage: "converted",
+        conversion_document_id: docId,
+      });
+      return true;
+    }
+
+    // ─── PATCH /api/inbox/quotations/:id/stage (Bloque 4 · Kanban) ──────────────
+    const stageMatch = pathname.match(/^\/api\/inbox\/quotations\/(\d+)\/stage$/);
+    if (stageMatch && req.method === "PATCH") {
+      const pId = Number(stageMatch[1]);
+      let body;
+      try { body = await parseJsonBody(req); } catch (_) {
+        writeJson(res, 400, { error: "invalid_json" }); return true;
+      }
+      const VALID_STAGES = ["lead", "quoted", "negotiating", "accepted", "converted", "lost"];
+      const stage =
+        body.pipeline_stage != null ? String(body.pipeline_stage).trim().toLowerCase() : "";
+      if (!VALID_STAGES.includes(stage)) {
+        writeJson(res, 400, {
+          error: "bad_request",
+          message: `pipeline_stage inválido. Valores: ${VALID_STAGES.join(", ")}`,
+        });
+        return true;
+      }
+      const { rowCount } = await pool.query(
+        `UPDATE inventario_presupuesto
+         SET pipeline_stage = $1, updated_at = NOW()
+         WHERE id = $2`,
+        [stage, pId]
+      );
+      if (!rowCount) {
+        writeJson(res, 404, { error: "not_found" }); return true;
+      }
+      writeJson(res, 200, { ok: true, id: pId, pipeline_stage: stage });
       return true;
     }
 

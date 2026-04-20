@@ -192,7 +192,7 @@ const { handleAdminPanel } = require("./src/routes/adminPanel");
 const { handleWmsTestPage } = require("./src/routes/wmsTestPage");
 const { handleLotsApiRequest } = require("./src/routes/lots");
 const { handleWalletApiRequest } = require("./src/routes/wallet");
-const { handleCrmApiPreflight } = require("./src/middleware/crmApiCors");
+const { handleCrmApiPreflight, applyCrmApiCorsHeaders } = require("./src/middleware/crmApiCors");
 const { handleVehicleApiRequest } = require("./src/handlers/vehicleApiHandler");
 const { handlePurchaseApiRequest } = require("./src/handlers/purchaseApiHandler");
 const { handleSalesApiRequest } = require("./src/handlers/salesApiHandler");
@@ -220,6 +220,7 @@ const {
   setValveSpecs, getValveSpecs, findValveEquivalences,
   bulkImport: catalogBulkImport,
 } = require("./src/services/compatibilityService");
+const { writeProductDetailHttp } = require("./src/services/productCatalogDetailService");
 const salesService = require("./src/services/salesService");
 const { refreshSettings } = require("./src/services/priceEngineService");
 const { expirePendingRequests } = require("./src/services/priceApprovalService");
@@ -228,10 +229,12 @@ const { handleCustomerHistoryRequest } = require("./src/handlers/customerHistory
 const { handleCustomerLoyaltyRoutes, handleCrmLoyaltyEarnRequest } = require("./src/handlers/customerLoyalty");
 const { handleCustomersApiRequest } = require("./src/routes/customers");
 const { handleChatApiRequest } = require("./src/handlers/chatApiHandler");
+const { handleInboxOmnichannelRequest } = require("./src/handlers/inboxOmnichannelHandler");
 const { handleInboxApiRequest } = require("./src/handlers/inboxApiHandler");
 const { handleInboxIdentityRequest } = require("./src/handlers/inboxIdentityHandler");
 const { handleInboxMlQuestionRequest } = require("./src/handlers/inboxMlQuestionHandler");
 const { handleInboxQuotationRequest } = require("./src/handlers/inboxQuotationHandler");
+const { handleWhitelistRequest } = require("./src/handlers/inboxWhitelistHandler");
 const { handleMenuApiRequest } = require("./src/handlers/menuApiHandler");
 const { handleStatsApiRequest } = require("./src/handlers/statsApiHandler");
 const { handleProviderApiRequest } = require("./src/handlers/providerApiHandler");
@@ -1254,6 +1257,19 @@ function scheduleTopicFetchFromWebhook(body) {
                       const answeredId = await upsertMlQuestionAnswered(answeredRow);
                       if (answeredId != null) {
                         await deleteMlQuestionPending(row.ml_question_id);
+                        setImmediate(() => {
+                          (async () => {
+                            try {
+                              const { syncAnsweredMlQuestionToCrm } = require("./src/services/mlInboxBridge");
+                              await syncAnsweredMlQuestionToCrm(answeredRow);
+                            } catch (eSync) {
+                              console.error(
+                                "[mlInboxBridge] syncAnsweredMlQuestionToCrm (webhook answered)",
+                                eSync.message || eSync
+                              );
+                            }
+                          })();
+                        });
                       }
                     }
                   } else if (isQuestionUnansweredStatus(row.ml_status)) {
@@ -2390,6 +2406,15 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── GET /api/products/:sku/detail (Bloque 3 · La Lupita — alias de /api/catalog/products/.../detail)
+  if (req.method === "GET") {
+    const mProdAlias = url.pathname.match(/^\/api\/products\/([^/]+)\/detail\/?$/);
+    if (mProdAlias) {
+      const handled = await writeProductDetailHttp(res, decodeURIComponent(mProdAlias[1]));
+      if (handled) return;
+    }
+  }
+
   // ── /api/catalog/* ─────────────────────────────────────────────────────────
   // GET endpoints: públicos (sin auth). POST/DELETE: requieren admin secret.
   if (url.pathname.startsWith("/api/catalog")) {
@@ -2461,6 +2486,13 @@ const server = http.createServer(async (req, res) => {
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           res.end(JSON.stringify({ ok: true, results: data, total: data.length }));
           return;
+        }
+
+        // GET /api/catalog/products/:sku/detail (Bloque 3 · La Lupita — ERP + WMS + compat)
+        const mDetail = pn.match(/^\/api\/catalog\/products\/([^/]+)\/detail\/?$/);
+        if (mDetail) {
+          const handled = await writeProductDetailHttp(res, decodeURIComponent(mDetail[1]));
+          if (handled) return;
         }
 
         // GET /api/catalog/products/:sku/compatibility
@@ -3074,6 +3106,328 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  /** Débitos bancarios sin categoría contable — tabla + formulario (POST vía /api/finance/debits/:id/justify). */
+  if (
+    req.method === "GET" &&
+    (url.pathname === "/debit-justifications" || url.pathname === "/debit-justifications/")
+  ) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><meta charset=\"utf-8\"><title>Justificación débitos</title><p>Define <code>ADMIN_SECRET</code> y reinicia.</p>");
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><meta charset=\"utf-8\"><title>Justificación débitos</title><p>Acceso denegado. Usa <code>/debit-justifications?k=TU_CLAVE</code>.</p>");
+      return;
+    }
+    const financialService = require("./src/services/financialService");
+    let payload;
+    try {
+      payload = await financialService.getUnjustifiedDebits({
+        from: url.searchParams.get("from") || null,
+        to: url.searchParams.get("to") || null,
+        limit: Math.min(Math.max(parseInt(url.searchParams.get("limit") || "100", 10), 1), 200),
+      });
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, ...payload }));
+      return;
+    }
+    let categories;
+    try {
+      categories = (await financialService.getCategories()).categories || [];
+    } catch (e) {
+      categories = [];
+    }
+    const catOptions = categories
+      .map(
+        (c) =>
+          `<option value="${Number(c.id)}">${escapeHtml(String(c.name))} (${escapeHtml(String(c.type || ""))})</option>`
+      )
+      .join("");
+    const rowsHtml = (payload.debits || [])
+      .map((r) => {
+        const sid = Number(r.id);
+        return `<tr data-id="${sid}">
+  <td>${sid}</td>
+  <td class="muted">${escapeHtml(String(r.tx_date != null ? r.tx_date : "—"))}</td>
+  <td style="font-weight:600">Bs ${escapeHtml(Number(r.amount_bs).toLocaleString("es-VE"))}</td>
+  <td>${escapeHtml(String(r.description || "—"))}</td>
+  <td class="muted">${escapeHtml(String(r.reference_number || "—"))}</td>
+  <td>${Number(r.days_without_justification) || 0} d</td>
+  <td>
+    <form class="justify-form" style="display:flex;flex-wrap:wrap;gap:0.35rem;align-items:flex-start">
+      <select name="expense_category_id" required style="max-width:11rem;font-size:0.72rem">
+        <option value="">— Categoría —</option>
+        ${catOptions}
+      </select>
+      <input type="text" name="justification_note" placeholder="Nota (opcional)" style="max-width:10rem;font-size:0.72rem"/>
+      <select name="justified_by" required style="font-size:0.72rem">
+        <option value="Javier">Javier</option>
+        <option value="Jesus">Jesus</option>
+        <option value="Sebastian">Sebastian</option>
+      </select>
+      <button type="submit" style="font-size:0.72rem;cursor:pointer">Justificar</button>
+    </form>
+  </td>
+</tr>`;
+      })
+      .join("");
+    const kJson = JSON.stringify(k);
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Justificación de débitos bancarios</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 2rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.25rem; }
+    p.lead { color: #71767b; font-size: 0.85rem; margin: 0.25rem 0 0.75rem; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.76rem; }
+    th, td { border: 1px solid #38444d; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top; }
+    th { background: #1e2732; font-size: 0.74rem; white-space: nowrap; }
+    tr:nth-child(even) td { background: #192734; }
+    .muted { color: #8b98a5; font-size: 0.75rem; }
+    a { color: #1d9bf0; text-decoration: none; }
+    button { background: #1d9bf0; color: #fff; border: none; border-radius: 4px; padding: 0.25rem 0.5rem; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <h1>Justificación de movimientos bancarios (débitos)</h1>
+  <p class="lead">
+    ${payload.total_count} sin justificar · total acumulado Bs ${Number(payload.total_bs || 0).toLocaleString("es-VE")} ·
+    <a href="/debit-justifications?k=${encodeURIComponent(k)}&format=json">JSON</a> ·
+    <a href="/statements?k=${encodeURIComponent(k)}">Extractos</a> ·
+    <a href="/payment-attempts?k=${encodeURIComponent(k)}&today=1">Comprobantes</a>
+  </p>
+  <table>
+    <thead><tr>
+      <th>id</th><th>fecha</th><th>monto Bs</th><th>descripción</th><th>referencia</th><th>días</th><th>justificar</th>
+    </tr></thead>
+    <tbody>${rowsHtml || '<tr><td colspan="7" style="text-align:center;color:#71767b;padding:1rem">Sin débitos pendientes.</td></tr>'}</tbody>
+  </table>
+  <script>
+(function () {
+  var K = ${kJson};
+  document.querySelectorAll(".justify-form").forEach(function (form) {
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var tr = form.closest("tr");
+      var id = tr && tr.getAttribute("data-id");
+      if (!id) return;
+      var fd = new FormData(form);
+      var btn = form.querySelector("button[type=submit]");
+      var cat = fd.get("expense_category_id");
+      if (!cat) { alert("Elegí una categoría."); return; }
+      btn.disabled = true;
+      fetch("/api/finance/debits/" + encodeURIComponent(id) + "/justify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Admin-Secret": K },
+        body: JSON.stringify({
+          expense_category_id: parseInt(cat, 10),
+          justification_note: (fd.get("justification_note") || "").trim() || undefined,
+          justified_by: fd.get("justified_by")
+        })
+      }).then(function (r) {
+        return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+      }).then(function (x) {
+        if (x.ok) { location.reload(); return; }
+        var msg = (x.body && (x.body.error && x.body.error.message)) || JSON.stringify(x.body);
+        alert("Error " + x.status + ": " + msg);
+      }).catch(function (e) {
+        alert(e.message || "Error de red");
+      }).then(function () { btn.disabled = false; });
+    });
+  });
+})();
+  </script>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
+  /** Panel métricas finanzas + conciliación (mismo período que GET /api/stats/*). */
+  if (req.method === "GET" && (url.pathname === "/finance-metrics" || url.pathname === "/finance-metrics/")) {
+    const adminSecret = process.env.ADMIN_SECRET;
+    const k = url.searchParams.get("k") || url.searchParams.get("secret");
+    if (!adminSecret) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><meta charset=\"utf-8\"><title>Métricas</title><p>Define <code>ADMIN_SECRET</code> y reinicia.</p>");
+      return;
+    }
+    if (k !== adminSecret) {
+      res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+      res.end("<!DOCTYPE html><meta charset=\"utf-8\"><title>Métricas</title><p>Acceso denegado. Usa <code>/finance-metrics?k=TU_CLAVE</code>.</p>");
+      return;
+    }
+    const { resolvePeriod } = require("./src/utils/statsHelpers");
+    const statsService = require("./src/services/statsService");
+    let period = url.searchParams.get("period") || "month";
+    if (!["today", "week", "month", "year", "custom"].includes(period)) period = "month";
+    let start;
+    let end;
+    let label;
+    try {
+      if (period === "custom") {
+        const from = url.searchParams.get("from");
+        const to = url.searchParams.get("to");
+        ({ start, end, label } = resolvePeriod("custom", from, to));
+      } else {
+        ({ start, end, label } = resolvePeriod(period, null, null));
+      }
+    } catch (e) {
+      ({ start, end, label } = resolvePeriod("month", null, null));
+      period = "month";
+    }
+    let recon;
+    let cash;
+    let rt;
+    let overview;
+    try {
+      [recon, cash, rt, overview] = await Promise.all([
+        statsService.getReconciliationStats({ start, end, label }),
+        statsService.getCashflow({ start, end, label }),
+        statsService.getRealtime(),
+        statsService.getOverview(),
+      ]);
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<!DOCTYPE html><meta charset="utf-8"><p>${escapeHtml(e.message)}</p>`);
+      return;
+    }
+    if (url.searchParams.get("format") === "json") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        ok: true,
+        period: label,
+        reconciliation: recon,
+        cashflow: cash,
+        realtime: rt,
+        overview,
+      }));
+      return;
+    }
+    const bs = cash.by_currency && cash.by_currency.BS ? cash.by_currency.BS : { ingresos: 0, egresos: 0, balance: 0 };
+    const q = (p) =>
+      `/finance-metrics?k=${encodeURIComponent(k)}&period=${p}`;
+    const fromQ = url.searchParams.get("from") || "";
+    const toQ = url.searchParams.get("to") || "";
+    const qCustom =
+      fromQ && toQ
+        ? `/finance-metrics?k=${encodeURIComponent(k)}&period=custom&from=${encodeURIComponent(fromQ)}&to=${encodeURIComponent(toQ)}`
+        : null;
+    const periodNav = ["today", "week", "month", "year"]
+      .map((p) => {
+        const active = period === p ? "font-weight:700;color:#1d9bf0" : "color:#8b98a5";
+        return `<a href="${q(p)}" style="${active}">${p}</a>`;
+      })
+      .join(" · ");
+    const srcRows = (recon.by_source || [])
+      .map((r) => `<tr><td>${escapeHtml(String(r.source))}</td><td>${r.count}</td><td>${r.pct}%</td></tr>`)
+      .join("");
+    const lvlRows = (recon.by_level || [])
+      .map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${r.count}</td><td>${r.pct}%</td></tr>`)
+      .join("");
+    const chartRows = (recon.chart || [])
+      .slice(-14)
+      .map((r) => `<tr><td class="muted">${escapeHtml(String(r.date))}</td><td>${r.auto}</td><td>${r.manual}</td></tr>`)
+      .join("");
+    const ov = overview.today || {};
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta http-equiv="refresh" content="120"/>
+  <title>Métricas finanzas y conciliación</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, sans-serif; margin: 1.25rem; background: #0f1419; color: #e7e9ea; }
+    h1 { font-size: 1.2rem; margin: 0 0 0.35rem; }
+    .muted { color: #8b98a5; font-size: 0.8rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.65rem; margin: 0.75rem 0; }
+    .card { background: #192734; border: 1px solid #38444d; border-radius: 8px; padding: 0.5rem 0.65rem; }
+    .card b { display: block; font-size: 1.05rem; }
+    .card span { font-size: 0.72rem; color: #8b98a5; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.76rem; margin: 0.5rem 0; }
+    th, td { border: 1px solid #38444d; padding: 0.25rem 0.35rem; text-align: left; }
+    th { background: #1e2732; }
+    a { color: #1d9bf0; text-decoration: none; }
+    h2 { font-size: 0.95rem; margin: 1rem 0 0.35rem; color: #c4cfda; }
+  </style>
+</head>
+<body>
+  <h1>Métricas · Finanzas y conciliación</h1>
+  <p class="muted">Período seleccionado: <strong>${escapeHtml(String(label))}</strong> · auto-refresh 120s ·
+    ${periodNav} ·
+    ${qCustom ? `<a href="${escapeHtml(qCustom)}">custom (${escapeHtml(fromQ)}…${escapeHtml(toQ)})</a>` : '<span class="muted">custom: añade <code>&amp;period=custom&amp;from=YYYY-MM-DD&amp;to=YYYY-MM-DD</code></span>'} ·
+    <a href="/finance-metrics?k=${encodeURIComponent(k)}&period=${encodeURIComponent(period)}&format=json">JSON</a> ·
+    <a href="/debit-justifications?k=${encodeURIComponent(k)}">Débitos sin justificar</a> ·
+    <a href="/payment-attempts?k=${encodeURIComponent(k)}&today=1">Comprobantes</a>
+  </p>
+
+  <h2>Hoy (overview)</h2>
+  <div class="grid">
+    <div class="card"><span>Órdenes hoy</span><b>${escapeHtml(String(ov.orders_count ?? "—"))}</b></div>
+    <div class="card"><span>Ingresos Bs (ventas)</span><b>${escapeHtml(Number(ov.revenue_bs || 0).toLocaleString("es-VE"))}</b></div>
+    <div class="card"><span>Pendiente cobro Bs</span><b>${escapeHtml(Number(ov.pending_bs || 0).toLocaleString("es-VE"))}</b></div>
+    <div class="card"><span>Órdenes vencidas pago</span><b>${escapeHtml(String(ov.overdue_orders ?? "—"))}</b></div>
+    <div class="card"><span>Conciliado auto (hoy)</span><b>${escapeHtml(String(ov.auto_reconciled ?? "—"))}</b></div>
+    <div class="card"><span>Revisión manual pend. (hoy)</span><b>${escapeHtml(String(ov.manual_pending ?? "—"))}</b></div>
+  </div>
+
+  <h2>Extractos bancarios (BS) · período</h2>
+  <div class="grid">
+    <div class="card"><span>Ingresos BS extractos</span><b>${escapeHtml(Number(bs.ingresos).toLocaleString("es-VE"))}</b></div>
+    <div class="card"><span>Egresos BS extractos</span><b>${escapeHtml(Number(bs.egresos).toLocaleString("es-VE"))}</b></div>
+    <div class="card"><span>Balance BS</span><b>${escapeHtml(Number(bs.balance).toLocaleString("es-VE"))}</b></div>
+    <div class="card"><span>Tasa última (BS/USD)</span><b>${cash.exchange_rate != null ? escapeHtml(String(cash.exchange_rate)) : "—"}</b></div>
+  </div>
+
+  <h2>Conciliación · período</h2>
+  <div class="grid">
+    <div class="card"><span>Auto matched</span><b>${recon.summary.auto_matched}</b></div>
+    <div class="card"><span>Manual review</span><b>${recon.summary.manual_review}</b></div>
+    <div class="card"><span>% auto</span><b>${recon.summary.auto_pct}%</b></div>
+    <div class="card"><span>Confianza media</span><b>${recon.avg_confidence != null ? escapeHtml(String(recon.avg_confidence)) : "—"}</b></div>
+    <div class="card"><span>Débitos sin justificar (total)</span><b>${recon.unjustified_debits.count}</b> · Bs ${escapeHtml(Number(recon.unjustified_debits.total_bs).toLocaleString("es-VE"))}</div>
+  </div>
+
+  <h2>Tiempo real (60 min / hoy)</h2>
+  <div class="grid">
+    <div class="card"><span>Órdenes 60 min</span><b>${rt.last_60min.orders}</b></div>
+    <div class="card"><span>Ingresos Bs 60 min</span><b>${escapeHtml(Number(rt.last_60min.revenue_bs).toLocaleString("es-VE"))}</b></div>
+    <div class="card"><span>Chats entrantes 60 min</span><b>${rt.last_60min.chats}</b></div>
+    <div class="card"><span>Match hoy</span><b>${rt.reconciliation_worker.matched_today}</b></div>
+    <div class="card"><span>Manual hoy</span><b>${rt.reconciliation_worker.manual_today}</b></div>
+  </div>
+
+  <h2>Por fuente (reconciliation_log)</h2>
+  <table><thead><tr><th>source</th><th>n</th><th>%</th></tr></thead><tbody>${srcRows || '<tr><td colspan="3" class="muted">Sin datos</td></tr>'}</tbody></table>
+
+  <h2>Por nivel de match</h2>
+  <table><thead><tr><th>nivel</th><th>n</th><th>%</th></tr></thead><tbody>${lvlRows || '<tr><td colspan="3" class="muted">Sin datos</td></tr>'}</tbody></table>
+
+  <h2>Serie diaria (últimos 14 días del período)</h2>
+  <table><thead><tr><th>fecha</th><th>auto</th><th>manual</th></tr></thead><tbody>${chartRows || '<tr><td colspan="3" class="muted">Sin datos</td></tr>'}</tbody></table>
+</body>
+</html>`;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
   if (
     req.method !== "GET" &&
     url.pathname.startsWith("/api/sales") &&
@@ -3171,6 +3525,19 @@ const server = http.createServer(async (req, res) => {
 
   if (await handleInboxQuotationRequest(req, res, url)) {
     return;
+  }
+
+  if (await handleInboxOmnichannelRequest(req, res, url)) {
+    return;
+  }
+
+  // Bloque 4 · Whitelist de números operativos
+  if (url.pathname.startsWith("/api/inbox/whitelist")) {
+    const whitelistPath = String(url.pathname).replace(/\/+$/, "") || "/";
+    const user = req._user;
+    if (await handleWhitelistRequest(req, res, user, whitelistPath)) {
+      return;
+    }
   }
 
   if (await handleInboxApiRequest(req, res, url)) {
@@ -7461,6 +7828,7 @@ const server = http.createServer(async (req, res) => {
   // ─── Auth endpoints (/api/auth) ─────────────────────────────────────────────
   if (url.pathname.startsWith("/api/auth")) {
     const pathname = url.pathname.replace(/\/+$/, "");
+    applyCrmApiCorsHeaders(req, res, { credentials: true });
 
     // POST /api/auth/login — sin autenticación previa
     if (req.method === "POST" && pathname === "/api/auth/login") {
@@ -7812,6 +8180,10 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
+  const slaTimerManager = require("./src/services/slaTimerManager");
+  slaTimerManager.rehydrateOnBoot(pool).catch((e) =>
+    console.error("[sla] rehydrate failed", e)
+  );
   startReconciliationWorker();
   startInventoryWorker();
   startMlStockWatcher();
@@ -7932,6 +8304,8 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Banesco JSON conexión: http://localhost:${PORT}/banesco-connection?k=TU_ADMIN_SECRET`);
     console.log(`Extractos bank_statements: http://localhost:${PORT}/statements?k=TU_ADMIN_SECRET`);
     console.log(`Comprobantes pago (tabla): http://localhost:${PORT}/payment-attempts?k=TU_ADMIN_SECRET&today=1`);
+    console.log(`Justificación débitos bancarios: http://localhost:${PORT}/debit-justifications?k=TU_ADMIN_SECRET`);
+    console.log(`Métricas finanzas/conciliación: http://localhost:${PORT}/finance-metrics?k=TU_ADMIN_SECRET`);
     console.log(`Monitor tiempo real (SSE): http://localhost:${PORT}/monitor?k=TU_ADMIN_SECRET`);
     console.log(`AI Responder (piloto): http://localhost:${PORT}/ai-responder?k=TU_ADMIN_SECRET`);
     console.log(`Acuses cambios listings: http://localhost:${PORT}/listing-change-ack?k=TU_ADMIN_SECRET`);
@@ -7981,4 +8355,23 @@ process.on("SIGTERM", () => {
   stopAiResetWorker();
   stopAiResponderWorker();
   server.close(() => process.exit(0));
+});
+
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  console.error("[unhandledRejection] Promesa rechazada sin capturar — el servidor continúa:", msg);
+});
+
+process.on("uncaughtException", (err, origin) => {
+  const msg = err instanceof Error ? err.stack || err.message : String(err);
+  const isAddrInUse = (err instanceof Error) && err.code === "EADDRINUSE";
+  if (isAddrInUse) {
+    console.error(
+      "[uncaughtException] Puerto ocupado (EADDRINUSE) — otro proceso ya usa el puerto.\n" +
+      "  Solución: cerrá el proceso anterior (tasklist | findstr node) o cambiá PORT en el entorno.\n" +
+      "  " + msg.split("\n")[0]
+    );
+    process.exit(1);
+  }
+  console.error("[uncaughtException] Excepción no capturada (%s) — el servidor continúa:", origin, msg);
 });

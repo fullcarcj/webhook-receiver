@@ -10,6 +10,7 @@ const crypto = require("crypto");
 const { pool } = require("../../db");
 const { sendWasenderTextMessage } = require("../../wasender-client");
 const { normalizePhoneToE164 } = require("../../ml-whatsapp-phone");
+const { applyOutboundOmnichannelHook } = require("./omnichannelOutboundHook");
 
 function resolveWasenderConfig() {
   const apiKey =
@@ -144,6 +145,8 @@ async function sendChatMessage(chatId, text, sentBy) {
   } finally {
     client.release();
   }
+
+  await applyOutboundOmnichannelHook(pool, cid);
 
   return { messageId: extId, ok: true };
 }

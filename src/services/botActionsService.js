@@ -4,7 +4,8 @@ const { pool } = require("../../db");
 
 /**
  * Registra una acción automática del bot para auditoría y trazabilidad.
- * Alimenta el "Log de automatización" del mockup (ADR-009).
+ * Alimenta el "Log de automatización" del mockup definido en ADR-009
+ * (docs/adr/ADR-009-handoff-bot-humano-acoplamiento.md).
  *
  * @param {Object} params
  * @param {number|null}  params.chatId
@@ -52,23 +53,53 @@ async function log({
   return res.rows[0].id;
 }
 
-async function getByChat(chatId, { limit = 50, offset = 0 } = {}) {
+const SELECT_COLS = `
+  id, chat_id, order_id, action_type, input_context, output_result,
+  provider, confidence, duration_ms, correlation_id,
+  is_reviewed, is_correct, reviewed_by, reviewed_at,
+  created_at
+`;
+
+async function getByChat(chatId, {
+  limit = 50,
+  offset = 0,
+  reviewed = null,
+  since = null,
+  actionType = null,
+} = {}) {
+  const params = [chatId];
+  const conds  = [`chat_id = $1`];
+  let p = 2;
+
+  if (reviewed !== null) {
+    conds.push(`is_reviewed = $${p++}`);
+    params.push(reviewed);
+  }
+  if (since) {
+    conds.push(`created_at >= $${p++}`);
+    params.push(since);
+  }
+  if (actionType) {
+    conds.push(`action_type = $${p++}`);
+    params.push(actionType);
+  }
+
+  params.push(Math.min(limit, 200), offset);
+
   const { rows } = await pool.query(
-    `SELECT id, chat_id, order_id, action_type, input_context, output_result,
-            provider, confidence, duration_ms, correlation_id, created_at
+    `SELECT ${SELECT_COLS}
      FROM bot_actions
-     WHERE chat_id = $1
+     WHERE ${conds.join(" AND ")}
      ORDER BY created_at DESC
-     LIMIT $2 OFFSET $3`,
-    [chatId, limit, offset]
+     LIMIT $${p++} OFFSET $${p}`,
+    params
   );
   return rows;
 }
 
 async function getByOrder(orderId, { limit = 50, offset = 0 } = {}) {
   const { rows } = await pool.query(
-    `SELECT id, chat_id, order_id, action_type, input_context, output_result,
-            provider, confidence, duration_ms, correlation_id, created_at
+    `SELECT ${SELECT_COLS}
      FROM bot_actions
      WHERE order_id = $1
      ORDER BY created_at DESC
@@ -78,4 +109,54 @@ async function getByOrder(orderId, { limit = 50, offset = 0 } = {}) {
   return rows;
 }
 
-module.exports = { log, getByChat, getByOrder };
+/**
+ * Marca una acción del bot como revisada por el supervisor (BE-2.6).
+ * @param {number} id
+ * @param {{ isCorrect: boolean, reviewedBy: number|null, note: string|null }} params
+ * @returns {Promise<boolean>} true si la fila fue actualizada
+ */
+async function review(id, { isCorrect, reviewedBy, note }, client = null) {
+  const db = client || pool;
+
+  const { rowCount } = await db.query(
+    `UPDATE bot_actions
+     SET is_reviewed = TRUE,
+         is_correct  = $1,
+         reviewed_by = $2,
+         reviewed_at = NOW()
+     WHERE id = $3`,
+    [isCorrect, reviewedBy, id]
+  );
+
+  if (rowCount > 0 && isCorrect === false && note) {
+    await db.query(
+      `UPDATE bot_actions
+       SET output_result = COALESCE(output_result, '{}'::jsonb)
+                        || jsonb_build_object('supervisor_note', $1)
+       WHERE id = $2`,
+      [note, id]
+    );
+  }
+
+  return rowCount > 0;
+}
+
+/**
+ * Cola de revisión del supervisor: acciones sin revisar en las últimas N horas.
+ * BE-2.6 / Tarea 5.
+ */
+async function listUnreviewed({ limit = 50, since = null } = {}) {
+  const sinceTs = since || new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+  const { rows } = await pool.query(
+    `SELECT ${SELECT_COLS}
+     FROM bot_actions
+     WHERE is_reviewed = FALSE
+       AND created_at >= $1
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [sinceTs, Math.min(limit, 200)]
+  );
+  return rows;
+}
+
+module.exports = { log, getByChat, getByOrder, review, listUnreviewed };

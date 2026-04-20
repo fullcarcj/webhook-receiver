@@ -22,6 +22,7 @@ const {
   getQuestionsIaAutoWindowArithmeticBreakdown,
   serializeIaAutoPendingRouteDetail,
 } = require("./ml-questions-ia-auto");
+const { syncAnsweredMlQuestionToCrm } = require("./src/services/mlInboxBridge");
 
 /**
  * @param {{ mlQuestionId: number|string, mlUserId?: number|string|null }} args
@@ -111,6 +112,11 @@ async function refreshMlQuestionFromApi(args) {
     const answeredId = await upsertMlQuestionAnswered(answeredRow);
     if (answeredId != null) {
       await deleteMlQuestionPending(qid);
+      try {
+        await syncAnsweredMlQuestionToCrm(answeredRow);
+      } catch (eSync) {
+        console.error("[ml-question-refresh] syncAnsweredMlQuestionToCrm", eSync.message || eSync);
+      }
     }
     return {
       ok: true,

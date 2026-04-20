@@ -1,0 +1,83 @@
+[import-ml-sales] diagnóstico: {
+  "scope": "all_accounts",
+  "ml_user_id": null,
+  "ml_feedback_filter": "none",
+  "ml_active_max_days": 365,
+  "total_ml_orders": 2819,
+  "matching_filter": 2819,
+  "sample": [
+    {
+      "ml_user_id": "212631694",
+      "order_id": "2000016029760232",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016028780068",
+      "feedback_sale": "positive",
+      "feedback_purchase": "positive",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016028621138",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "663838076",
+      "order_id": "2000016028456160",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "1335920698",
+      "order_id": "2000016027127288",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016026581962",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "3003017190",
+      "order_id": "2000016025884108",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    },
+    {
+      "ml_user_id": "9309737",
+      "order_id": "2000016025809268",
+      "feedback_sale": "pending",
+      "feedback_purchase": "pending",
+      "status": "confirmed"
+    }
+  ]
+}
+[import-ml-sales] Fallos en órdenes (la fila puede haberse insertado igual si el error fue después del COMMIT): 200
+  order 2000016029760232 (ml_user 212631694): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016028780068 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016028621138 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016028456160 (ml_user 663838076): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016027127288 (ml_user 1335920698): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016026581962 (ml_user 9309737): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016025884108 (ml_user 3003017190): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016025809268 (ml_user 9309737): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016025454372 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016025294812 (ml_user 663838076): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016025268452 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016021950242 (ml_user 9309737): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016017360632 (ml_user 1335920698): [23514] new row for relation "customers" violates check constraint "chk_phone_format"
+  order 2000016016572438 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  order 2000016015396646 (ml_user 9309737): [23502] null value in column "channel_id" of relation "sales_orders" violates not-null constraint
+  … y 185 más

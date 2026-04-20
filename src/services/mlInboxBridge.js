@@ -6,6 +6,7 @@
  */
 
 const { pool } = require("../../db");
+const { applyInboundOmnichannelHook } = require("./omnichannelInboundHook");
 
 function q(client) {
   return client && typeof client.query === "function" ? client : pool;
@@ -23,6 +24,13 @@ function parseTs(v) {
  * @returns {Promise<{ chatId: number|null, isNew: boolean }>}
  */
 async function upsertMlQuestionChat(questionRow, client) {
+  // Whitelist operativo: si el número del comprador está en la lista, ignorar
+  if (questionRow && questionRow.buyer_phone) {
+    const { isPhoneWhitelisted } = require("../handlers/inboxWhitelistHandler");
+    if (await isPhoneWhitelisted(questionRow.buyer_phone)) {
+      return { chatId: null, isNew: false, skipped: "whitelist" };
+    }
+  }
   const db = q(client);
   const mlQid = Number(questionRow.ml_question_id);
   if (!Number.isFinite(mlQid) || mlQid <= 0) {
@@ -99,7 +107,7 @@ async function upsertMlQuestionChat(questionRow, client) {
     chatId = Number(ins.rows[0].id);
   }
 
-  await db.query(
+  const insQ = await db.query(
     `INSERT INTO crm_messages (
        chat_id, external_message_id, direction, type, content,
        sent_by, is_read, created_at
@@ -110,6 +118,15 @@ async function upsertMlQuestionChat(questionRow, client) {
      ON CONFLICT (external_message_id) DO NOTHING`,
     [chatId, `ml_q_${mlQid}`, JSON.stringify({ text: qtext }), lastAt]
   );
+
+  // Bloque 1 · Motor omnicanal — inbound (omnichannelInboundHook)
+  if (insQ.rowCount > 0) {
+    await applyInboundOmnichannelHook(db, chatId, {
+      sourceType: "ml_question",
+      previewText: qtext,
+      messageType: "text",
+    });
+  }
 
   if (Number.isFinite(buyerId) && buyerId > 0) {
     try {
@@ -239,7 +256,7 @@ async function upsertMlMessageChat(messageRow, client) {
     chatId = Number(ins.rows[0].id);
   }
 
-  await db.query(
+  const insM = await db.query(
     `INSERT INTO crm_messages (
        chat_id, external_message_id, direction, type, content,
        sent_by, is_read, created_at
@@ -250,6 +267,15 @@ async function upsertMlMessageChat(messageRow, client) {
      ON CONFLICT (external_message_id) DO NOTHING`,
     [chatId, `ml_msg_${mlMid}`, JSON.stringify({ text: msgText }), lastAt]
   );
+
+  // Bloque 1 · Motor omnicanal — inbound (omnichannelInboundHook)
+  if (insM.rowCount > 0) {
+    await applyInboundOmnichannelHook(db, chatId, {
+      sourceType: "ml_message",
+      previewText: msgText,
+      messageType: "text",
+    });
+  }
 
   if (buyerIdForLink != null) {
     try {
@@ -275,7 +301,126 @@ async function upsertMlMessageChat(messageRow, client) {
   return { chatId, isNew };
 }
 
+/**
+ * Tras persistir ml_questions_answered (webhook, refresh, IA auto): refleja la respuesta en
+ * crm_messages + crm_chats para que el omnicanal muestre la burbuja aunque nadie usó
+ * POST /api/inbox/.../ml-question/answer. Idempotente: no duplica si ya hay outbound con
+ * el mismo ml_question_id en content (p. ej. respuesta manual previa).
+ *
+ * @param {object} answeredRow — misma forma que usa upsertMlQuestionAnswered (answer_text, ml_question_id, …)
+ * @param {import('pg').Pool|import('pg').PoolClient|null} [client]
+ * @returns {Promise<{ ok: boolean, chat_id?: number, skipped?: string }>}
+ */
+async function syncAnsweredMlQuestionToCrm(answeredRow, client = null) {
+  const db = q(client);
+  const mlQid = Number(answeredRow && answeredRow.ml_question_id);
+  if (!Number.isFinite(mlQid) || mlQid <= 0) {
+    return { ok: false, skipped: "bad_question_id" };
+  }
+  const answerText =
+    answeredRow.answer_text != null && String(answeredRow.answer_text).trim() !== ""
+      ? String(answeredRow.answer_text).trim()
+      : "";
+  if (!answerText) {
+    return { ok: false, skipped: "empty_answer" };
+  }
+
+  let { rows: chatRows } = await db.query(
+    `SELECT id, customer_id FROM crm_chats WHERE ml_question_id = $1 LIMIT 1`,
+    [mlQid]
+  );
+
+  if (!chatRows.length) {
+    const synthetic = {
+      ml_question_id: mlQid,
+      ml_user_id:
+        answeredRow.ml_user_id != null && Number.isFinite(Number(answeredRow.ml_user_id))
+          ? Number(answeredRow.ml_user_id)
+          : null,
+      buyer_id:
+        answeredRow.buyer_id != null && Number.isFinite(Number(answeredRow.buyer_id))
+          ? Number(answeredRow.buyer_id)
+          : null,
+      item_id: answeredRow.item_id != null ? String(answeredRow.item_id) : null,
+      question_text:
+        answeredRow.question_text != null ? String(answeredRow.question_text) : "",
+      date_created: answeredRow.date_created != null ? String(answeredRow.date_created) : null,
+      notification_id:
+        answeredRow.notification_id != null ? String(answeredRow.notification_id) : null,
+      raw_json: answeredRow.raw_json != null ? String(answeredRow.raw_json) : "{}",
+    };
+    const { chatId } = await upsertMlQuestionChat(synthetic, db);
+    if (!chatId) {
+      return { ok: false, skipped: "no_chat_created" };
+    }
+    const r2 = await db.query(`SELECT id, customer_id FROM crm_chats WHERE id = $1`, [chatId]);
+    chatRows = r2.rows;
+  }
+
+  const chatId = Number(chatRows[0].id);
+  const customerId =
+    chatRows[0].customer_id != null && Number.isFinite(Number(chatRows[0].customer_id))
+      ? Number(chatRows[0].customer_id)
+      : null;
+
+  const { rows: dup } = await db.query(
+    `SELECT 1 FROM crm_messages
+     WHERE chat_id = $1
+       AND direction = 'outbound'
+       AND (
+         (content->>'ml_question_id') IS NOT NULL
+         AND (content->>'ml_question_id')::bigint = $2::bigint
+       )
+     LIMIT 1`,
+    [chatId, mlQid]
+  );
+  if (dup.length) {
+    await db.query(
+      `UPDATE crm_chats SET
+         last_message_text = $1,
+         last_message_at = NOW(),
+         ml_question_answered_at = COALESCE(ml_question_answered_at, NOW()),
+         updated_at = NOW()
+       WHERE id = $2`,
+      [answerText.slice(0, 5000), chatId]
+    );
+    return { ok: true, chat_id: chatId, skipped: "outbound_already_exists" };
+  }
+
+  const extId = `ml_out_sync_${mlQid}`;
+  await db.query(
+    `INSERT INTO crm_messages (
+       chat_id, customer_id, direction, type,
+       content, sent_by, external_message_id, is_read, created_at
+     ) VALUES (
+       $1, $2, 'outbound', 'text',
+       jsonb_build_object(
+         'text', $3::text,
+         'ml_question_id', $4::bigint,
+         'answer_source', 'ml_sync'
+       ),
+       'mercadolibre_sync', $5, TRUE, NOW()
+     )
+     ON CONFLICT (external_message_id) DO NOTHING`,
+    [chatId, customerId, answerText, mlQid, extId]
+  );
+
+  await db.query(
+    `UPDATE crm_chats SET
+       source_type = 'ml_message',
+       last_message_text = $1,
+       last_message_at = NOW(),
+       ml_question_answered_at = COALESCE(ml_question_answered_at, NOW()),
+       updated_at = NOW()
+     WHERE id = $2`,
+    [answerText.slice(0, 5000), chatId]
+  );
+
+  return { ok: true, chat_id: chatId };
+}
+
 module.exports = {
   upsertMlQuestionChat,
   upsertMlMessageChat,
+  syncAnsweredMlQuestionToCrm,
 };

@@ -1,0 +1,8 @@
+docs(prompts): modulo unificado de ventas -> /workspace · spec FE 100% identico al mockup
+
+- Ruta /workspace (nueva) en lugar de /ventas/modulo
+- Responsive real mismo URL (breakpoints 1400/1100/768)
+- Sidebar ERP heredado del (features)/layout.tsx, RETINTADO con paleta del mockup via selectores scopeados a body.workspace-page (no global)
+- Columna .nav de 260px del mockup eliminada; .webapp-body pasa a 380px 1fr 360px
+- Modal despacho y calificacion quedan con datos demo del HTML (cablear despues)
+- Fase A: UI pixel-perfect con mocks; Fase B: cablear /api/inbox + /api/crm/chats

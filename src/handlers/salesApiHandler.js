@@ -13,6 +13,9 @@ const exceptionsService  = require("../services/exceptionsService");
 const botHandoffsService = require("../services/botHandoffsService");
 const supervisorService  = require("../services/supervisorService");
 const { resolveCustomer } = require("../services/resolveCustomer");
+const sseBroker          = require("../realtime/sseBroker");
+const slaTimerManager    = require("../services/slaTimerManager");
+const { transition: smTransition, EVENTS: SM_EVENTS } = require("../services/crmChatStateMachine");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info", name: "salesApi" });
 
@@ -570,9 +573,9 @@ async function handleSalesApiRequest(req, res, url) {
       return true;
     }
 
-    // ─── BE-1.6 · POST /api/sales/chats/:chatId/take-over ─────────────────────
-    // Vendedor toma una conversación que estaba en manos del bot.
-    // Requiere tabla bot_handoffs (npm run db:bot-handoffs).
+    // ─── BE-1.6 · POST /api/sales/chats/:chatId/take-over (D2 · ADR-009) ────────
+    // Vendedor toma una conversación del bot.
+    // Orden estricto: state machine primero → bot_handoffs → COMMIT → SSE/SLA post-commit.
     const takeOverMatch = pathname.match(/^\/api\/sales\/chats\/(\d+)\/take-over$/);
     if (takeOverMatch && req.method === "POST") {
       if (!await requireAdminOrPermission(req, res, "ventas")) return true;
@@ -582,46 +585,97 @@ async function handleSalesApiRequest(req, res, url) {
         writeJson(res, 400, { error: "invalid_json" }); return true;
       }
       const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 500) || null : null;
-      const user = req._authUser || null;
+      const user   = req._authUser || null;
       const userId = user?.id ?? null;
+      if (!userId) {
+        writeJson(res, 401, { error: "UNAUTHORIZED" }); return true;
+      }
 
       const client = await pool.connect();
+      let deadlineOut = null;
+      let handoffId   = null;
+      let agentName   = `Agente ${userId}`;
       try {
         await client.query("BEGIN");
 
-        const chatRow = await client.query("SELECT id FROM crm_chats WHERE id = $1", [chatId]);
-        if (!chatRow.rowCount) {
+        // Bloqueo pesimista + lectura del estado actual
+        const { rows: chatRows } = await client.query(
+          `SELECT * FROM crm_chats WHERE id = $1 FOR UPDATE`,
+          [chatId]
+        );
+        if (!chatRows.length) {
           await client.query("ROLLBACK");
           writeJson(res, 404, { error: "chat_not_found" }); return true;
         }
+        const chat = chatRows[0];
 
-        const active = await client.query(
-          "SELECT id, to_user_id FROM bot_handoffs WHERE chat_id = $1 AND ended_at IS NULL",
-          [chatId]
+        // Previene que un vendedor tome dos chats simultáneos en PENDING_RESPONSE
+        const { rows: busyRows } = await client.query(
+          `SELECT COUNT(*)::int AS n FROM crm_chats
+           WHERE assigned_to = $1 AND status = 'PENDING_RESPONSE' AND id <> $2`,
+          [userId, chatId]
         );
-        if (active.rowCount > 0) {
+        if (Number(busyRows[0].n) >= 1) {
           await client.query("ROLLBACK");
           writeJson(res, 409, {
-            error: "handoff_already_active",
-            message: `Chat ya tomado por usuario ${active.rows[0].to_user_id}`,
-            existing_handoff_id: active.rows[0].id,
+            error: "PENDING_SLOT_BUSY",
+            message: "Debes responder o liberar tu conversación actual antes de tomar una nueva.",
           }); return true;
         }
 
-        const insert = await client.query(
+        // State machine primero (acepta UNASSIGNED, RE_OPENED, ATTENDED)
+        let tr;
+        try {
+          tr = smTransition(chat, SM_EVENTS.TAKE, { userId });
+        } catch (e) {
+          await client.query("ROLLBACK");
+          writeJson(res, 409, {
+            error: "INVALID_TRANSITION",
+            message: "Este chat no se puede tomar en su estado actual.",
+            current_status: chat.status,
+          }); return true;
+        }
+
+        // Aplicar resultado de state machine
+        await client.query(
+          `UPDATE crm_chats
+           SET status = $1, assigned_to = $2, sla_deadline_at = $3, updated_at = NOW()
+           WHERE id = $4`,
+          [tr.nextStatus, tr.assignedTo, tr.slaDeadlineAt, chatId]
+        );
+        deadlineOut = tr.slaDeadlineAt;
+
+        // Verificar que no haya handoff activo (integridad — cubre carreras de red)
+        const { rows: hRows } = await client.query(
+          `SELECT id, to_user_id FROM bot_handoffs WHERE chat_id = $1 AND ended_at IS NULL`,
+          [chatId]
+        );
+        if (hRows.length > 0) {
+          await client.query("ROLLBACK");
+          writeJson(res, 409, {
+            error: "handoff_already_active",
+            message: `Chat ya tomado por usuario ${hRows[0].to_user_id}`,
+            existing_handoff_id: hRows[0].id,
+          }); return true;
+        }
+
+        // Nombre del agente para mensaje system
+        const { rows: uRows } = await client.query(
+          `SELECT COALESCE(NULLIF(TRIM(full_name),''), NULLIF(TRIM(username),''), 'Agente') AS n
+           FROM users WHERE id = $1`, [userId]
+        );
+        if (uRows.length) agentName = uRows[0].n;
+
+        // Insertar bot_handoff
+        const { rows: hInsert } = await client.query(
           `INSERT INTO bot_handoffs (chat_id, from_bot, to_user_id, reason)
            VALUES ($1, TRUE, $2, $3)
            RETURNING id, started_at`,
           [chatId, userId, reason]
         );
+        handoffId = hInsert[0].id;
 
-        // Nombre del agente para mensaje system en crm_messages
-        let agentName = `Agente ${userId ?? "?"}`;
-        if (userId) {
-          const uRow = await client.query("SELECT full_name FROM users WHERE id = $1", [userId]);
-          if (uRow.rowCount) agentName = uRow.rows[0].full_name || agentName;
-        }
-
+        // Mensaje de auditoría en crm_messages (DB, dentro de tx — no es Wasender)
         await client.query(
           `INSERT INTO crm_messages (chat_id, type, content, created_at)
            VALUES ($1, 'system', $2, NOW())`,
@@ -629,66 +683,105 @@ async function handleSalesApiRequest(req, res, url) {
         );
 
         await client.query("COMMIT");
-        writeJson(res, 200, {
-          data: {
-            handoff_id: insert.rows[0].id,
-            chat_id: chatId,
-            taken_by: { id: userId, name: agentName },
-            started_at: insert.rows[0].started_at,
-          },
-        });
       } catch (err) {
-        await client.query("ROLLBACK");
-        // Tabla bot_handoffs aún no migrada
+        try { await client.query("ROLLBACK"); } catch (_) { /* ignore */ }
         if (err.code === "42P01") {
-          writeJson(res, 503, {
-            error: "schema_missing",
-            detail: "Ejecutar: npm run db:bot-handoffs",
-          }); return true;
+          writeJson(res, 503, { error: "schema_missing", detail: "npm run db:bot-handoffs" });
+          return true;
         }
-        throw err;
+        logger.error({ err }, "take_over");
+        writeJson(res, 500, { error: "internal_error" }); return true;
       } finally {
         client.release();
       }
+
+      // Post-commit: SSE + SLA (fuera de tx, no críticos si fallan)
+      if (deadlineOut) slaTimerManager.schedule(chatId, deadlineOut);
+      sseBroker.broadcast("chat_taken", { chat_id: chatId, user_id: userId, user_name: agentName });
+      sseBroker.broadcast("clear_notification", { chat_id: chatId });
+      sseBroker.broadcast("sla_started", {
+        chat_id:     chatId,
+        deadline_at: deadlineOut instanceof Date ? deadlineOut.toISOString() : String(deadlineOut),
+      });
+
+      writeJson(res, 200, {
+        data: {
+          handoff_id:    handoffId,
+          chat_id:       chatId,
+          taken_by:      { id: userId, name: agentName },
+          status:        "PENDING_RESPONSE",
+          sla_deadline_at: deadlineOut instanceof Date ? deadlineOut.toISOString() : deadlineOut,
+        },
+      });
       return true;
     }
 
-    // ─── BE-1.7 · POST /api/sales/chats/:chatId/return-to-bot ─────────────────
+    // ─── BE-1.7 · POST /api/sales/chats/:chatId/return-to-bot (D2 · ADR-009) ───
     // Cierra el handoff activo y devuelve la conversación al bot.
-    // Política: cualquier usuario con permiso 'ventas' puede devolver (no solo quien tomó).
+    // Solo desde PENDING_RESPONSE. Cualquier vendedor con permiso puede devolver.
     const returnToBotMatch = pathname.match(/^\/api\/sales\/chats\/(\d+)\/return-to-bot$/);
     if (returnToBotMatch && req.method === "POST") {
       if (!await requireAdminOrPermission(req, res, "ventas")) return true;
       const chatId = Number(returnToBotMatch[1]);
-      const user = req._authUser || null;
+      const user   = req._authUser || null;
       const userId = user?.id ?? null;
 
       const client = await pool.connect();
+      let handoffId = null;
+      let agentName = `Agente ${userId ?? "?"}`;
       try {
         await client.query("BEGIN");
 
-        const active = await client.query(
-          "SELECT id FROM bot_handoffs WHERE chat_id = $1 AND ended_at IS NULL",
+        const { rows: chatRows } = await client.query(
+          `SELECT * FROM crm_chats WHERE id = $1 FOR UPDATE`,
           [chatId]
         );
-        if (!active.rowCount) {
+        if (!chatRows.length) {
           await client.query("ROLLBACK");
-          writeJson(res, 404, {
-            error: "handoff_not_found",
-            message: "No hay handoff activo para este chat",
+          writeJson(res, 404, { error: "chat_not_found" }); return true;
+        }
+        const chat = chatRows[0];
+
+        // Solo PENDING_RESPONSE puede devolver (D2 · ADR-009)
+        if (chat.status !== "PENDING_RESPONSE") {
+          await client.query("ROLLBACK");
+          writeJson(res, 400, {
+            error: "HANDOFF_INVALID_STATE",
+            message: `Solo se puede devolver un chat en PENDING_RESPONSE (actual: ${chat.status})`,
+            current_status: chat.status,
           }); return true;
         }
 
-        const handoffId = active.rows[0].id;
+        // Aplicar transición directamente (cualquier vendedor puede devolver, no solo el asignado)
         await client.query(
-          "UPDATE bot_handoffs SET ended_at = NOW() WHERE id = $1",
-          [handoffId]
+          `UPDATE crm_chats
+           SET status = 'UNASSIGNED', assigned_to = NULL, sla_deadline_at = NULL, updated_at = NOW()
+           WHERE id = $1`,
+          [chatId]
         );
 
-        let agentName = `Agente ${userId ?? "?"}`;
+        // Cerrar bot_handoff activo
+        const { rows: hRows } = await client.query(
+          `UPDATE bot_handoffs
+           SET ended_at = NOW(), ended_by = $2
+           WHERE chat_id = $1 AND ended_at IS NULL
+           RETURNING id`,
+          [chatId, userId]
+        );
+        if (!hRows.length) {
+          // Sin handoff activo el bot ya tenía control — continuar de todas formas
+          logger.warn({ chatId }, "return_to_bot: no hay handoff activo pero chat estaba PENDING_RESPONSE");
+        } else {
+          handoffId = hRows[0].id;
+        }
+
+        // Nombre del agente
         if (userId) {
-          const uRow = await client.query("SELECT full_name FROM users WHERE id = $1", [userId]);
-          if (uRow.rowCount) agentName = uRow.rows[0].full_name || agentName;
+          const { rows: uRows } = await client.query(
+            `SELECT COALESCE(NULLIF(TRIM(full_name),''), NULLIF(TRIM(username),''), 'Agente') AS n
+             FROM users WHERE id = $1`, [userId]
+          );
+          if (uRows.length) agentName = uRows[0].n;
         }
 
         await client.query(
@@ -698,26 +791,30 @@ async function handleSalesApiRequest(req, res, url) {
         );
 
         await client.query("COMMIT");
-        writeJson(res, 200, {
-          data: {
-            handoff_id: handoffId,
-            chat_id: chatId,
-            returned_by: { id: userId, name: agentName },
-            ended_at: new Date().toISOString(),
-          },
-        });
       } catch (err) {
-        await client.query("ROLLBACK");
+        try { await client.query("ROLLBACK"); } catch (_) { /* ignore */ }
         if (err.code === "42P01") {
-          writeJson(res, 503, {
-            error: "schema_missing",
-            detail: "Ejecutar: npm run db:bot-handoffs",
-          }); return true;
+          writeJson(res, 503, { error: "schema_missing", detail: "npm run db:bot-handoffs" });
+          return true;
         }
-        throw err;
+        logger.error({ err }, "return_to_bot");
+        writeJson(res, 500, { error: "internal_error" }); return true;
       } finally {
         client.release();
       }
+
+      // Post-commit: cancelar SLA + SSE
+      slaTimerManager.cancel(chatId);
+      sseBroker.broadcast("chat_released", { chat_id: chatId });
+
+      writeJson(res, 200, {
+        data: {
+          handoff_id:  handoffId,
+          chat_id:     chatId,
+          returned_by: { id: userId, name: agentName },
+          ended_at:    new Date().toISOString(),
+        },
+      });
       return true;
     }
 
@@ -846,9 +943,50 @@ async function handleSalesApiRequest(req, res, url) {
     return true;
   }
 
-  // ─── GET /api/sales/chats/:chatId/handoff-status ────────────────────────────
+  // ─── GET /api/sales/chats/:chatId/bot-actions (BE-2.1 / Tarea 2) ────────────
+  const chatBotActionsMatch = pathname.match(/^\/api\/sales\/chats\/(\d+)\/bot-actions$/);
+  if (chatBotActionsMatch && req.method === "GET") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const chatId     = Number(chatBotActionsMatch[1]);
+    const limit      = Math.min(Number(url.searchParams.get("limit")  || "50"), 200);
+    const offset     = Number(url.searchParams.get("offset") || "0");
+    const actionType = url.searchParams.get("action_type") || null;
+    const sinceRaw   = url.searchParams.get("since") || null;
+    const reviewedRaw = url.searchParams.get("reviewed");
+    const reviewed   = reviewedRaw === "true" ? true : reviewedRaw === "false" ? false : null;
+    let since = null;
+    if (sinceRaw) {
+      const d = new Date(sinceRaw);
+      if (Number.isNaN(d.getTime())) {
+        writeJson(res, 400, { error: "bad_request", message: "since debe ser ISO timestamp" });
+        return true;
+      }
+      since = d.toISOString();
+    }
+    const rows = await botActionsService.getByChat(chatId, { limit, offset, reviewed, since, actionType });
+    writeJson(res, 200, { data: rows });
+    return true;
+  }
+
+  // ─── GET /api/sales/supervisor/bot-actions (BE-2.6 / Tarea 5) ───────────────
+  // Cola del supervisor: acciones sin revisar. ?is_reviewed=false (default) o true.
+  if (req.method === "GET" && pathname === "/api/sales/supervisor/bot-actions") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const limit     = Math.min(Number(url.searchParams.get("limit") || "50"), 200);
+    const sinceRaw  = url.searchParams.get("since") || null;
+    let since = sinceRaw ? (() => {
+      const d = new Date(sinceRaw);
+      return Number.isNaN(d.getTime()) ? null : d.toISOString();
+    })() : null;
+    const rows = await botActionsService.listUnreviewed({ limit, since });
+    writeJson(res, 200, { data: rows });
+    return true;
+  }
+
+  // ─── GET /api/sales/chats/:chatId/handoff-status (DEPRECATED · ADR-009) ─────
   const handoffStatusMatch = pathname.match(/^\/api\/sales\/chats\/(\d+)\/handoff-status$/);
   if (handoffStatusMatch && req.method === "GET") {
+    logger.warn({ path: pathname }, "DEPRECATED: handoff-status — ningún consumidor activo detectado. Remover en Sprint 5.");
     if (!await requireAdminOrPermission(req, res, "ventas")) return true;
     const chatId = Number(handoffStatusMatch[1]);
     const { active, handoff } = await botHandoffsService.isHandedOver(chatId);
@@ -865,19 +1003,62 @@ async function handleSalesApiRequest(req, res, url) {
     return true;
   }
 
-  // ─── GET /api/sales/bot-actions ─────────────────────────────────────────────
+  // ─── PATCH /api/sales/bot-actions/:id/review (BE-2.6) ───────────────────────
+  const botActionReviewMatch = pathname.match(/^\/api\/sales\/bot-actions\/(\d+)\/review$/);
+  if (botActionReviewMatch && req.method === "PATCH") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const actionId = Number(botActionReviewMatch[1]);
+    let body = {};
+    try { body = await parseJsonBody(req); } catch (_) {
+      writeJson(res, 400, { error: "invalid_json" }); return true;
+    }
+    const { isCorrect, note } = body;
+    if (typeof isCorrect !== "boolean") {
+      writeJson(res, 400, { error: "bad_request", message: "isCorrect debe ser boolean" });
+      return true;
+    }
+    const user = req._authUser || null;
+    const reviewedBy = user?.id ?? null;
+    const noteClean = typeof note === "string" ? note.trim().slice(0, 2000) || null : null;
+    const updated = await botActionsService.review(actionId, { isCorrect, reviewedBy, note: noteClean });
+    if (!updated) {
+      writeJson(res, 404, { error: "not_found" }); return true;
+    }
+    writeJson(res, 200, { data: { id: actionId, reviewed: true, is_correct: isCorrect } });
+    return true;
+  }
+
+  // ─── GET /api/sales/bot-actions (BE-2.7) ────────────────────────────────────
+  // Filtros: chat_id, order_id, reviewed (bool), since (ISO), action_type, limit, offset
   if (req.method === "GET" && pathname === "/api/sales/bot-actions") {
     if (!await requireAdminOrPermission(req, res, "ventas")) return true;
-    const chatId  = url.searchParams.get("chat_id")  ? Number(url.searchParams.get("chat_id"))  : null;
-    const orderId = url.searchParams.get("order_id") ? Number(url.searchParams.get("order_id")) : null;
-    const limit   = Math.min(Number(url.searchParams.get("limit") || "50"), 100);
-    const offset  = Number(url.searchParams.get("offset") || "0");
+    const chatId     = url.searchParams.get("chat_id")     ? Number(url.searchParams.get("chat_id"))  : null;
+    const orderId    = url.searchParams.get("order_id")    ? Number(url.searchParams.get("order_id")) : null;
+    const limit      = Math.min(Number(url.searchParams.get("limit")  || "50"), 200);
+    const offset     = Number(url.searchParams.get("offset") || "0");
+    const actionType = url.searchParams.get("action_type") || null;
+    const sinceRaw   = url.searchParams.get("since") || null;
+    const reviewedRaw = url.searchParams.get("reviewed");
+    const reviewed   = reviewedRaw === "true" ? true : reviewedRaw === "false" ? false : null;
+
+    let since = null;
+    if (sinceRaw) {
+      const d = new Date(sinceRaw);
+      if (Number.isNaN(d.getTime())) {
+        writeJson(res, 400, { error: "bad_request", message: "since debe ser ISO timestamp" });
+        return true;
+      }
+      since = d.toISOString();
+    } else {
+      since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    }
+
     if (!chatId && !orderId) {
       writeJson(res, 400, { error: "bad_request", message: "Requerido: chat_id o order_id" });
       return true;
     }
     const rows = chatId
-      ? await botActionsService.getByChat(chatId, { limit, offset })
+      ? await botActionsService.getByChat(chatId, { limit, offset, reviewed, since, actionType })
       : await botActionsService.getByOrder(orderId, { limit, offset });
     writeJson(res, 200, { data: rows });
     return true;
@@ -912,6 +1093,33 @@ async function handleSalesApiRequest(req, res, url) {
       return true;
     }
     writeJson(res, 200, { data: { id: exId, status: "resolved" } });
+    return true;
+  }
+
+  // ─── POST /api/sales/exceptions (crear excepción manual desde UI) ────────────
+  if (req.method === "POST" && pathname === "/api/sales/exceptions") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    let body = {};
+    try { body = await parseJsonBody(req); } catch (_) {
+      writeJson(res, 400, { error: "invalid_json" }); return true;
+    }
+    const { entity_type, entity_id, reason, severity, context, chat_id } = body;
+    if (!entity_type || !entity_id || !reason) {
+      writeJson(res, 400, {
+        error: "bad_request",
+        message: "Requerido: entity_type, entity_id, reason",
+      });
+      return true;
+    }
+    const id = await exceptionsService.raise({
+      entityType: entity_type,
+      entityId:   Number(entity_id),
+      reason:     String(reason).slice(0, 120),
+      severity:   severity || "medium",
+      context:    context || null,
+      chatId:     chat_id ? Number(chat_id) : null,
+    });
+    writeJson(res, 201, { data: { id } });
     return true;
   }
 

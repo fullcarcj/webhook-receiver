@@ -1,0 +1,6 @@
+fix(reconciliation): applyManualReview marca approval_status=pending (L3)
+
+- Opcion B: approval_status (workflow) en lugar de payment_status (dinero)
+- payment_status_enum no tiene pending_approval; approval_status_enum si tiene pending
+- L3: payment_status=pending (dinero sin confirmar) + approval_status=pending (espera caja)
+- Nota de decision registrada en ADR-006 seccion implementacion

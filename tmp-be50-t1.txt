@@ -1,0 +1,6 @@
+migrate(be50): backfill total_amount_bs para ordenes CH-3 ML
+
+- ML Venezuela cotiza en VES nativo: total_amount_bs = order_total_amount
+- Sobreescribe sin IS NULL (populate anterior multiplicaba por BCV incorrectamente)
+- exchange_rate_bs_per_usd = 1, rate_type = NATIVE_VES
+- Ver ADR-008 regla 5

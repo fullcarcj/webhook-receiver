@@ -1,0 +1,9 @@
+migrate(sprint1): BE-1.4 inventario_detallepresupuesto FK producto_id -> products
+
+- Pre-verificacion: falla si tabla no esta vacia (dato de prueba confirmado COUNT=1)
+- Elimina dinamicamente cualquier FK Django legada hacia inventario_producto (patron pg_constraint)
+- Agrega FK producto_id -> products(id) ON DELETE RESTRICT (el handler ya hacia JOIN products)
+- Agrega columnas canonicas nullable: sku, unit_price_usd, line_total_usd (Sprint 4 las populara)
+- Rollback documentado en sql/rollbacks/20260419_rollback_BE-1-4.sql
+- Script: npm run db:detallepresupuesto-products-fk
+- Nota: producto_id conserva nombre; renombrar a product_id (ADR-004) es Sprint 4 con el handler

@@ -1,0 +1,7 @@
+fix(reconciliation): filtrar ordenes por channel + total_amount_bs + payment_status
+
+- 3 copias del query actualizadas (runReconciliation, reconcileStatements, reconcileAttempt)
+- total_amount_bs AS total_orden (VES canonico, ADR-008) en lugar de order_total_amount
+- WHERE payment_status = pending (enum canonico, reemplaza status legacy)
+- AND channel_id IN (2, 5) whitelist CH-2 WA/redes + CH-5 fuerza ventas (ADR-007 regla 1)
+- CH-3 ML ya no es candidato: paga via MercadoPago, no transferencia bancaria

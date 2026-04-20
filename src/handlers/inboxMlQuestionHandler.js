@@ -316,6 +316,7 @@ async function handleInboxMlQuestionRequest(req, res, url) {
              source_type = 'ml_message',
              last_message_text = $1,
              last_message_at = NOW(),
+             ml_question_answered_at = NOW(),
              updated_at = NOW()
            WHERE id = $2`,
           [answerText.slice(0, 5000), chatId]

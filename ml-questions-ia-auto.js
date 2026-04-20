@@ -43,6 +43,7 @@ const {
   listMlQuestionsPending,
   hasMlQuestionsPending,
 } = require("./db");
+const { syncAnsweredMlQuestionToCrm } = require("./src/services/mlInboxBridge");
 
 /** Intervalo por defecto del poll de reintentos (1 min). */
 const DEFAULT_IA_AUTO_POLL_MS = 60_000;
@@ -702,6 +703,11 @@ async function tryQuestionIaAutoAnswer(args) {
 
   await upsertMlQuestionAnswered(answeredRow);
   await deleteMlQuestionPending(qid);
+  try {
+    await syncAnsweredMlQuestionToCrm(answeredRow);
+  } catch (eSync) {
+    console.error("[questions ia-auto] syncAnsweredMlQuestionToCrm", eSync.message || eSync);
+  }
 
   console.log("[questions ia-auto] respondida question_id=%s ml_user_id=%s plantilla=%s", qid, mlUid, index + 1);
   return { ok: true, question_id: qid, template_index: index };

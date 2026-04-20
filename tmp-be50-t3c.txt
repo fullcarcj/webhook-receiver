@@ -1,0 +1,4 @@
+fix(reconciliation): applyMatch actualiza payment_status = approved
+
+- Sin este cambio la orden quedaba status=paid pero payment_status=pending (incoherente)
+- payment_status es el campo canonico desde las migraciones de sales_channels

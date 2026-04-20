@@ -39,10 +39,18 @@ function resolveAllowOrigin(req) {
   return { value: fixed, vary: false };
 }
 
-function applyCrmApiCorsHeaders(req, res) {
+/**
+ * @param {import('http').IncomingMessage} req
+ * @param {import('http').ServerResponse} res
+ * @param {{ credentials?: boolean }} [opts]
+ */
+function applyCrmApiCorsHeaders(req, res, opts = {}) {
   const { value, vary } = resolveAllowOrigin(req);
   res.setHeader("Access-Control-Allow-Origin", value);
   if (vary) res.setHeader("Vary", "Origin");
+  if (opts.credentials) {
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  }
   res.setHeader(
     "Access-Control-Allow-Headers",
     "X-Admin-Secret, X-API-Key, Content-Type, Authorization"
@@ -53,9 +61,11 @@ function applyCrmApiCorsHeaders(req, res) {
 
 function corsCrmPath(pathname) {
   return (
+    pathname.startsWith("/api/auth") ||
     pathname.startsWith("/api/customers") ||
     pathname.startsWith("/api/sales") ||
     pathname.startsWith("/api/inbox") ||
+    pathname.startsWith("/api/realtime") ||
     pathname === "/api/crm" ||
     pathname.startsWith("/api/crm/")
   );
@@ -64,8 +74,9 @@ function corsCrmPath(pathname) {
 /** Preflight OPTIONS: 204 + cabeceras. */
 function handleCrmApiPreflight(req, res, url) {
   if (req.method !== "OPTIONS") return false;
-  if (!corsCrmPath(url.pathname || "")) return false;
-  applyCrmApiCorsHeaders(req, res);
+  const pathname = url.pathname || "";
+  if (!corsCrmPath(pathname)) return false;
+  applyCrmApiCorsHeaders(req, res, { credentials: pathname.startsWith("/api/auth") });
   res.writeHead(204);
   res.end();
   return true;

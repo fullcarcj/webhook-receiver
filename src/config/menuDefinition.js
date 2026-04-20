@@ -17,6 +17,7 @@ const ACTIVE_MODULES = [
   "fiscal",
   "compras",
   "integraciones",
+  "ai-responder",
 ];
 
 const PENDING_MODULES = ["catalog", "reportes"];
@@ -243,6 +244,28 @@ const MENU_SECTIONS = [
       { id: "cli.historial", label: "Historial por Cliente", path: "/clientes/historial", apiPath: "GET /api/customers/:id/history", minRole: "VENDEDOR_MOSTRADOR" },
       { id: "cli.cartera", label: "Cartera", path: "/clientes/cartera", apiPath: "pendingMigration", minRole: "VENDEDOR_EXTERNO", pendingMigration: true },
       { id: "cli.wallet", label: "Wallet / Fidelización", path: "/clientes/wallet", apiPath: "GET /api/wallet", minRole: "SUPERVISOR" },
+    ],
+  },
+  {
+    // Sección "AI Responder" — promueve el parche frontend augmentMenuWithSupervisor()
+    // al backend. Una vez el backend devuelva esta sección, el parche del frontend
+    // queda inactivo (tiene deduplicación por moduleKey "ai-responder").
+    id: "ai-responder",
+    label: "AI Responder",
+    icon: "activity",
+    group: "Datos Maestros & Sistema",
+    moduleKey: "ai-responder",
+    minRole: "ADMIN",
+    allowedRoles: ["SUPERUSER", "ADMIN"],
+    items: [
+      {
+        id: "ai.monitor",
+        label: "Monitor bot",
+        path: "/ai-responder/monitor",
+        icon: "activity",
+        apiPath: "GET /api/ai-responder/stats · GET /api/ai-responder/pending · GET /api/ai-responder/log",
+        minRole: "ADMIN",
+      },
     ],
   },
   {

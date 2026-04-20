@@ -8,7 +8,6 @@
 
 require("../load-env-local");
 const { pool } = require("../db");
-const { normalizePhone } = require("../src/utils/phoneNormalizer");
 
 const BATCH_SIZE = 100;
 const DELAY_MS = 200;
@@ -21,6 +20,15 @@ const COMPANY_ID = companyArg
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Cumple chk_phone_format: solo dígitos, longitud 7–15. */
+function sanitizePhone(raw) {
+  if (!raw) return null;
+  const digits = String(raw).replace(/\D/g, "");
+  if (digits.length < 7) return null;
+  if (digits.length > 15) return null;
+  return digits;
 }
 
 async function mlBuyersHasEmailColumn() {
@@ -66,17 +74,13 @@ async function findCustomerByPhoneDigits(digits, companyId) {
 
 async function processBuyerLive(b, companyId, hasEmail) {
   const bid = Number(b.buyer_id);
-  const phoneRaw = b.phone_1 || b.phone_2 || "";
-  const digits = String(phoneRaw).replace(/\D/g, "");
+  const s1 = sanitizePhone(b.phone_1);
+  const s2 = sanitizePhone(b.phone_2);
+  const digits = s1 || s2 || "";
   const email =
     hasEmail && b.email != null && String(b.email).trim() !== ""
       ? String(b.email).trim().toLowerCase()
       : null;
-
-  if (!digits && !email) {
-    console.log(`[backfill] skipped buyer=${bid} (no contact data)`);
-    return;
-  }
 
   const client = await pool.connect();
   try {
@@ -114,11 +118,8 @@ async function processBuyerLive(b, companyId, hasEmail) {
       `Comprador ML ${bid}`;
 
     const hasP2 = await columnExists(client, "customers", "phone_2");
-    const p1 = normalizePhone(phoneRaw);
-    const p2 =
-      hasP2 && b.phone_2 != null && String(b.phone_2).trim() !== ""
-        ? normalizePhone(String(b.phone_2))
-        : null;
+    const p1 = s1;
+    const p2 = hasP2 ? s2 : null;
     let ins;
     if (hasP2) {
       ins = await client.query(
@@ -179,17 +180,13 @@ async function columnExists(client, table, col) {
 
 async function processBuyerDry(b, companyId, hasEmail) {
   const bid = Number(b.buyer_id);
-  const phoneRaw = b.phone_1 || b.phone_2 || "";
-  const digits = String(phoneRaw).replace(/\D/g, "");
+  const s1 = sanitizePhone(b.phone_1);
+  const s2 = sanitizePhone(b.phone_2);
+  const digits = s1 || s2 || "";
   const email =
     hasEmail && b.email != null && String(b.email).trim() !== ""
       ? String(b.email).trim().toLowerCase()
       : null;
-
-  if (!digits && !email) {
-    console.log(`[backfill] WOULD skip buyer=${bid} (no contact data)`);
-    return;
-  }
 
   let customerId = await findCustomerByPhoneDigits(digits, companyId);
   if (customerId == null && email) {

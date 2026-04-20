@@ -86,6 +86,8 @@ ON CONFLICT DO NOTHING;
 
 INSERT INTO role_permissions (role, module, action) VALUES
   ('CONTADOR','fiscal','read'),
+  ('CONTADOR','ventas','read'),
+  ('CONTADOR','crm','read'),
   ('CONTADOR','settings','read')
 ON CONFLICT DO NOTHING;
 `;

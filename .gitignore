@@ -9,4 +9,6 @@ log.txt
 wasender-webhook.log
 scripts/assign-product-identity-errors.log
 node_modules/
+scripts/eval/nlu-eval-set.json
+scripts/eval/out/
 programa_dos/

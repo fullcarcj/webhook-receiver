@@ -233,6 +233,7 @@ const { handleInboxOmnichannelRequest } = require("./src/handlers/inboxOmnichann
 const { handleInboxApiRequest } = require("./src/handlers/inboxApiHandler");
 const { handleInboxIdentityRequest } = require("./src/handlers/inboxIdentityHandler");
 const { handleInboxMlQuestionRequest } = require("./src/handlers/inboxMlQuestionHandler");
+const { handleInboxMlOrderRequest } = require("./src/handlers/inboxMlOrderHandler");
 const { handleInboxQuotationRequest } = require("./src/handlers/inboxQuotationHandler");
 const { handleWhitelistRequest } = require("./src/handlers/inboxWhitelistHandler");
 const { handleMenuApiRequest } = require("./src/handlers/menuApiHandler");
@@ -3520,6 +3521,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleInboxMlQuestionRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleInboxMlOrderRequest(req, res, url)) {
     return;
   }
 

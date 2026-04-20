@@ -4,8 +4,9 @@ const crypto = require("crypto");
 const pino = require("pino");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const { requireAdminOrPermission } = require("../utils/authMiddleware");
-const { pool } = require("../../db");
-const { mercadoLibrePostJsonForUser } = require("../../oauth-token");
+const { pool, upsertMlListing } = require("../../db");
+const { mercadoLibrePostJsonForUser, mercadoLibreFetchForUser } = require("../../oauth-token");
+const { listingRowFromMlItemApi } = require("../../ml-listing-map");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -100,35 +101,142 @@ async function handleInboxMlQuestionRequest(req, res, url) {
 
   try {
     if (req.method === "GET" && mGet) {
+      // Buscar datos de la pregunta ML en pending Y answered (UNION)
       const { rows } = await pool.query(
         `SELECT
-           mq.id,
            mq.ml_question_id,
+           mq.ml_user_id,
            mq.item_id,
            mq.question_text,
            mq.ml_status,
            mq.ia_auto_route_detail,
-           mq.buyer_id
-         FROM ml_questions_pending mq
+           mq.buyer_id,
+           mq.date_created,
+           li.title           AS item_title,
+           li.price           AS item_price,
+           li.currency_id     AS item_currency,
+           li.status          AS item_status,
+           li.available_quantity AS item_stock,
+           li.sold_quantity   AS item_sold,
+           li.permalink       AS item_permalink,
+           li.thumbnail       AS item_thumbnail,
+           li.category_id     AS item_category
+         FROM (
+           SELECT ml_question_id, ml_user_id, item_id, question_text, ml_status,
+                  ia_auto_route_detail, buyer_id, date_created
+             FROM ml_questions_pending
+           UNION ALL
+           SELECT ml_question_id, ml_user_id, item_id, question_text, ml_status,
+                  NULL AS ia_auto_route_detail, buyer_id, date_created
+             FROM ml_questions_answered
+         ) mq
          JOIN crm_chats cc ON cc.ml_question_id = mq.ml_question_id
+         LEFT JOIN ml_listings li ON li.item_id = mq.item_id
          WHERE cc.id = $1
+         ORDER BY mq.ml_question_id DESC
          LIMIT 1`,
         [chatId]
       );
       if (!rows.length) {
-        writeJson(res, 200, null);
+        // Sin pregunta vinculada: devolver datos mínimos del chat para no perder item_id
+        const { rows: chatRows } = await pool.query(
+          `SELECT ml_question_id FROM crm_chats WHERE id = $1`, [chatId]
+        );
+        if (!chatRows.length || chatRows[0].ml_question_id == null) {
+          writeJson(res, 200, null);
+          return true;
+        }
+        // Tiene ml_question_id pero no hay fila en questions → devolver estructura vacía
+        writeJson(res, 200, {
+          question_id: Number(chatRows[0].ml_question_id),
+          item_id: null,
+          question_text: null,
+          ml_status: null,
+          buyer_id: null,
+          date_created: null,
+          ia_already_answered: false,
+          ia_detail: null,
+          item_listing: null,
+          _sync_debug: { attempted: false, reason: "no_question_row_in_db" },
+        });
         return true;
       }
       const mq = rows[0];
       const iaDetail = mq.ia_auto_route_detail;
+
+      // Si la publicación no está en ml_listings, descargarla desde ML y guardarla
+      let itemListing = mq.item_title != null
+        ? {
+            title:     mq.item_title,
+            price:     mq.item_price != null ? Number(mq.item_price) : null,
+            currency:  mq.item_currency,
+            status:    mq.item_status,
+            stock:     mq.item_stock != null ? Number(mq.item_stock) : null,
+            sold:      mq.item_sold  != null ? Number(mq.item_sold)  : null,
+            permalink: mq.item_permalink,
+            thumbnail: mq.item_thumbnail,
+            category:  mq.item_category,
+          }
+        : null;
+
+      let listingSyncDebug = null;
+      if (itemListing === null && mq.item_id && mq.ml_user_id) {
+        const itemIdStr = String(mq.item_id).trim();
+        try {
+          const mlRes = await mercadoLibreFetchForUser(
+            Number(mq.ml_user_id),
+            `/items/${itemIdStr}`
+          );
+          listingSyncDebug = { attempted: true, status: mlRes.status, ok: mlRes.ok };
+          if (mlRes.ok && mlRes.data && typeof mlRes.data === "object") {
+            const row = listingRowFromMlItemApi(Number(mq.ml_user_id), mlRes.data);
+            if (row) {
+              await upsertMlListing(row);
+              itemListing = {
+                title:     row.title,
+                price:     row.price != null ? Number(row.price) : null,
+                currency:  row.currency_id,
+                status:    row.status,
+                stock:     row.available_quantity != null ? Number(row.available_quantity) : null,
+                sold:      row.sold_quantity != null ? Number(row.sold_quantity) : null,
+                permalink: row.permalink,
+                thumbnail: row.thumbnail,
+                category:  row.category_id,
+              };
+              listingSyncDebug.saved = true;
+            } else {
+              listingSyncDebug.error = "listingRowFromMlItemApi returned null";
+            }
+          } else {
+            const snippet = mlRes.rawText ? String(mlRes.rawText).slice(0, 300) : "(sin body)";
+            listingSyncDebug.error = `ML HTTP ${mlRes.status}: ${snippet}`;
+            logger.warn(
+              { itemId: itemIdStr, mlUserId: mq.ml_user_id, status: mlRes.status, body: snippet },
+              "inbox_ml_question: no se pudo descargar la publicación desde ML"
+            );
+          }
+        } catch (fetchErr) {
+          listingSyncDebug = { attempted: true, error: fetchErr.message };
+          logger.warn(
+            { err: fetchErr.message, itemId: itemIdStr },
+            "inbox_ml_question: error descargando publicación ML"
+          );
+        }
+      } else if (itemListing === null) {
+        listingSyncDebug = { attempted: false, reason: !mq.item_id ? "no_item_id" : "no_ml_user_id" };
+      }
+
       writeJson(res, 200, {
         question_id: Number(mq.ml_question_id),
         item_id: mq.item_id,
         question_text: mq.question_text,
         ml_status: mq.ml_status,
         buyer_id: mq.buyer_id != null ? Number(mq.buyer_id) : null,
+        date_created: mq.date_created ?? null,
         ia_already_answered: iaDetail != null,
         ia_detail: iaDetail,
+        _sync_debug: listingSyncDebug,
+        item_listing: itemListing,
       });
       return true;
     }
@@ -145,15 +253,18 @@ async function handleInboxMlQuestionRequest(req, res, url) {
         body.answer_text != null && String(body.answer_text).trim() !== ""
           ? String(body.answer_text).trim()
           : "";
-      const answeredBy = body.answered_by != null ? Number(body.answered_by) : NaN;
+      // answered_by puede ser user_id numérico o rol/username string
+      const answeredByRaw = body.answered_by != null ? String(body.answered_by).trim() : "";
       if (!answerText) {
         writeJson(res, 400, { error: "bad_request", message: "answer_text requerido" });
         return true;
       }
-      if (!Number.isFinite(answeredBy) || answeredBy <= 0) {
-        writeJson(res, 400, { error: "bad_request", message: "answered_by inválido" });
+      if (!answeredByRaw) {
+        writeJson(res, 400, { error: "bad_request", message: "answered_by requerido" });
         return true;
       }
+      // Para la llamada a ML necesitamos el ml_user_id numérico de la cuenta vendedora (no del agente)
+      const answeredBy = answeredByRaw;
 
       const { rows: pendingRows } = await pool.query(
         `SELECT

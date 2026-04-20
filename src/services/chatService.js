@@ -3,6 +3,9 @@
 const { pool } = require("../../db");
 const { CustomerModel, rowToCustomerApi, mapSchemaError } = require("./crmIdentityService");
 
+/** Límite por defecto al listar mensajes (primera página / scroll); máximo 200 en handler. */
+const DEFAULT_MESSAGES_PAGE_LIMIT = 30;
+
 async function listChats({ q, limit, offset, needs_followup }) {
   const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
   const off = Math.max(Number(offset) || 0, 0);
@@ -68,20 +71,44 @@ async function getChatContext(chatId) {
       }
     }
 
-    return { chat, customer, vehicles };
+    // Orden activa vinculada al chat (misma regla que GET /api/inbox — sales_orders.conversation_id)
+    let order = null;
+    const { rows: orderRows } = await pool.query(
+      `SELECT so.id, so.payment_status::text AS payment_status, so.fulfillment_type, so.channel_id
+       FROM sales_orders so
+       WHERE so.conversation_id = $1
+         AND so.status NOT IN ('completed', 'cancelled')
+       ORDER BY so.created_at DESC NULLS LAST
+       LIMIT 1`,
+      [id]
+    );
+    if (orderRows.length) {
+      const r = orderRows[0];
+      order = {
+        id: Number(r.id),
+        payment_status: r.payment_status,
+        fulfillment_type: r.fulfillment_type,
+        channel_id: r.channel_id != null ? Number(r.channel_id) : null,
+      };
+    }
+
+    return { chat, customer, vehicles, order };
   } catch (err) {
     throw mapSchemaError(err);
   }
 }
 
-async function listMessages(chatId, { before_id, limit }) {
+async function listMessages(chatId, { before_id, limit } = {}) {
   const cid = Number(chatId);
   if (!Number.isFinite(cid) || cid <= 0) {
     const e = new Error("invalid_chat_id");
     e.code = "BAD_REQUEST";
     throw e;
   }
-  const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const lim = Math.min(
+    Math.max(Number(limit) || DEFAULT_MESSAGES_PAGE_LIMIT, 1),
+    200
+  );
   const before =
     before_id != null && String(before_id).trim() !== ""
       ? Number(before_id)
@@ -95,15 +122,44 @@ async function listMessages(chatId, { before_id, limit }) {
       params.push(before);
     }
     const limPos = params.length + 1;
-    const { rows } = await pool.query(
+    const fetchLimit = lim + 1;
+    const { rows: rawRows } = await pool.query(
       `SELECT * FROM crm_messages WHERE ${cond} ORDER BY id DESC LIMIT $${limPos}`,
-      [...params, lim]
+      [...params, fetchLimit]
     );
+    const has_more = rawRows.length > lim;
+    const rows = has_more ? rawRows.slice(0, lim) : rawRows;
     const next_before_id = rows.length ? rows[rows.length - 1].id : null;
     return {
       data: rows.reverse(),
-      meta: { limit: lim, before_id: before, next_before_id },
+      meta: {
+        limit: lim,
+        before_id: before,
+        next_before_id: has_more ? next_before_id : null,
+        has_more,
+      },
     };
+  } catch (err) {
+    throw mapSchemaError(err);
+  }
+}
+
+/**
+ * Pone unread_count en 0 (p. ej. al abrir el chat y cargar la última página).
+ * @param {number|string} chatId
+ */
+async function markChatRead(chatId) {
+  const id = Number(chatId);
+  if (!Number.isFinite(id) || id <= 0) {
+    const e = new Error("invalid_chat_id");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  try {
+    await pool.query(
+      `UPDATE crm_chats SET unread_count = 0, updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
   } catch (err) {
     throw mapSchemaError(err);
   }
@@ -181,6 +237,8 @@ module.exports = {
   listChats,
   getChatContext,
   listMessages,
+  markChatRead,
   patchChat,
   getWaStatus,
+  DEFAULT_MESSAGES_PAGE_LIMIT,
 };

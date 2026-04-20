@@ -8,8 +8,10 @@ const {
   listChats,
   getChatContext,
   listMessages,
+  markChatRead,
   patchChat,
   getWaStatus,
+  DEFAULT_MESSAGES_PAGE_LIMIT,
 } = require("../services/chatService");
 const { sendChatMessage } = require("../services/chatMessageService");
 
@@ -155,10 +157,28 @@ async function handleChatApiRequest(req, res, url) {
     if (msgMatch && req.method === "GET") {
       const before_id = url.searchParams.get("before_id");
       const limit = url.searchParams.get("limit");
+      const markReadParam = url.searchParams.get("mark_read");
+      const skipMarkRead =
+        markReadParam === "0" ||
+        markReadParam === "false" ||
+        String(markReadParam || "").toLowerCase() === "no";
+      const lim =
+        limit != null && String(limit).trim() !== ""
+          ? Number(limit)
+          : DEFAULT_MESSAGES_PAGE_LIMIT;
       const data = await listMessages(msgMatch[1], {
-        before_id: before_id != null ? Number(before_id) : undefined,
-        limit: limit != null ? Number(limit) : 50,
+        before_id: before_id != null && String(before_id).trim() !== "" ? Number(before_id) : undefined,
+        limit: lim,
       });
+      const isFirstPage =
+        before_id == null || String(before_id).trim() === "";
+      if (isFirstPage && !skipMarkRead) {
+        try {
+          await markChatRead(msgMatch[1]);
+        } catch (e) {
+          logger.warn({ err: e, chatId: msgMatch[1] }, "mark_chat_read_failed");
+        }
+      }
       writeJson(res, 200, data);
       return true;
     }

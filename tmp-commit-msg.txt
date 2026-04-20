@@ -1,8 +1,24 @@
-docs(prompts): modulo unificado de ventas -> /workspace · spec FE 100% identico al mockup
+feat(retiro+server): cola domingo→lunes, estabilidad y CORS auth
 
-- Ruta /workspace (nueva) en lugar de /ventas/modulo
-- Responsive real mismo URL (breakpoints 1400/1100/768)
-- Sidebar ERP heredado del (features)/layout.tsx, RETINTADO con paleta del mockup via selectores scopeados a body.workspace-page (no global)
-- Columna .nav de 260px del mockup eliminada; .webapp-body pasa a 380px 1fr 360px
-- Modal despacho y calificacion quedan con datos demo del HTML (cablear despues)
-- Fase A: UI pixel-perfect con mocks; Fase B: cablear /api/inbox + /api/crm/chats
+Tipo B — retiro dominical diferido al lunes:
+- ml-retiro-broadcast.js: en domingo encola elegibles con target_date
+  = día siguiente; el lunes (slot morning) los procesa antes del flujo
+  normal. Nueva variable ML_RETIRO_SUNDAY_DEFER_TO_MONDAY (default 1).
+- db-postgres.js: tabla ml_retiro_sunday_deferred (idempotente en
+  ensureSchema) + funciones insert/list/markProcessed/getNextDate/getToday.
+- sql/20260427_ml_retiro_sunday_deferred.sql: migración standalone psql.
+- package.json: scripts db:ml-retiro-sunday-deferred y dev:stable.
+
+Estabilidad servidor:
+- server.js: corregido ReferenceError "pathname is not defined" en
+  bloque /api/inbox/whitelist (variable local no disponible en el scope
+  del handler raíz → unhandledRejection por cada request → socket sin
+  respuesta → frontend bloqueado en "Ingresando..."/ECONNRESET).
+- server.js: handlers globales unhandledRejection + uncaughtException
+  para evitar caídas silenciosas. EADDRINUSE sale con exit(1) y mensaje
+  de diagnóstico claro en lugar de "el servidor CONTINÚA" engañoso.
+
+CORS /api/auth:
+- src/middleware/crmApiCors.js: /api/auth incluido en rutas CORS;
+  preflight OPTIONS responde Access-Control-Allow-Credentials: true.
+- server.js: applyCrmApiCorsHeaders con credentials en bloque /api/auth.

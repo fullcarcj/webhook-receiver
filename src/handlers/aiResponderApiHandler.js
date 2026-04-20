@@ -95,6 +95,18 @@ async function parseJsonBody(req) {
   return JSON.parse(txt);
 }
 
+/** Cuenta por action_taken desde today_log_by_action (array API) o legacy objeto. */
+function logActionCount(logByAction, action) {
+  if (!logByAction) return 0;
+  if (Array.isArray(logByAction)) {
+    const row = logByAction.find((r) => r && r.action_taken === action);
+    const n = row && Number(row.n);
+    return Number.isFinite(n) ? n : 0;
+  }
+  const n = Number(logByAction[action]);
+  return Number.isFinite(n) ? n : 0;
+}
+
 async function getStats() {
   /* today_messages.needs_review cuenta solo needs_human_review; legacy_archived queda fuera
      (backlog archivado pre–Sprint 6B · ver archive-legacy-ai-queue.js). */
@@ -124,20 +136,50 @@ async function getStats() {
   const totalPending = await pool.query(
     `SELECT COUNT(*)::int AS n FROM crm_messages WHERE ai_reply_status = 'needs_human_review'`
   );
+  const pendingQueue = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM crm_messages
+     WHERE ai_reply_status IN ('pending_ai_reply', 'pending_receipt_confirm')`
+  );
+  const lastAct = await pool.query(`
+    SELECT GREATEST(
+      (SELECT MAX(created_at) FROM ai_response_log),
+      (SELECT MAX(ai_processed_at) FROM crm_messages WHERE ai_processed_at IS NOT NULL)
+    ) AS t
+  `);
+  const tm = today.rows[0] || {};
+  const aiResponderEnabled = String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
+  const lastRaw = lastAct.rows[0]?.t;
+  const lastCycleIso = lastRaw ? new Date(lastRaw).toISOString() : null;
+  const todayByStatus = {
+    ai_replied: Number(tm.auto_sent) || 0,
+    needs_human_review: Number(tm.needs_review) || 0,
+    skipped: Number(tm.skipped) || 0,
+    processing: Number(tm.processing) || 0,
+    pending: Number(tm.pending) || 0,
+  };
   // total_pending_count = COUNT(*) WHERE ai_reply_status = 'needs_human_review'. Incluye TODOS los
   // mensajes pendientes de revisión (no solo hoy). Fuente de verdad para el badge del drawer (6B FE).
   // today_messages.needs_review es distinto: solo cuenta mensajes con created_at >= CURRENT_DATE.
   return {
     ok: true,
-    ai_responder_enabled: String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1",
+    ai_responder_enabled: aiResponderEnabled,
+    /** Alias para monitor Next.js (GET /api/ai-responder/stats). */
+    enabled: aiResponderEnabled,
     force_send: isForceSend(),
     human_review_gate: isHumanReviewGateOn(),
     tipo_m_mode: "plantilla + context_line (IA no elige flujo)",
-    today_messages: today.rows[0] || {},
+    today_messages: tm,
+    /** Shape esperado por el frontend Dreams POS (useAiResponderStats). */
+    today_by_status: todayByStatus,
+    pending_count: pendingQueue.rows[0]?.n ?? 0,
+    needs_review_count: Number(tm.needs_review) || 0,
     total_pending_count: totalPending.rows[0]?.n ?? 0,
-    today_log_by_action: Object.fromEntries(logc.rows.map((r) => [r.action_taken, r.n])),
+    today_log_by_action: logc.rows,
     legacy_archived_count: legacyArchived.rows[0]?.n ?? 0,
     provider: { groq_key_ok: groqKeyOk },
+    /** Worker puede ciclar (env + GROQ); el monitor ya no asume "caído" solo por falta de last_cycle_at. */
+    worker_running: aiResponderEnabled && groqKeyOk,
+    last_cycle_at: lastCycleIso,
   };
 }
 
@@ -579,7 +621,7 @@ td.phone{font-family:ui-monospace,Consolas,monospace;font-size:.68rem;white-spac
         <span class="muted" style="font-weight:400;font-size:.72rem"><br/>↳ post-WA: ${stats.today_messages.needs_review_post_wa_fail ?? 0} · pre-envío: ${stats.today_messages.needs_review_pre_send ?? 0}</span>
       </td>
       <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b">Error / fallo WA</td>
-      <td style="border:none;font-weight:700;color:#f4212e">${stats.today_log_by_action.error ?? 0}</td>
+      <td style="border:none;font-weight:700;color:#f4212e">${logActionCount(stats.today_log_by_action, "error")}</td>
       <td style="border:none;padding:.15rem .6rem .15rem 1rem;color:#71767b">Saltados</td>
       <td style="border:none;color:#71767b">${stats.today_messages.skipped ?? 0}</td>
     </tr>

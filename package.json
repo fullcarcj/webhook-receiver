@@ -124,6 +124,7 @@
     "db:lots-management-products-patch": "node scripts/run-lot-management-products-patch.js",
     "verify:ai-responder": "node scripts/verify-ai-responder-setup.js",
     "archive:legacy-ai-queue": "node scripts/archive-legacy-ai-queue.js",
+    "test:ai-responder-legacy": "node --test test/ai-responder/legacy-archived-protection.test.js",
     "eval:nlu": "node scripts/eval-nlu-groq.js",
     "eval:nlu:smoke": "node scripts/eval-nlu-groq.js --limit=5",
     "eval:nlu:noisy": "node scripts/eval-nlu-groq.js --bucket=product_noisy --verbose",

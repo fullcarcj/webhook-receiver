@@ -46,6 +46,9 @@ function isEnabled() {
   return String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
 }
 
+// DEPRECATED 2026-04: AI_RESPONDER_CONFIDENCE_MIN no gobierna el flujo; el gate real es
+// AI_RESPONDER_FORCE_SEND (isHumanReviewGateOn). Mantenido solo por compatibilidad si alguna
+// env externa lo setea. No consumir en FE.
 function confidenceMin() {
   const n = parseInt(String(process.env.AI_RESPONDER_CONFIDENCE_MIN || "85"), 10);
   return Number.isFinite(n) ? n : 85;
@@ -299,7 +302,7 @@ async function logAiResponse(poolOrClient, row) {
         row.receipt_data ? JSON.stringify(row.receipt_data) : null,
         row.reply_text ? String(row.reply_text).slice(0, 8000) : null,
         row.confidence,
-        row.reasoning ? String(row.reasoning).slice(0, 2000) : null,
+        row.reasoning ? String(row.reasoning).slice(0, 12000) : null,
         row.provider_used || null,
         row.tokens_used || 0,
         row.action_taken,

@@ -2,7 +2,7 @@
 
 const pino = require("pino");
 const { pool } = require("../../db");
-const { requireAdminOrPermission } = require("../utils/authMiddleware");
+const { requireAdminOrPermission, verifyToken } = require("../utils/authMiddleware");
 const {
   sendAiReplyToCustomer,
   logAiResponse,
@@ -24,6 +24,15 @@ function escapeHtml(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+/** Usuario JWT (username) o `admin` si la sesión es secreto / query legacy. */
+async function getActorLabel(req) {
+  try {
+    const p = await verifyToken(req);
+    if (p && p.username) return String(p.username).trim().slice(0, 120);
+  } catch (_) {}
+  return "admin";
 }
 
 async function parseJsonBody(req) {
@@ -64,7 +73,6 @@ async function getStats() {
   return {
     ok: true,
     ai_responder_enabled: String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1",
-    confidence_min: parseInt(process.env.AI_RESPONDER_CONFIDENCE_MIN || "85", 10) || 85,
     force_send: isForceSend(),
     human_review_gate: isHumanReviewGateOn(),
     tipo_m_mode: "plantilla + context_line (IA no elige flujo)",
@@ -72,6 +80,147 @@ async function getStats() {
     today_log_by_action: Object.fromEntries(logc.rows.map((r) => [r.action_taken, r.n])),
     provider: { groq_key_ok: groqKeyOk },
   };
+}
+
+async function handleReject(req, res, id, body) {
+  const actor = await getActorLabel(req);
+  let reason = body && body.reason != null ? String(body.reason).trim() : "";
+  if (reason.length > 500) reason = reason.slice(0, 500);
+  const reasonOrNull = reason === "" ? null : reason;
+
+  const { rows } = await pool.query(
+    `SELECT m.id, m.ai_reply_status, m.customer_id, m.chat_id,
+            COALESCE(NULLIF(TRIM(ch.phone), ''), '') AS chat_phone
+     FROM crm_messages m
+     LEFT JOIN crm_chats ch ON ch.id = m.chat_id
+     WHERE m.id = $1`,
+    [id]
+  );
+  if (!rows.length) {
+    writeJson(res, 404, { ok: false, error: "not_found" });
+    return;
+  }
+  const m = rows[0];
+  if (m.ai_reply_status !== "needs_human_review") {
+    writeJson(res, 409, { ok: false, error: "invalid_state" });
+    return;
+  }
+
+  const reasoningPayload = JSON.stringify({
+    reason: reasonOrNull,
+    sent_by: actor,
+    chat_phone: m.chat_phone || null,
+  });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE crm_messages
+       SET ai_reply_status = 'human_rejected', ai_reply_updated_at = NOW()
+       WHERE id = $1`,
+      [id]
+    );
+    await logAiResponse(client, {
+      crm_message_id: Number(id),
+      customer_id: m.customer_id,
+      chat_id: m.chat_id,
+      input_text: null,
+      receipt_data: null,
+      reply_text: null,
+      confidence: null,
+      reasoning: reasoningPayload,
+      provider_used: "human",
+      tokens_used: 0,
+      action_taken: "rejected",
+      error_message: null,
+    });
+    await client.query("COMMIT");
+  } catch (e) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {}
+    throw e;
+  } finally {
+    client.release();
+  }
+
+  writeJson(res, 200, { ok: true, id: Number(id), status: "human_rejected" });
+}
+
+async function handleDraft(req, res, id, body) {
+  const actor = await getActorLabel(req);
+  const replyText = body && body.reply_text != null ? String(body.reply_text).trim() : "";
+  if (!replyText || replyText.length > 4000) {
+    writeJson(res, 400, { ok: false, error: "invalid_reply_text" });
+    return;
+  }
+
+  const { rows } = await pool.query(
+    `SELECT m.id, m.ai_reply_status, m.customer_id, m.chat_id, m.ai_reply_text,
+            COALESCE(NULLIF(TRIM(ch.phone), ''), '') AS chat_phone
+     FROM crm_messages m
+     LEFT JOIN crm_chats ch ON ch.id = m.chat_id
+     WHERE m.id = $1`,
+    [id]
+  );
+  if (!rows.length) {
+    writeJson(res, 404, { ok: false, error: "not_found" });
+    return;
+  }
+  const m = rows[0];
+  if (m.ai_reply_status !== "needs_human_review") {
+    writeJson(res, 409, { ok: false, error: "invalid_state" });
+    return;
+  }
+
+  const originalAi = m.ai_reply_text != null ? String(m.ai_reply_text) : "";
+  const reasoningPayload = JSON.stringify({
+    original_ai_text: originalAi,
+    new_draft_text: replyText,
+    sent_by: actor,
+    chat_phone: m.chat_phone || null,
+  });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE crm_messages
+       SET ai_reply_text = $1, ai_reply_updated_at = NOW()
+       WHERE id = $2`,
+      [replyText, id]
+    );
+    await logAiResponse(client, {
+      crm_message_id: Number(id),
+      customer_id: m.customer_id,
+      chat_id: m.chat_id,
+      input_text: null,
+      receipt_data: null,
+      reply_text: replyText,
+      confidence: null,
+      reasoning: reasoningPayload,
+      provider_used: "human",
+      tokens_used: 0,
+      action_taken: "draft_saved",
+      error_message: null,
+    });
+    await client.query("COMMIT");
+  } catch (e) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {}
+    throw e;
+  } finally {
+    client.release();
+  }
+
+  writeJson(res, 200, {
+    ok: true,
+    id: Number(id),
+    status: "needs_human_review",
+    ai_reply_text: replyText,
+  });
 }
 
 async function handleApprove(req, res, id) {
@@ -134,8 +283,10 @@ async function handleOverride(req, res, id, body) {
     return;
   }
   const { rows } = await pool.query(
-    `SELECT m.id, m.customer_id, m.chat_id
+    `SELECT m.id, m.customer_id, m.chat_id, m.ai_reply_text,
+            COALESCE(NULLIF(TRIM(ch.phone), ''), '') AS chat_phone
      FROM crm_messages m
+     LEFT JOIN crm_chats ch ON ch.id = m.chat_id
      WHERE m.id = $1 AND m.ai_reply_status = 'needs_human_review'`,
     [id]
   );
@@ -144,6 +295,13 @@ async function handleOverride(req, res, id, body) {
     return;
   }
   const m = rows[0];
+  const originalAi = m.ai_reply_text != null ? String(m.ai_reply_text) : "";
+  const actor = await getActorLabel(req);
+  const sentBy =
+    body.sent_by != null && String(body.sent_by).trim() !== ""
+      ? String(body.sent_by).trim().slice(0, 200)
+      : actor;
+
   const { rows: cu } = await pool.query(`SELECT phone FROM customers WHERE id = $1`, [m.customer_id]);
   const phone = cu[0]?.phone;
   if (!phone) {
@@ -159,28 +317,48 @@ async function handleOverride(req, res, id, body) {
     writeJson(res, 502, { ok: false, error: "send_failed", detail: sendRes });
     return;
   }
-  await pool.query(
-    `UPDATE crm_messages
-     SET ai_reply_status = 'human_replied',
-         ai_reply_text = $1,
-         ai_processed_at = NOW()
-     WHERE id = $2`,
-    [replyText, id]
-  );
-  await logAiResponse(pool, {
-    crm_message_id: id,
-    customer_id: m.customer_id,
-    chat_id: m.chat_id,
-    input_text: null,
-    receipt_data: null,
-    reply_text: replyText,
-    confidence: null,
-    reasoning: body.sent_by ? `override por ${body.sent_by}` : "override",
-    provider_used: providerAuditTipoM("human_override"),
-    tokens_used: 0,
-    action_taken: "overridden",
-    error_message: null,
+
+  const reasoningPayload = JSON.stringify({
+    original_ai_text: originalAi,
+    override_text: replyText,
+    sent_by: sentBy,
+    chat_phone: m.chat_phone || null,
   });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE crm_messages
+       SET ai_reply_status = 'human_replied',
+           ai_reply_text = $1,
+           ai_processed_at = NOW()
+       WHERE id = $2`,
+      [replyText, id]
+    );
+    await logAiResponse(client, {
+      crm_message_id: Number(id),
+      customer_id: m.customer_id,
+      chat_id: m.chat_id,
+      input_text: null,
+      receipt_data: null,
+      reply_text: replyText,
+      confidence: null,
+      reasoning: reasoningPayload,
+      provider_used: providerAuditTipoM("human_override"),
+      tokens_used: 0,
+      action_taken: "overridden",
+      error_message: null,
+    });
+    await client.query("COMMIT");
+  } catch (e) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {}
+    throw e;
+  } finally {
+    client.release();
+  }
   writeJson(res, 200, { ok: true, id: Number(id) });
 }
 
@@ -494,7 +672,7 @@ async function approve(mid) {
     return true;
   }
 
-  const postMatch = path.match(/^\/api\/ai-responder\/(\d+)\/(approve|override)$/);
+  const postMatch = path.match(/^\/api\/ai-responder\/(\d+)\/(approve|override|reject|draft)$/);
   if (postMatch && req.method === "POST") {
     const id = postMatch[1];
     const action = postMatch[2];
@@ -507,9 +685,11 @@ async function approve(mid) {
     }
     try {
       if (action === "approve") await handleApprove(req, res, id);
-      else await handleOverride(req, res, id, body);
+      else if (action === "override") await handleOverride(req, res, id, body);
+      else if (action === "reject") await handleReject(req, res, id, body);
+      else await handleDraft(req, res, id, body);
     } catch (e) {
-      log.error({ err: e.message }, "ai_responder approve/override");
+      log.error({ err: e.message }, "ai_responder approve/override/reject/draft");
       writeJson(res, 500, { ok: false, error: e.message });
     }
     return true;

@@ -124,6 +124,9 @@ async function getStats() {
   const totalPending = await pool.query(
     `SELECT COUNT(*)::int AS n FROM crm_messages WHERE ai_reply_status = 'needs_human_review'`
   );
+  // total_pending_count = COUNT(*) WHERE ai_reply_status = 'needs_human_review'. Incluye TODOS los
+  // mensajes pendientes de revisión (no solo hoy). Fuente de verdad para el badge del drawer (6B FE).
+  // today_messages.needs_review es distinto: solo cuenta mensajes con created_at >= CURRENT_DATE.
   return {
     ok: true,
     ai_responder_enabled: String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1",
@@ -131,7 +134,6 @@ async function getStats() {
     human_review_gate: isHumanReviewGateOn(),
     tipo_m_mode: "plantilla + context_line (IA no elige flujo)",
     today_messages: today.rows[0] || {},
-    /** Cola real de revisión humana (sin filtro de fecha). Para badge/drawer; distinto de today_messages.needs_review (solo creados hoy). */
     total_pending_count: totalPending.rows[0]?.n ?? 0,
     today_log_by_action: Object.fromEntries(logc.rows.map((r) => [r.action_taken, r.n])),
     legacy_archived_count: legacyArchived.rows[0]?.n ?? 0,
@@ -719,6 +721,8 @@ async function approve(mid) {
     try {
       // El drawer de revisión humana (Sprint 6B FE) consume este endpoint. Los mensajes en estado
       // 'legacy_archived' quedan excluidos por diseño (backlog pre-Sprint 6A archivado).
+      // channel_id: no existe en crm_chats en el schema base; se toma de la orden más reciente con
+      // sales_orders.conversation_id = chat (omnicanal). Sin orden → NULL.
       const { rows } = await pool.query(
         `SELECT m.id, m.chat_id, m.customer_id, m.ai_reply_status, m.ai_confidence, m.ai_reply_text,
                 m.ai_reasoning, m.content, m.created_at, m.transcription,
@@ -726,16 +730,19 @@ async function approve(mid) {
                 NULLIF(TRIM(cu.full_name), '') AS customer_full_name,
                 cu.client_segment AS customer_segment,
                 so_ch.channel_id,
-                LEFT(
-                  TRIM(
-                    COALESCE(
-                      NULLIF(m.transcription, ''),
-                      NULLIF(m.content->>'transcription', ''),
-                      NULLIF(m.content->>'text', ''),
-                      ''
-                    )
+                NULLIF(
+                  LEFT(
+                    TRIM(
+                      COALESCE(
+                        NULLIF(m.transcription, ''),
+                        NULLIF(m.content->>'transcription', ''),
+                        NULLIF(m.content->>'text', ''),
+                        ''
+                      )
+                    ),
+                    200
                   ),
-                  200
+                  ''
                 ) AS message_text_preview
          FROM crm_messages m
          LEFT JOIN crm_chats ch ON ch.id = m.chat_id

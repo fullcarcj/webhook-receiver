@@ -18,10 +18,10 @@ async function main() {
       `SELECT column_name FROM information_schema.columns
        WHERE table_schema = 'public' AND table_name = 'crm_messages'
          AND column_name = ANY($1::text[])`,
-      [["ai_reply_status", "receipt_data", "ai_processed_at"]]
+      [["ai_reply_status", "receipt_data", "ai_processed_at", "ai_reply_updated_at"]]
     );
     const have = new Set(cols.map((c) => c.column_name));
-    for (const c of ["ai_reply_status", "receipt_data", "ai_processed_at"]) {
+    for (const c of ["ai_reply_status", "receipt_data", "ai_processed_at", "ai_reply_updated_at"]) {
       if (!have.has(c)) issues.push(`crm_messages.${c} ausente`);
     }
     const { rows: tab } = await pool.query(

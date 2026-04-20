@@ -123,6 +123,7 @@
     "db:lots-management": "node scripts/run-lot-management-migration.js",
     "db:lots-management-products-patch": "node scripts/run-lot-management-products-patch.js",
     "verify:ai-responder": "node scripts/verify-ai-responder-setup.js",
+    "archive:legacy-ai-queue": "node scripts/archive-legacy-ai-queue.js",
     "eval:nlu": "node scripts/eval-nlu-groq.js",
     "eval:nlu:smoke": "node scripts/eval-nlu-groq.js --limit=5",
     "eval:nlu:noisy": "node scripts/eval-nlu-groq.js --bucket=product_noisy --verbose",

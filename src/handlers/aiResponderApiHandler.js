@@ -50,6 +50,8 @@ async function parseJsonBody(req) {
 }
 
 async function getStats() {
+  /* today_messages.needs_review cuenta solo needs_human_review; legacy_archived queda fuera
+     (backlog archivado pre–Sprint 6B · ver archive-legacy-ai-queue.js). */
   const today = await pool.query(`
     SELECT
       COUNT(*) FILTER (WHERE ai_reply_status = 'ai_replied') AS auto_sent,
@@ -636,6 +638,8 @@ async function approve(mid) {
   if (req.method === "GET" && path === "/api/ai-responder/pending") {
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 200);
     try {
+      // ai_reply_status = 'needs_human_review' · los legacy_archived quedan excluidos por diseño
+      // (backlog pre-Sprint 6A archivado con scripts/archive-legacy-ai-queue.js).
       const { rows } = await pool.query(
         `SELECT id, chat_id, customer_id, ai_reply_status, ai_confidence, ai_reply_text, ai_reasoning,
                 content, created_at

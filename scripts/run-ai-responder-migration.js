@@ -8,6 +8,7 @@ const base = path.join(__dirname, "../sql");
 runSqlFile(path.join(base, "20260411_ai_responder.sql"))
   .then(() => runSqlFile(path.join(base, "20260420_ai_responder_human_review.sql")))
   .then(() => runSqlFile(path.join(base, "20260420b_ai_responder_legacy_archived.sql")))
+  .then(() => runSqlFile(path.join(base, "20260421_ai_responder_legacy_block_attempt.sql")))
   .then(() => {
     console.log("✅ ai_responder — migración OK");
     process.exit(0);

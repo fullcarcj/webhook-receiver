@@ -32,6 +32,7 @@ ALTER TABLE crm_messages ADD CONSTRAINT crm_messages_ai_reply_status_check
     'needs_human_review',
     'human_replied',
     'human_rejected',
+    'legacy_archived',
     'skipped'
   ));
 
@@ -65,5 +66,6 @@ ALTER TABLE ai_response_log ADD CONSTRAINT ai_response_log_action_taken_check
     'skipped_empty',
     'error',
     'rejected',
-    'draft_saved'
+    'draft_saved',
+    'legacy_archived'
   ));

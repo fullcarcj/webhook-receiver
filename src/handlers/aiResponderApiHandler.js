@@ -121,6 +121,9 @@ async function getStats() {
   const legacyArchived = await pool.query(
     `SELECT COUNT(*)::int AS n FROM crm_messages WHERE ai_reply_status = 'legacy_archived'`
   );
+  const totalPending = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM crm_messages WHERE ai_reply_status = 'needs_human_review'`
+  );
   return {
     ok: true,
     ai_responder_enabled: String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1",
@@ -128,6 +131,8 @@ async function getStats() {
     human_review_gate: isHumanReviewGateOn(),
     tipo_m_mode: "plantilla + context_line (IA no elige flujo)",
     today_messages: today.rows[0] || {},
+    /** Cola real de revisión humana (sin filtro de fecha). Para badge/drawer; distinto de today_messages.needs_review (solo creados hoy). */
+    total_pending_count: totalPending.rows[0]?.n ?? 0,
     today_log_by_action: Object.fromEntries(logc.rows.map((r) => [r.action_taken, r.n])),
     legacy_archived_count: legacyArchived.rows[0]?.n ?? 0,
     provider: { groq_key_ok: groqKeyOk },
@@ -715,11 +720,35 @@ async function approve(mid) {
       // El drawer de revisión humana (Sprint 6B FE) consume este endpoint. Los mensajes en estado
       // 'legacy_archived' quedan excluidos por diseño (backlog pre-Sprint 6A archivado).
       const { rows } = await pool.query(
-        `SELECT id, chat_id, customer_id, ai_reply_status, ai_confidence, ai_reply_text, ai_reasoning,
-                content, created_at
-         FROM crm_messages
-         WHERE ai_reply_status = 'needs_human_review'
-         ORDER BY created_at DESC
+        `SELECT m.id, m.chat_id, m.customer_id, m.ai_reply_status, m.ai_confidence, m.ai_reply_text,
+                m.ai_reasoning, m.content, m.created_at, m.transcription,
+                NULLIF(TRIM(ch.phone), '') AS chat_phone,
+                NULLIF(TRIM(cu.full_name), '') AS customer_full_name,
+                cu.client_segment AS customer_segment,
+                so_ch.channel_id,
+                LEFT(
+                  TRIM(
+                    COALESCE(
+                      NULLIF(m.transcription, ''),
+                      NULLIF(m.content->>'transcription', ''),
+                      NULLIF(m.content->>'text', ''),
+                      ''
+                    )
+                  ),
+                  200
+                ) AS message_text_preview
+         FROM crm_messages m
+         LEFT JOIN crm_chats ch ON ch.id = m.chat_id
+         LEFT JOIN customers cu ON cu.id = COALESCE(m.customer_id, ch.customer_id)
+         LEFT JOIN LATERAL (
+           SELECT so.channel_id
+           FROM sales_orders so
+           WHERE so.conversation_id = m.chat_id
+           ORDER BY so.created_at DESC NULLS LAST
+           LIMIT 1
+         ) so_ch ON TRUE
+         WHERE m.ai_reply_status = 'needs_human_review'
+         ORDER BY m.created_at DESC
          LIMIT $1`,
         [limit]
       );

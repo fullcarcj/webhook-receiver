@@ -13,6 +13,14 @@ const ENV_KEY_BY_PROVIDER = {
   OPENAI_GPT4: "OPENAI_API_KEY",
 };
 
+/** Modelo chat Groq: fila `provider_settings.model_name` gana; si no, `GROQ_CHAT_MODEL`; si no, 70B. */
+function resolveGroqChatModel(modelFromCallerOrRow) {
+  const row = modelFromCallerOrRow != null && String(modelFromCallerOrRow).trim() !== "" ? String(modelFromCallerOrRow).trim() : "";
+  if (row) return row;
+  const env = String(process.env.GROQ_CHAT_MODEL || "").trim();
+  return env || "llama-3.3-70b-versatile";
+}
+
 /**
  * @param {import("pg").PoolClient|import("pg").Pool} client
  * @param {string} providerId
@@ -340,7 +348,7 @@ async function legacyGroqChat({ apiKey, systemPrompt, userMessage, model }) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: model || "llama-3.3-70b-versatile",
+      model: resolveGroqChatModel(model),
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
@@ -364,10 +372,22 @@ async function legacyGroqChat({ apiKey, systemPrompt, userMessage, model }) {
 }
 
 /**
- * @param {{ systemPrompt: string, userMessage: string }} opts
+ * Post-proceso opcional del texto del modelo (p. ej. JSON) antes de marcar éxito en `ai_usage_log`.
+ * Si `ok` es false, la llamada cuenta como fallo en uso y se relanza Error.
+ * @typedef {{ ok: boolean, auditMessage?: string|null, error?: string }} ChatBasicPostProcessResult
+ */
+
+/**
+ * @param {{
+ *   systemPrompt: string;
+ *   userMessage: string;
+ *   usageFunctionCalled?: string;
+ *   responsePostProcessor?: (content: string) => ChatBasicPostProcessResult;
+ * }} opts
  * @returns {Promise<string>} respuesta en texto del modelo
  */
-async function callChatBasic({ systemPrompt, userMessage }) {
+async function callChatBasic(opts) {
+  const { systemPrompt, userMessage, usageFunctionCalled = "callChatBasic", responsePostProcessor } = opts;
   const providerId = "GROQ_LLAMA";
 
   let provider;
@@ -378,6 +398,10 @@ async function callChatBasic({ systemPrompt, userMessage }) {
       const apiKey = process.env.GROQ_API_KEY;
       if (!apiKey) throw e;
       const { content } = await legacyGroqChat({ apiKey, systemPrompt, userMessage });
+      if (responsePostProcessor) {
+        const p = responsePostProcessor(content);
+        if (!p.ok) throw new Error(p.error || "response_post_process_failed");
+      }
       return content;
     }
     throw e;
@@ -387,6 +411,10 @@ async function callChatBasic({ systemPrompt, userMessage }) {
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) throw new Error("GROQ_LLAMA no configurado en BD ni GROQ_API_KEY");
     const { content } = await legacyGroqChat({ apiKey, systemPrompt, userMessage });
+    if (responsePostProcessor) {
+      const p = responsePostProcessor(content);
+      if (!p.ok) throw new Error(p.error || "response_post_process_failed");
+    }
     return content;
   }
 
@@ -404,17 +432,27 @@ async function callChatBasic({ systemPrompt, userMessage }) {
   let tokensIn = 0;
   let tokensOut = 0;
   let content = "";
+  /** Detalle de auditoría en `ai_usage_log.error_message` cuando success=true (p. ej. validación nombre WA). */
+  let successAuditDetail = null;
 
   try {
     const r = await legacyGroqChat({
       apiKey,
       systemPrompt,
       userMessage,
-      model: provider.model_name || "llama-3.3-70b-versatile",
+      model: resolveGroqChatModel(provider.model_name),
     });
     content = r.content;
     tokensIn = r.tokensIn;
     tokensOut = r.tokensOut;
+    if (responsePostProcessor) {
+      const p = responsePostProcessor(content);
+      if (!p.ok) {
+        errMsg = p.error || "response_post_process_failed";
+        throw new Error(errMsg);
+      }
+      successAuditDetail = p.auditMessage != null && String(p.auditMessage).trim() !== "" ? String(p.auditMessage) : null;
+    }
     success = true;
     return content;
   } catch (e) {
@@ -427,9 +465,9 @@ async function callChatBasic({ systemPrompt, userMessage }) {
         tokensIn,
         tokensOut,
         success,
-        errorMessage: success ? null : errMsg,
+        errorMessage: success ? successAuditDetail : errMsg,
         latencyMs: Date.now() - t0,
-        functionCalled: "callChatBasic",
+        functionCalled: usageFunctionCalled,
       });
     } catch (logErr) {
       log.warn({ err: logErr.message }, "trackUsage callChatBasic falló (no bloquea)");

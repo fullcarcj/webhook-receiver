@@ -152,8 +152,11 @@ async function handle(normalized) {
     if (config.type === "image" && fileBuffer) {
       setImmediate(async () => {
         try {
-          const { isPaymentReceipt }   = require("../media/receiptDetector");
-          const { extractReceiptData } = require("../media/receiptExtractor");
+          const { isPaymentReceipt } = require("../media/receiptDetector");
+          const {
+            extractReceiptData,
+            paymentAttemptFieldsFromExtraction,
+          } = require("../media/receiptExtractor");
 
           const prefilter = await isPaymentReceipt(fileBuffer);
           log.info({
@@ -176,45 +179,87 @@ async function handle(normalized) {
             return;
           }
 
-          const extracted = await extractReceiptData(firebaseUrl);
+          const extraction = await extractReceiptData(firebaseUrl);
+          const pf = paymentAttemptFieldsFromExtraction(extraction);
 
-          const { rows: attemptRows } = await pool.query(
-            `INSERT INTO payment_attempts
-               (customer_id, chat_id, firebase_url,
-                extracted_reference, extracted_amount_bs, extracted_date,
-                extracted_bank, extracted_payment_type, extraction_confidence,
-                is_receipt, prefiler_score, prefiler_reason)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10,$11)
-             ON CONFLICT (firebase_url) DO NOTHING
-             RETURNING id`,
-            [
-              customerId  ?? null,
-              chatId      ?? null,
-              firebaseUrl,
-              extracted?.reference_number ?? null,
-              extracted?.amount_bs        ?? null,
-              extracted?.tx_date          ?? null,
-              extracted?.bank_name        ?? null,
-              extracted?.payment_type     ?? null,
-              extracted?.confidence       ?? null,
-              prefilter.score,
-              prefilter.reason ?? null,
-            ]
+          let attemptRows;
+          try {
+            attemptRows = await pool.query(
+              `INSERT INTO payment_attempts
+                 (customer_id, chat_id, firebase_url,
+                  extracted_reference, extracted_amount_bs, extracted_date,
+                  extracted_bank, extracted_payment_type, extraction_confidence,
+                  is_receipt, prefiler_score, prefiler_reason,
+                  extraction_status, extraction_error, extraction_raw_snippet)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10,$11,$12,$13,$14)
+               ON CONFLICT (firebase_url) DO NOTHING
+               RETURNING id`,
+              [
+                customerId ?? null,
+                chatId ?? null,
+                firebaseUrl,
+                pf.extracted_reference,
+                pf.extracted_amount_bs,
+                pf.extracted_date,
+                pf.extracted_bank,
+                pf.extracted_payment_type,
+                pf.extraction_confidence,
+                prefilter.score,
+                prefilter.reason ?? null,
+                pf.extraction_status,
+                pf.extraction_error,
+                pf.extraction_raw_snippet,
+              ]
+            );
+          } catch (insErr) {
+            if (insErr && insErr.code === "42703") {
+              log.warn({ err: insErr.message }, "media: payment_attempts sin columnas extraction_* — npm run db:payment-attempts-extraction-audit");
+              attemptRows = await pool.query(
+                `INSERT INTO payment_attempts
+                   (customer_id, chat_id, firebase_url,
+                    extracted_reference, extracted_amount_bs, extracted_date,
+                    extracted_bank, extracted_payment_type, extraction_confidence,
+                    is_receipt, prefiler_score, prefiler_reason)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10,$11)
+                 ON CONFLICT (firebase_url) DO NOTHING
+                 RETURNING id`,
+                [
+                  customerId ?? null,
+                  chatId ?? null,
+                  firebaseUrl,
+                  pf.extracted_reference,
+                  pf.extracted_amount_bs,
+                  pf.extracted_date,
+                  pf.extracted_bank,
+                  pf.extracted_payment_type,
+                  pf.extraction_confidence,
+                  prefilter.score,
+                  prefilter.reason ?? null,
+                ]
+              );
+            } else {
+              throw insErr;
+            }
+          }
+
+          const attemptId = attemptRows.rows[0]?.id ?? null;
+          log.info(
+            {
+              customerId,
+              attemptId,
+              ref: pf.extracted_reference,
+              amount: pf.extracted_amount_bs,
+              extraction_status: pf.extraction_status,
+            },
+            "media: payment_attempt guardado"
           );
-
-          const attemptId = attemptRows[0]?.id ?? null;
-          log.info({
-            customerId,
-            attemptId,
-            ref:    extracted?.reference_number,
-            amount: extracted?.amount_bs,
-          }, "media: payment_attempt guardado");
 
           if (
             String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1" &&
             normalized.messageId &&
-            extracted &&
-            (extracted.amount_bs != null || extracted.reference_number)
+            extraction.status === "ok" &&
+            extraction.data &&
+            (extraction.data.amount_bs != null || extraction.data.reference_number)
           ) {
             try {
               await pool.query(
@@ -226,7 +271,7 @@ async function handle(normalized) {
                      END
                  WHERE external_message_id = $2
                    AND direction = 'inbound'`,
-                [JSON.stringify(extracted), normalized.messageId]
+                [JSON.stringify(extraction.data), normalized.messageId]
               );
             } catch (e) {
               if (e && e.code !== "42703") {
@@ -236,7 +281,7 @@ async function handle(normalized) {
           }
 
           // Trigger 2 event-driven: conciliar este comprobante específico sin bloquear el webhook
-          if (attemptId && extracted?.amount_bs != null) {
+          if (attemptId && pf.extracted_amount_bs != null) {
             const { reconcileAttempt } = require("../../services/reconciliationService");
             reconcileAttempt(attemptId).catch((err) =>
               log.error({ err: err.message, attemptId }, "media: reconcileAttempt post-vision falló")
@@ -247,14 +292,16 @@ async function handle(normalized) {
           try {
             const { emitReceiptDetected } = require("../../services/sseService");
             emitReceiptDetected({
-              customerId:  customerId  ?? null,
-              chatId:      chatId      ?? null,
-              amountBs:    extracted?.amount_bs        ?? null,
-              reference:   extracted?.reference_number ?? null,
-              bank:        extracted?.bank_name        ?? null,
-              confidence:  extracted?.confidence       ?? null,
+              customerId: customerId ?? null,
+              chatId: chatId ?? null,
+              amountBs: pf.extracted_amount_bs ?? null,
+              reference: pf.extracted_reference ?? null,
+              bank: pf.extracted_bank ?? null,
+              confidence: pf.extraction_confidence ?? null,
             });
-          } catch (_) { /* SSE opcional — no bloquear flujo */ }
+          } catch (_) {
+            /* SSE opcional — no bloquear flujo */
+          }
         } catch (receiptErr) {
           log.error({ err: receiptErr.message, messageId: normalized.messageId },
             "media: error procesando comprobante");

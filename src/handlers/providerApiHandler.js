@@ -167,18 +167,19 @@ async function runReceiptTest(req, res) {
     }
 
     // ── Etapa 2: Extracción con Gemini Vision via AI Gateway ─────────────────
-    const { extractReceiptData } = require("../whatsapp/media/receiptExtractor");
-    let extracted = null;
-    let extractionError = null;
-    try {
-      extracted = await extractReceiptData(imageUrl);
-    } catch (e) {
-      extractionError = e.message;
-    }
+    const {
+      extractReceiptData,
+      paymentAttemptFieldsFromExtraction,
+    } = require("../whatsapp/media/receiptExtractor");
+    const extractionResult = await extractReceiptData(imageUrl);
+    const pf = paymentAttemptFieldsFromExtraction(extractionResult);
+    const extracted = extractionResult.data;
     stages.extraction = {
       ran: true,
-      result: extracted,
-      error: extractionError ?? (extracted ? null : "Gemini devolvió null"),
+      status: extractionResult.status,
+      result: mapExtractedForResponse(extracted),
+      error: extractionResult.error_message,
+      raw_snippet: extractionResult.raw_model_snippet,
     };
 
     if (dryRun) {
@@ -190,7 +191,7 @@ async function runReceiptTest(req, res) {
         reconciliation: { status: null, matched_order_id: null, match_level: null },
         url: imageUrl,
         stages,
-        summary: extracted ? "extraction_ok_dry_run" : "extraction_failed_dry_run",
+        summary: extractionResult.status === "ok" ? "extraction_ok_dry_run" : "extraction_failed_dry_run",
         elapsed_ms: Date.now() - t0,
       });
       return true;
@@ -199,35 +200,68 @@ async function runReceiptTest(req, res) {
     // ── Etapa 3: Persistencia en payment_attempts ─────────────────────────────
     let attemptId = null;
     try {
-      const { rows } = await pool.query(
-        `INSERT INTO payment_attempts
-           (customer_id, chat_id, firebase_url,
-            extracted_reference, extracted_amount_bs, extracted_date,
-            extracted_bank, extracted_payment_type, extraction_confidence,
-            is_receipt, prefiler_score, prefiler_reason)
-         VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $10)
-         RETURNING id`,
-        [
-          customerId ?? null,
-          imageUrl,
-          extracted?.reference_number ?? null,
-          extracted?.amount_bs        ?? null,
-          extracted?.tx_date          ?? null,
-          extracted?.bank_name        ?? null,
-          extracted?.payment_type     ?? null,
-          extracted?.confidence       ?? null,
-          prefiltro.score,
-          prefiltro.reason ?? null,
-        ]
-      );
-      attemptId = rows[0]?.id ?? null;
+      let ins;
+      try {
+        ins = await pool.query(
+          `INSERT INTO payment_attempts
+             (customer_id, chat_id, firebase_url,
+              extracted_reference, extracted_amount_bs, extracted_date,
+              extracted_bank, extracted_payment_type, extraction_confidence,
+              is_receipt, prefiler_score, prefiler_reason,
+              extraction_status, extraction_error, extraction_raw_snippet)
+           VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $10, $11, $12, $13)
+           RETURNING id`,
+          [
+            customerId ?? null,
+            imageUrl,
+            pf.extracted_reference,
+            pf.extracted_amount_bs,
+            pf.extracted_date,
+            pf.extracted_bank,
+            pf.extracted_payment_type,
+            pf.extraction_confidence,
+            prefiltro.score,
+            prefiltro.reason ?? null,
+            pf.extraction_status,
+            pf.extraction_error,
+            pf.extraction_raw_snippet,
+          ]
+        );
+      } catch (insErr) {
+        if (insErr && insErr.code === "42703") {
+          ins = await pool.query(
+            `INSERT INTO payment_attempts
+               (customer_id, chat_id, firebase_url,
+                extracted_reference, extracted_amount_bs, extracted_date,
+                extracted_bank, extracted_payment_type, extraction_confidence,
+                is_receipt, prefiler_score, prefiler_reason)
+             VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $10)
+             RETURNING id`,
+            [
+              customerId ?? null,
+              imageUrl,
+              pf.extracted_reference,
+              pf.extracted_amount_bs,
+              pf.extracted_date,
+              pf.extracted_bank,
+              pf.extracted_payment_type,
+              pf.extraction_confidence,
+              prefiltro.score,
+              prefiltro.reason ?? null,
+            ]
+          );
+        } else {
+          throw insErr;
+        }
+      }
+      attemptId = ins.rows[0]?.id ?? null;
       stages.persistence = { ran: true, attempt_id: attemptId };
     } catch (e) {
       stages.persistence = { ran: true, error: e.message };
     }
 
     // ── Etapa 4: Conciliación ─────────────────────────────────────────────────
-    if (attemptId && extracted?.amount_bs != null) {
+    if (attemptId && pf.extracted_amount_bs != null) {
       try {
         const { reconcileAttempt } = require("../services/reconciliationService");
         await reconcileAttempt(attemptId);
@@ -255,7 +289,7 @@ async function runReceiptTest(req, res) {
       url: imageUrl,
       stages,
       summary:
-        attemptId && extracted?.amount_bs != null
+        attemptId && pf.extracted_amount_bs != null
           ? `reconciliation_${reconOut.status || "ok"}`
           : "persisted_no_reconciliation",
       elapsed_ms: Date.now() - t0,

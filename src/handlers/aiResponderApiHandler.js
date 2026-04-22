@@ -9,6 +9,8 @@ const {
   providerAuditTipoM,
   isForceSend,
   isHumanReviewGateOn,
+  isEnabled: aiResponderIsEnabled,
+  isSuspended: aiResponderIsSuspended,
 } = require("../services/aiResponder");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder_api" });
@@ -147,7 +149,9 @@ async function getStats() {
     ) AS t
   `);
   const tm = today.rows[0] || {};
-  const aiResponderEnabled = String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
+  const aiResponderEnvOn = String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
+  const aiResponderSuspended = aiResponderIsSuspended();
+  const aiResponderEnabled = aiResponderIsEnabled();
   const lastRaw = lastAct.rows[0]?.t;
   const lastCycleIso = lastRaw ? new Date(lastRaw).toISOString() : null;
   const todayByStatus = {
@@ -163,6 +167,10 @@ async function getStats() {
   return {
     ok: true,
     ai_responder_enabled: aiResponderEnabled,
+    /** true si AI_RESPONDER_ENABLED=1 en env aunque isSuspended() apague el efecto. */
+    ai_responder_env_enabled: aiResponderEnvOn,
+    /** true si AI_RESPONDER_SUSPENDED=1 (no cola ni worker efectivo). */
+    ai_responder_suspended: aiResponderSuspended,
     /** Alias para monitor Next.js (GET /api/ai-responder/stats). */
     enabled: aiResponderEnabled,
     force_send: isForceSend(),
@@ -180,6 +188,197 @@ async function getStats() {
     /** Worker puede ciclar (env + GROQ); el monitor ya no asume "caído" solo por falta de last_cycle_at. */
     worker_running: aiResponderEnabled && groqKeyOk,
     last_cycle_at: lastCycleIso,
+  };
+}
+
+function _mapAiUsageOpsRow(r) {
+  return {
+    id: Number(r.id),
+    provider_id: r.provider_id,
+    function_called: r.function_called,
+    tokens_input: r.tokens_input == null ? null : Number(r.tokens_input),
+    tokens_output: r.tokens_output == null ? null : Number(r.tokens_output),
+    latency_ms: r.latency_ms == null ? null : Number(r.latency_ms),
+    success: Boolean(r.success),
+    error_message: r.error_message,
+    created_at: r.created_at ? new Date(r.created_at).toISOString() : "",
+  };
+}
+
+function _mapReceiptAttemptOpsRow(r) {
+  const d = r.extracted_date;
+  let extractedDate = null;
+  if (d != null) {
+    extractedDate = d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10);
+  }
+  return {
+    id: Number(r.id),
+    chat_id: r.chat_id != null ? Number(r.chat_id) : null,
+    customer_id: r.customer_id != null ? Number(r.customer_id) : null,
+    firebase_url: r.firebase_url,
+    is_receipt: r.is_receipt,
+    prefiler_score: r.prefiler_score,
+    prefiler_reason: r.prefiler_reason,
+    extracted_reference: r.extracted_reference,
+    extracted_amount_bs: r.extracted_amount_bs,
+    extracted_date: extractedDate,
+    extraction_confidence: r.extraction_confidence,
+    extraction_status: r.extraction_status != null ? String(r.extraction_status) : null,
+    extraction_error: r.extraction_error != null ? String(r.extraction_error) : null,
+    extraction_raw_snippet: r.extraction_raw_snippet != null ? String(r.extraction_raw_snippet) : null,
+    reconciliation_status: r.reconciliation_status,
+    reconciled_order_id: r.reconciled_order_id != null ? Number(r.reconciled_order_id) : null,
+    created_at: r.created_at ? new Date(r.created_at).toISOString() : "",
+    pipeline_error_type: r.pipeline_error_type,
+  };
+}
+
+/**
+ * GET /api/ai-responder/ops-logs — logs de validación de nombre (Groq), comprobantes y Gemini Vision.
+ */
+async function getOpsLogs(url) {
+  const days = Math.min(90, Math.max(1, parseInt(url.searchParams.get("days") || "7", 10) || 7));
+  const nameLimit = Math.min(500, Math.max(1, parseInt(url.searchParams.get("name_limit") || "200", 10) || 200));
+  const receiptLimit = Math.min(500, Math.max(1, parseInt(url.searchParams.get("receipt_limit") || "200", 10) || 200));
+  const visionLimit = Math.min(500, Math.max(1, parseInt(url.searchParams.get("vision_limit") || "200", 10) || 200));
+
+  const notes = [];
+  let name_analysis_logs = [];
+  let receipt_vision_logs = [];
+  let receipt_attempts = [];
+
+  try {
+    const [n, v] = await Promise.all([
+      pool.query(
+        `SELECT id, provider_id, function_called, tokens_input, tokens_output, latency_ms, success, error_message, created_at
+         FROM ai_usage_log
+         WHERE created_at >= NOW() - ($1::int * INTERVAL '1 day')
+           AND function_called IN ('wa_name_validation', 'name_validation_skipped')
+         ORDER BY created_at DESC
+         LIMIT $2`,
+        [days, nameLimit]
+      ),
+      pool.query(
+        `SELECT id, provider_id, function_called, tokens_input, tokens_output, latency_ms, success, error_message, created_at
+         FROM ai_usage_log
+         WHERE created_at >= NOW() - ($1::int * INTERVAL '1 day')
+           AND function_called = 'callVision'
+         ORDER BY created_at DESC
+         LIMIT $2`,
+        [days, visionLimit]
+      ),
+    ]);
+    name_analysis_logs = n.rows.map(_mapAiUsageOpsRow);
+    receipt_vision_logs = v.rows.map(_mapAiUsageOpsRow);
+  } catch (e) {
+    if (e && e.code === "42P01") {
+      notes.push("Tabla ai_usage_log no disponible (migración provider_settings / ai_usage_log).");
+    } else {
+      throw e;
+    }
+  }
+
+  const receiptPipelineCaseWithExtraction = `
+           CASE
+             WHEN COALESCE(pa.is_receipt, FALSE) IS NOT TRUE THEN 'legacy_not_receipt'
+             WHEN pa.extraction_status IN (
+               'download_failed','vision_error','json_parse','empty_response','invalid_shape','unexpected'
+             ) THEN 'extraction_failed'
+             WHEN pa.extraction_status = 'parsed_empty' THEN 'extraction_empty'
+             WHEN pa.extraction_status IS NULL
+                  AND pa.extracted_reference IS NULL AND pa.extracted_amount_bs IS NULL AND pa.extracted_date IS NULL
+                  AND pa.extraction_confidence IS NULL THEN 'extraction_empty'
+             WHEN pa.reconciliation_status = 'matched' THEN 'reconciled_matched'
+             WHEN pa.reconciliation_status = 'no_match' THEN 'reconciled_no_match'
+             WHEN pa.reconciliation_status = 'manual_review' THEN 'manual_review'
+             WHEN pa.reconciliation_status = 'rejected' THEN 'rejected'
+             WHEN pa.reconciliation_status = 'pending' THEN 'reconciliation_pending'
+             ELSE COALESCE(pa.reconciliation_status, 'unknown')
+           END AS pipeline_error_type`;
+
+  const receiptPipelineCaseLegacyOnly = `
+           CASE
+             WHEN COALESCE(pa.is_receipt, FALSE) IS NOT TRUE THEN 'legacy_not_receipt'
+             WHEN pa.extracted_reference IS NULL AND pa.extracted_amount_bs IS NULL AND pa.extracted_date IS NULL
+                  AND pa.extraction_confidence IS NULL THEN 'extraction_empty'
+             WHEN pa.reconciliation_status = 'matched' THEN 'reconciled_matched'
+             WHEN pa.reconciliation_status = 'no_match' THEN 'reconciled_no_match'
+             WHEN pa.reconciliation_status = 'manual_review' THEN 'manual_review'
+             WHEN pa.reconciliation_status = 'rejected' THEN 'rejected'
+             WHEN pa.reconciliation_status = 'pending' THEN 'reconciliation_pending'
+             ELSE COALESCE(pa.reconciliation_status, 'unknown')
+           END AS pipeline_error_type`;
+
+  const receiptSqlV2 = `
+    SELECT pa.id, pa.chat_id, pa.customer_id, pa.firebase_url, pa.is_receipt, pa.prefiler_score, pa.prefiler_reason,
+           pa.extracted_reference, pa.extracted_amount_bs, pa.extracted_date, pa.extraction_confidence,
+           pa.extraction_status, pa.extraction_error, pa.extraction_raw_snippet,
+           pa.reconciliation_status, pa.reconciled_order_id, pa.created_at,
+           ${receiptPipelineCaseWithExtraction}
+    FROM payment_attempts pa
+    WHERE pa.created_at >= NOW() - ($1::int * INTERVAL '1 day')
+    ORDER BY pa.created_at DESC
+    LIMIT $2`;
+
+  const receiptSqlV1NoPrefiler = `
+    SELECT pa.id, pa.chat_id, pa.customer_id, pa.firebase_url, pa.is_receipt, pa.prefiler_score, NULL::text AS prefiler_reason,
+           pa.extracted_reference, pa.extracted_amount_bs, pa.extracted_date, pa.extraction_confidence,
+           pa.extraction_status, pa.extraction_error, pa.extraction_raw_snippet,
+           pa.reconciliation_status, pa.reconciled_order_id, pa.created_at,
+           ${receiptPipelineCaseWithExtraction}
+    FROM payment_attempts pa
+    WHERE pa.created_at >= NOW() - ($1::int * INTERVAL '1 day')
+    ORDER BY pa.created_at DESC
+    LIMIT $2`;
+
+  const receiptSqlV0Legacy = `
+    SELECT pa.id, pa.chat_id, pa.customer_id, pa.firebase_url, pa.is_receipt, pa.prefiler_score, NULL::text AS prefiler_reason,
+           pa.extracted_reference, pa.extracted_amount_bs, pa.extracted_date, pa.extraction_confidence,
+           NULL::text AS extraction_status, NULL::text AS extraction_error, NULL::text AS extraction_raw_snippet,
+           pa.reconciliation_status, pa.reconciled_order_id, pa.created_at,
+           ${receiptPipelineCaseLegacyOnly}
+    FROM payment_attempts pa
+    WHERE pa.created_at >= NOW() - ($1::int * INTERVAL '1 day')
+    ORDER BY pa.created_at DESC
+    LIMIT $2`;
+
+  const receiptParams = [days, receiptLimit];
+  const receiptTiers = [
+    { sql: receiptSqlV2, note: null },
+    {
+      sql: receiptSqlV1NoPrefiler,
+      note: "Listado degradado: falta columna prefiler_reason (sql/20260410_payment_attempts_reason.sql).",
+    },
+    {
+      sql: receiptSqlV0Legacy,
+      note: "Listado degradado: faltan columnas extraction_* u otras; npm run db:payment-attempts-extraction-audit.",
+    },
+  ];
+  receipt_attempts = [];
+  for (let ti = 0; ti < receiptTiers.length; ti += 1) {
+    const tier = receiptTiers[ti];
+    try {
+      const { rows } = await pool.query(tier.sql, receiptParams);
+      receipt_attempts = rows.map(_mapReceiptAttemptOpsRow);
+      if (tier.note) notes.push(tier.note);
+      break;
+    } catch (qErr) {
+      if (qErr && qErr.code === "42P01") {
+        notes.push("Tabla payment_attempts no disponible.");
+        break;
+      }
+      if (qErr && qErr.code === "42703" && ti < receiptTiers.length - 1) continue;
+      throw qErr;
+    }
+  }
+
+  return {
+    ok: true,
+    days,
+    name_analysis_logs,
+    receipt_vision_logs,
+    receipt_attempts,
+    receipt_schema_note: notes.length ? notes.join(" ") : null,
   };
 }
 
@@ -604,7 +803,7 @@ td.phone{font-family:ui-monospace,Consolas,monospace;font-size:.68rem;white-spac
 </style></head><body>
 <h1>🤖 AI Responder — <span class="badge m">Tipo M</span></h1>
 <p>
-  <span class="badge ${stats.ai_responder_enabled ? "on" : "off"}">${stats.ai_responder_enabled ? "WORKER ON" : "WORKER OFF — falta AI_RESPONDER_ENABLED=1"}</span>
+  <span class="badge ${stats.ai_responder_enabled ? "on" : "off"}">${stats.ai_responder_suspended ? "SUSPENDIDO — AI_RESPONDER_SUSPENDED=1" : stats.ai_responder_enabled ? "WORKER ON" : "WORKER OFF — falta AI_RESPONDER_ENABLED=1"}</span>
   <span class="badge ${stats.provider && stats.provider.groq_key_ok ? "on" : "off"}">GROQ_API_KEY: ${stats.provider && stats.provider.groq_key_ok ? "OK" : "❌ FALTA"}</span>
   <span class="badge ${stats.human_review_gate ? "on" : "off"}" title="AI_RESPONDER_FORCE_SEND = switch revisión humana">${stats.human_review_gate ? "Revisión humana ON" : "Revisión humana OFF (FORCE)"}</span>
 </p>
@@ -630,6 +829,7 @@ td.phone{font-family:ui-monospace,Consolas,monospace;font-size:.68rem;white-spac
     Plantilla: <code>AI_RESPONDER_GENERIC_TEMPLATE</code> · placeholders <code>{{CONTEXTO_IA}}</code> <code>{{NOMBRE}}</code> <code>{{NOMBRE_SALUDO}}</code>
     · <a href="/api/ai-responder/stats?k=${kEnc}">stats JSON</a>
     · <a href="/api/ai-responder/log?k=${kEnc}">log JSON</a>
+    · <a href="/api/ai-responder/ops-logs?k=${kEnc}">ops-logs JSON</a>
     · <a href="/api/ai-responder/pending?k=${kEnc}">pending JSON</a>
   </p>
   ${queuedPending.length > 0 ? `
@@ -758,6 +958,24 @@ async function approve(mid) {
     return true;
   }
 
+  if (req.method === "GET" && path === "/api/ai-responder/ops-logs") {
+    try {
+      const body = await getOpsLogs(url);
+      writeJson(res, 200, body);
+    } catch (e) {
+      log.warn({ err: e.message }, "ai_responder ops-logs");
+      writeJson(res, 500, {
+        ok: false,
+        error: e.message,
+        days: 7,
+        name_analysis_logs: [],
+        receipt_vision_logs: [],
+        receipt_attempts: [],
+      });
+    }
+    return true;
+  }
+
   if (req.method === "GET" && path === "/api/ai-responder/pending") {
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 200);
     try {
@@ -858,4 +1076,4 @@ async function approve(mid) {
   return false;
 }
 
-module.exports = { handleAiResponderRequest, getStats };
+module.exports = { handleAiResponderRequest, getStats, getOpsLogs };

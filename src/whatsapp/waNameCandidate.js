@@ -24,6 +24,20 @@ function _extractNameFromPhrase(input) {
   return input.trim();
 }
 
+/**
+ * Misma limpieza y extracción ("mi nombre es…") que usa `isValidFullName` antes de IA/heurística.
+ * Sirve para persistir el mismo núcleo que validó la IA (evita guardar la frase completa en `customers`).
+ * @param {string|null|undefined} input
+ * @returns {string|null}
+ */
+function prepareOnboardingNameInput(input) {
+  if (!input || typeof input !== "string") return null;
+  let clean = input.replace(_EMOJI_REGEX, "").replace(/\s+/g, " ").trim();
+  if (!clean) return null;
+  clean = _extractNameFromPhrase(clean);
+  return clean || null;
+}
+
 // Registra en ai_usage_log cuando la heurística evitó la llamada a IA
 async function _logSkippedAI(reason) {
   try {
@@ -63,9 +77,27 @@ async function _validateWithAI(input) {
     const response = await callChatBasic({
       systemPrompt: _NAME_VALIDATION_PROMPT,
       userMessage: input,
+      usageFunctionCalled: "wa_name_validation",
+      responsePostProcessor: (raw) => {
+        try {
+          const clean = String(raw || "").replace(/```json|```/g, "").trim();
+          const parsed = JSON.parse(clean);
+          if (parsed.is_name !== true && parsed.is_name !== false) {
+            return { ok: false, error: "json_invalid_is_name_field" };
+          }
+          const auditMessage = JSON.stringify({
+            entrada: String(input).slice(0, 160),
+            is_name: parsed.is_name === true,
+            reason: String(parsed.reason || "").slice(0, 200),
+          });
+          return { ok: true, auditMessage };
+        } catch (e) {
+          return { ok: false, error: `json_parse: ${e.message}` };
+        }
+      },
     });
     if (!response) return null;
-    const clean = response.replace(/```json|```/g, "").trim();
+    const clean = String(response).replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean);
     log.info({ input, is_name: parsed.is_name, reason: parsed.reason }, "nombre validado con IA");
     return parsed.is_name === true;
@@ -291,12 +323,20 @@ async function pickWaFullNameCandidate(normalized) {
   const t = normalized.content?.text != null ? String(normalized.content.text).trim() : "";
   if (t && !isLikelyChatNotName(t)) {
     const r = await isValidFullName(t);
-    if (r === true) return { name: sanitizeWaPersonName(t) };
+    if (r === true) {
+      const base = prepareOnboardingNameInput(t) || t;
+      const name = sanitizeWaPersonName(base);
+      if (name) return { name };
+    }
   }
   const cn = normalized.contactName != null ? String(normalized.contactName).trim() : "";
   if (cn && !isLikelyChatNotName(cn)) {
     const r = await isValidFullName(cn);
-    if (r === true) return { name: sanitizeWaPersonName(cn) };
+    if (r === true) {
+      const base = prepareOnboardingNameInput(cn) || cn;
+      const name = sanitizeWaPersonName(base);
+      if (name) return { name };
+    }
   }
   return {};
 }
@@ -304,6 +344,7 @@ async function pickWaFullNameCandidate(normalized) {
 module.exports = {
   isValidFullName,
   pickWaFullNameCandidate,
+  prepareOnboardingNameInput,
   sanitizeWaPersonName,
   isLikelyChatNotName,
   sanitizeContactDisplayName,

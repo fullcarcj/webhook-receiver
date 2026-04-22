@@ -42,7 +42,19 @@ function triggerResponderNow() {
   }
 }
 
+/**
+ * Suspende el piloto Tipo M sin borrar AI_RESPONDER_ENABLED=1 (útil en Render: un solo flag).
+ * ON: 1, true, yes, on (case-insensitive). OFF: 0, false, no, off, vacío.
+ */
+function isSuspended() {
+  const v = String(process.env.AI_RESPONDER_SUSPENDED ?? "").trim().toLowerCase();
+  if (!v) return false;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  return ["1", "true", "yes", "on"].includes(v);
+}
+
 function isEnabled() {
+  if (isSuspended()) return false;
   return String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
 }
 
@@ -747,6 +759,7 @@ async function processOneMessage(message) {
 
 module.exports = {
   isEnabled,
+  isSuspended,
   confidenceMin,
   isForceSend,
   isHumanReviewGateOn,

@@ -11,6 +11,7 @@
 const pino = require("pino");
 const { pool, ensureSchema } = require("../../db");
 const { requireAdminOrPermission } = require("../utils/authMiddleware");
+const { isEnabled: isAiResponderTipoMEnabled } = require("../services/aiResponder");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "automations_api" });
 
@@ -174,7 +175,7 @@ async function loadActiveConfigs() {
       .catch(() => ({ rows: [{ c: 0 }] })),
     pool.query(`SELECT 1 FROM ml_whatsapp_tipo_e_config WHERE id = 1 LIMIT 1`).catch(() => ({ rows: [] })),
     pool.query(`SELECT 1 FROM ml_whatsapp_tipo_f_config WHERE id = 1 LIMIT 1`).catch(() => ({ rows: [] })),
-    Promise.resolve({ rows: [{ ok: process.env.AI_RESPONDER_ENABLED === "1" ? 1 : 0 }] }),
+    Promise.resolve({ rows: [{ ok: isAiResponderTipoMEnabled() ? 1 : 0 }] }),
   ]);
 
   return {

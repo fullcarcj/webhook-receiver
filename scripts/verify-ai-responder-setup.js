@@ -6,6 +6,7 @@
  */
 require("../load-env-local");
 const { pool } = require("../db");
+const { isEnabled, isSuspended } = require("../src/services/aiResponder");
 
 async function main() {
   const issues = [];
@@ -40,9 +41,13 @@ async function main() {
     console.error("   Ejecutar: npm run db:ai-responder");
     process.exit(1);
   }
-  const on = String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
+  const envOn = String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
+  const susp = isSuspended();
+  const on = isEnabled();
   console.log("✅ AI Responder — esquema OK");
-  console.log(`   AI_RESPONDER_ENABLED=${on ? "1 (worker arranca al iniciar servidor)" : "off (poner 1 para piloto)"}`);
+  console.log(`   AI_RESPONDER_ENABLED (env)=${envOn ? "1" : "off"}`);
+  console.log(`   AI_RESPONDER_SUSPENDED=${susp ? "1 (piloto IA pausado)" : "off"}`);
+  console.log(`   Efectivo (cola+worker)=${on ? "ON" : "OFF"}`);
   console.log("   Monitoreo: GET /ai-responder?k=ADMIN_SECRET");
   process.exit(0);
 }

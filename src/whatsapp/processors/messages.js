@@ -29,7 +29,13 @@ const pino = require("pino");
 const { pool } = require("../../../db");
 const { normalizePhone } = require("../../utils/phoneNormalizer");
 const { resolveCustomerId, upsertChat } = require("./_shared");
-const { pickWaFullNameCandidate, sanitizeWaPersonName, isLikelyChatNotName, isValidFullName } = require("../waNameCandidate");
+const {
+  pickWaFullNameCandidate,
+  prepareOnboardingNameInput,
+  sanitizeWaPersonName,
+  isLikelyChatNotName,
+  isValidFullName,
+} = require("../waNameCandidate");
 const { runWaMlBuyerMatchTipoE } = require("../../services/waMlBuyerMatchTipoE");
 const {
   trySendCrmWaWelcome,
@@ -399,11 +405,14 @@ async function handle(normalized) {
       const isInboundText = nameValidationResult === true;
       const isAskSurnameResult = nameValidationResult === "ASK_SURNAME";
 
+      // Mismo núcleo que validó la IA (`prepareOnboardingNameInput`: "mi nombre es…" → nombre limpio).
+      const nameCore = prepareOnboardingNameInput(messageText);
       // Pre-computar confirmedName con fallback para partículas (De La Cruz, Del Valle, etc.)
       // que la IA acepta pero NON_NAME_WORDS rechaza en normalizeOnboardingNameUpper.
-      const confirmedName = isInboundText
-        ? (normalizeOnboardingNameUpper(messageText) || sanitizeWaPersonName(messageText)?.toUpperCase())?.slice(0, 200) || null
-        : null;
+      const confirmedName =
+        isInboundText && nameCore
+          ? (normalizeOnboardingNameUpper(nameCore) || sanitizeWaPersonName(nameCore)?.toUpperCase())?.slice(0, 200) || null
+          : null;
       // Solo procesar registro si también tenemos el nombre normalizado
       const isInboundTextFinal = isInboundText && Boolean(confirmedName);
 

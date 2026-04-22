@@ -20,15 +20,49 @@ function maybeSyncMlPublicationState(productId, qtyBefore, qtyAfter) {
 
 // ── Catálogo + Stock ─────────────────────────────────────────────────────────
 
-async function listProducts({ limit = 50, offset = 0, alert, category, brand, search } = {}) {
+async function listProducts({ limit = 50, offset = 0, alert, category, brand, search, searchBy } = {}) {
+  const ACCENT_FROM = "áéíóúüñàèìòùäëïöõÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÕ";
+  const ACCENT_TO = "aeiouunaieouaeiouoAEIOUUNAEIOUAEIOU";
+
   const params = [
-    alert    !== undefined ? alert    : null,
+    alert !== undefined ? alert : null,
     category !== undefined ? category : null,
-    brand    !== undefined ? brand    : null,
-    search   !== undefined ? search   : null,
-    limit,
-    offset,
+    brand !== undefined ? brand : null,
   ];
+
+  const s = search !== undefined && search != null ? String(search).trim() : "";
+  const safeBy = searchBy === "name" ? "name" : searchBy === "sku" ? "sku" : null;
+  let searchWhere = "TRUE";
+
+  if (s.length >= 1) {
+    if (safeBy === "name") {
+      const tokens = s.split(/\s+/).filter((t) => t.length > 0).slice(0, 10);
+      if (tokens.length > 0) {
+        const foldCol = `translate(lower(p.name), '${ACCENT_FROM}', '${ACCENT_TO}')`;
+        const pieces = [];
+        for (const t of tokens) {
+          params.push(t);
+          const idx = params.length;
+          pieces.push(
+            `${foldCol} LIKE ('%' || translate(lower($${idx}::text), '${ACCENT_FROM}', '${ACCENT_TO}') || '%')`
+          );
+        }
+        searchWhere = `(${pieces.join(" AND ")})`;
+      }
+    } else if (safeBy === "sku") {
+      params.push(s);
+      const idx = params.length;
+      searchWhere = `p.sku ILIKE ('%' || $${idx}::text || '%')`;
+    } else {
+      params.push(s);
+      const idx = params.length;
+      searchWhere = `(p.sku ILIKE '%' || $${idx}::text || '%' OR p.name ILIKE '%' || $${idx}::text || '%')`;
+    }
+  }
+
+  params.push(limit, offset);
+  const limIdx = params.length - 1;
+  const offIdx = params.length;
 
   /**
    * Listado: sin JOIN a inventory_projections (el front solo usa sku, nombre, stock, etc.).
@@ -47,12 +81,11 @@ async function listProducts({ limit = 50, offset = 0, alert, category, brand, se
       AND ($1::boolean IS NULL OR i.stock_alert = $1)
       AND ($2::text    IS NULL OR p.category = $2)
       AND ($3::text    IS NULL OR p.brand ILIKE '%' || $3 || '%')
-      AND ($4::text    IS NULL OR p.sku ILIKE '%' || $4 || '%'
-                               OR p.name ILIKE '%' || $4 || '%')
+      AND ${searchWhere}
     ORDER BY
       i.stock_alert DESC,
       p.name ASC
-    LIMIT $5 OFFSET $6
+    LIMIT $${limIdx} OFFSET $${offIdx}
   `;
 
   const summarySql = `
@@ -438,19 +471,45 @@ async function createProductWithAllocatedSku(opts) {
 }
 
 async function searchProducts(q, { limit = 20 } = {}) {
-  const { rows } = await pool.query(`
+  const { rows } = await pool.query(
+    `
     SELECT
-      p.id, p.sku, p.name, p.brand, p.unit_price_usd,
-      i.stock_qty, i.stock_alert,
+      p.id,
+      p.sku,
+      p.sku_old,
+      p.name,
+      p.description,
+      NULLIF(
+        TRIM(
+          CONCAT_WS(
+            E'\n',
+            NULLIF(TRIM(p.name), ''),
+            NULLIF(TRIM(p.description), '')
+          )
+        ),
+        ''
+      ) AS catalog_full_text,
+      p.brand,
+      p.unit_price_usd,
+      p.company_id,
+      i.stock_qty,
+      i.stock_alert,
       ip.days_to_stockout
     FROM products p
     JOIN inventory i ON i.product_id = p.id
     LEFT JOIN inventory_projections ip ON ip.product_id = p.id
     WHERE p.is_active = TRUE
-      AND (p.sku ILIKE '%' || $1 || '%' OR p.name ILIKE '%' || $1 || '%')
+      AND (
+        p.sku ILIKE '%' || $1 || '%'
+        OR p.name ILIKE '%' || $1 || '%'
+        OR COALESCE(p.sku_old, '') ILIKE '%' || $1 || '%'
+        OR COALESCE(p.description, '') ILIKE '%' || $1 || '%'
+      )
     ORDER BY p.name ASC
     LIMIT $2
-  `, [q, limit]);
+  `,
+    [q, limit]
+  );
   return rows;
 }
 
@@ -976,11 +1035,98 @@ async function getInventoryStats() {
   };
 }
 
+/**
+ * Registra un ajuste de precio de catálogo:
+ *  1. Lee el precio actual (unit_price_usd) con bloqueo FOR UPDATE.
+ *  2. Actualiza products.unit_price_usd.
+ *  3. Inserta en product_unit_price_history dentro de la misma transacción.
+ *
+ * @param {number} productId
+ * @param {number} newPrice
+ * @param {{ userId?: number, userName?: string, reason?: string, source?: string }} meta
+ * @returns {Promise<{ product: object, history: object }>}
+ */
+async function addPriceAdjustment(productId, newPrice, meta = {}) {
+  if (!Number.isFinite(newPrice) || newPrice < 0) {
+    throw Object.assign(new Error('unit_price_usd inválido'), { code: 'VALIDATION' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: cur } = await client.query(
+      `SELECT id, unit_price_usd FROM products WHERE id = $1 FOR UPDATE`,
+      [productId]
+    );
+    if (!cur.length) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const priceBefore = cur[0].unit_price_usd != null ? Number(cur[0].unit_price_usd) : null;
+
+    await client.query(
+      `UPDATE products SET unit_price_usd = $1, updated_at = NOW() WHERE id = $2`,
+      [newPrice, productId]
+    );
+
+    const { rows: hist } = await client.query(
+      `INSERT INTO product_unit_price_history
+         (product_id, price_before, price_after, changed_by_id, changed_by_name, reason, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [
+        productId,
+        priceBefore,
+        newPrice,
+        meta.userId   ?? null,
+        meta.userName ?? null,
+        meta.reason   ?? null,
+        meta.source   ?? 'ui',
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    const product = await getProductById(productId);
+    return { product, history: hist[0] };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Devuelve el historial de ajustes de precio de un producto, más reciente primero.
+ *
+ * @param {number} productId
+ * @param {{ limit?: number, offset?: number }} opts
+ */
+async function getPriceHistory(productId, { limit = 50, offset = 0 } = {}) {
+  const { rows } = await pool.query(
+    `SELECT id, product_id, price_before, price_after,
+            changed_by_id, changed_by_name, reason, source, created_at
+       FROM product_unit_price_history
+      WHERE product_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3`,
+    [productId, limit, offset]
+  );
+  const { rows: cnt } = await pool.query(
+    `SELECT COUNT(*)::int AS total FROM product_unit_price_history WHERE product_id = $1`,
+    [productId]
+  );
+  return { items: rows, total: cnt[0]?.total ?? 0 };
+}
+
 module.exports = {
   listProducts,
   deactivateProduct,
   getProductById,
   updateProductById,
+  addPriceAdjustment,
+  getPriceHistory,
   createProductWithAllocatedSku,
   searchProducts,
   getAlerts,

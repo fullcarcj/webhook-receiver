@@ -17,6 +17,8 @@ const log  = pino({ level: process.env.LOG_LEVEL || "info", name: "sse" });
 
 const SSE_EVENTS = {
   PAYMENT_CONFIRMED:    "payment_confirmed",
+  /** Comprobante matcheado contra cotización (sin orden ERP aún). */
+  QUOTATION_RECEIPT_MATCHED: "quotation_receipt_matched",
   PAYMENT_MANUAL:       "payment_manual_review",
   PAYMENT_OVERDUE:      "payment_overdue",
   RECEIPT_DETECTED:     "receipt_detected",
@@ -101,6 +103,24 @@ function emitPaymentConfirmed({ orderId, customerId, amountBs, matchLevel, sourc
   });
 }
 
+/** Comprobante alineado a cotización del mismo chat (listo para “crear orden CH-2”). */
+function emitQuotationReceiptMatched({
+  quotationId,
+  chatId,
+  attemptId,
+  amountBs,
+  reference,
+}) {
+  emit(SSE_EVENTS.QUOTATION_RECEIPT_MATCHED, {
+    quotation_id: quotationId,
+    chat_id:      chatId,
+    attempt_id:   attemptId,
+    amount_bs:    amountBs,
+    reference:    reference || null,
+    message:      "Comprobante conciliado con cotización — pendiente crear orden",
+  });
+}
+
 function emitPaymentManualReview({ orderId, customerId, amountBs, source }) {
   emit(SSE_EVENTS.PAYMENT_MANUAL, {
     order_id:    orderId,
@@ -172,6 +192,7 @@ module.exports = {
   emit,
   emitToUser,
   emitPaymentConfirmed,
+  emitQuotationReceiptMatched,
   emitPaymentManualReview,
   emitPaymentOverdue,
   emitReceiptDetected,

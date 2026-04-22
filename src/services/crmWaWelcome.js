@@ -103,6 +103,39 @@ function hasRealNameForGreeting(fullName) {
   return Boolean(sanitizeWaPersonName(String(fullName)));
 }
 
+/** Ventana (horas) para no reenviar el mismo "pide nombre" vía otra ruta (CASO 3 ask_name + CASO 1 welcome). */
+function dedupAskHours() {
+  const raw = String(process.env.CRM_WA_WELCOME_ASK_DEDUP_HOURS ?? "").trim();
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0 && n <= 24 * 30) return n;
+  return 72;
+}
+
+/**
+ * Evita triplicar el pedido de nombre: CASO 3 (`trySendCrmWaAskName`) no escribe `wa_welcome_sent_at`
+ * en ningún chat; el siguiente mensaje entra por CASO 1 y `trySendCrmWaWelcome` vuelve a enviar el mismo
+ * texto si el nombre sigue siendo placeholder. Además `CRM_WA_WELCOME_ASK_NAME` aplica a ambas rutas.
+ */
+async function hasRecentCrmWelcomeAskSent(phoneE164) {
+  if (!phoneE164 || String(phoneE164).trim() === "") return false;
+  const hours = dedupAskHours();
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM ml_whatsapp_wasender_log
+       WHERE phone_e164 = $1
+         AND outcome = 'success'
+         AND tipo_e_activation_source IN ('tipo_h_crm_wa_welcome', 'tipo_h_crm_wa_welcome_ask_name')
+         AND created_at > NOW() - ($2 * INTERVAL '1 hour')
+       LIMIT 1`,
+      [String(phoneE164).trim(), hours]
+    );
+    return rows.length > 0;
+  } catch (e) {
+    log.warn({ err: e.message }, "crm_welcome: dedup query failed (continuar sin dedup)");
+    return false;
+  }
+}
+
 /** Reserva el slot de bienvenida; pendingAsk=true si solo pedimos nombre (luego trySendCrmWaWelcomeAfterName). */
 async function claimWelcomeFirstMessage(chatId, pendingAsk) {
   try {
@@ -219,6 +252,13 @@ async function trySendCrmWaWelcome({ chatId, customerId, phoneRaw }) {
       "crm_welcome: teléfono no normalizable a E.164 (revisar dígitos del webhook / default país en ml_wasender_settings)"
     );
     return { ok: false, outcome: "bad_phone" };
+  }
+
+  // CASO 3 envía `trySendCrmWaAskName` sin actualizar wa_welcome_sent_at; el siguiente mensaje
+  // entra por CASO 1 y repetiría el mismo pedido de nombre → suprimir si ya hubo envío reciente.
+  if (!hasRealNameForGreeting(fullName) && (await hasRecentCrmWelcomeAskSent(to))) {
+    log.info({ chatId: cid, to }, "crm_welcome: pedido de nombre duplicado suprimido (ml_whatsapp_wasender_log)");
+    return { ok: false, outcome: "duplicate_ask_suppressed" };
   }
 
   /** Reserva atómica: evita doble envío (webhooks duplicados o carreras). */
@@ -492,6 +532,11 @@ async function trySendCrmWaAskName({ phoneRaw }) {
   if (!to) {
     log.warn({ phoneRaw }, "crm_wa_ask_name: teléfono no normalizable a E.164");
     return { ok: false, outcome: "bad_phone" };
+  }
+
+  if (await hasRecentCrmWelcomeAskSent(to)) {
+    log.info({ to }, "crm_wa_ask_name: duplicado suprimido (mismo pedido reciente vía otro flujo)");
+    return { ok: false, outcome: "duplicate_ask_suppressed" };
   }
 
   const text =

@@ -55,24 +55,104 @@ async function handle(normalized) {
       lastMessageType: normalized.type || "text",
     });
 
-    const ins = await client.query(
-      `INSERT INTO crm_messages
-         (chat_id, customer_id, external_message_id, direction, type, content, sent_by, created_at)
-       VALUES ($1, $2, $3, 'outbound', $4, $5::jsonb, $6, NOW())
-       ON CONFLICT (external_message_id) DO NOTHING
-       RETURNING id`,
-      [
-        chatRow.id,
-        customerId,
-        normalized.messageId,
-        normalized.type || "text",
-        JSON.stringify(normalized.content || {}),
-        normalized.sentBy || "agent",
-      ]
+    // Dedup: chatMessageService.js guarda el mensaje con un UUID temporal ("out-<uuid>")
+    // porque obtiene el ID de Wasender de la respuesta API. Cuando llega el webhook
+    // messages.sent, intentamos unificar ambas filas actualizando el external_message_id
+    // en lugar de insertar un duplicado.
+    const textBody = normalized.content?.text ? String(normalized.content.text) : null;
+    const webhookMsgId = String(normalized.messageId);
+    let didUpdate = false;
+    let didSkip = false;
+
+    const alreadyId = await client.query(
+      `SELECT id FROM crm_messages WHERE chat_id = $1 AND external_message_id = $2 LIMIT 1`,
+      [chatRow.id, webhookMsgId]
     );
+    if (alreadyId.rows.length) {
+      didSkip = true;
+    }
+
+    if (!didSkip && textBody) {
+      const existing = await client.query(
+        `SELECT id FROM crm_messages
+         WHERE chat_id        = $1
+           AND direction      = 'outbound'
+           AND external_message_id LIKE 'out-%'
+           AND content::jsonb->>'text' = $2
+           AND created_at    >= NOW() - INTERVAL '5 minutes'
+         ORDER BY created_at DESC LIMIT 1`,
+        [chatRow.id, textBody]
+      );
+      if (existing.rows.length) {
+        await client.query(
+          `UPDATE crm_messages SET external_message_id = $1 WHERE id = $2`,
+          [webhookMsgId, existing.rows[0].id]
+        );
+        didUpdate = true;
+      } else {
+        // sendChatMessage ya insertó la fila con el id devuelto por la API; el webhook
+        // suele traer otro id o el mismo en otro formato → sin esto se duplica en el chat.
+        const dupe = await client.query(
+          `SELECT id FROM crm_messages
+           WHERE chat_id = $1
+             AND direction = 'outbound'
+             AND content::jsonb->>'text' = $2
+             AND created_at BETWEEN ($4::timestamptz - INTERVAL '3 minutes')
+                                AND ($4::timestamptz + INTERVAL '3 minutes')
+             AND (external_message_id IS NULL OR external_message_id IS DISTINCT FROM $3::text)
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [chatRow.id, textBody, webhookMsgId, lastAt]
+        );
+        if (dupe.rows.length) {
+          didSkip = true;
+          sentLog.info(
+            { chatId: chatRow.id, messageId: webhookMsgId },
+            "sent: omitido insert duplicado (mismo texto que fila reciente desde API)"
+          );
+        }
+      }
+    } else if (!didSkip && !textBody) {
+      // Wasender a veces manda messages.sent sin cuerpo útil; si solo hay un outbound
+      // pendiente out-* reciente, enlazar el msgId del webhook (evita duplicado vs bandeja).
+      const pendingOut = await client.query(
+        `SELECT id FROM crm_messages
+         WHERE chat_id = $1
+           AND direction = 'outbound'
+           AND external_message_id LIKE 'out-%'
+           AND created_at >= NOW() - INTERVAL '5 minutes'`,
+        [chatRow.id]
+      );
+      if (pendingOut.rows.length === 1) {
+        await client.query(
+          `UPDATE crm_messages SET external_message_id = $1 WHERE id = $2`,
+          [webhookMsgId, pendingOut.rows[0].id]
+        );
+        didUpdate = true;
+      }
+    }
+
+    let ins = { rows: [] };
+    if (!didUpdate && !didSkip) {
+      ins = await client.query(
+        `INSERT INTO crm_messages
+           (chat_id, customer_id, external_message_id, direction, type, content, sent_by, created_at)
+         VALUES ($1, $2, $3, 'outbound', $4, $5::jsonb, $6, NOW())
+         ON CONFLICT (external_message_id) DO NOTHING
+         RETURNING id`,
+        [
+          chatRow.id,
+          customerId,
+          normalized.messageId,
+          normalized.type || "text",
+          JSON.stringify(normalized.content || {}),
+          normalized.sentBy || "agent",
+        ]
+      );
+    }
 
     await client.query("COMMIT");
-    if (ins.rows.length) {
+    if (didUpdate || ins.rows.length) {
       await applyOutboundOmnichannelHook(pool, chatRow.id);
     }
     sentLog.info({ phone, customerId, messageId: normalized.messageId }, "sent: mensaje saliente guardado");

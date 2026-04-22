@@ -32,13 +32,22 @@ async function parseJsonBody(req) {
   return JSON.parse(txt);
 }
 
+/** Cache en memoria: userId → displayName. TTL 5 min para no estancarse tras cambio de nombre. */
+const _userNameCache = new Map();
+const USER_NAME_TTL_MS = 5 * 60 * 1000;
+
 async function loadUserDisplayName(userId) {
+  const cached = _userNameCache.get(userId);
+  if (cached && (Date.now() - cached.ts) < USER_NAME_TTL_MS) return cached.name;
+
   const { rows } = await pool.query(
     `SELECT COALESCE(NULLIF(TRIM(full_name), ''), NULLIF(TRIM(username), ''), 'Usuario') AS display_name
      FROM users WHERE id = $1`,
     [userId]
   );
-  return rows[0] && rows[0].display_name ? String(rows[0].display_name) : "Usuario";
+  const name = rows[0] && rows[0].display_name ? String(rows[0].display_name) : "Usuario";
+  _userNameCache.set(userId, { name, ts: Date.now() });
+  return name;
 }
 
 /**

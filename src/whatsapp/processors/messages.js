@@ -44,7 +44,7 @@ const {
 } = require("../../services/crmChatStates");
 const { maybeQueueInboundText } = require("../../services/aiResponder");
 const { applyInboundOmnichannelHook } = require("../../services/omnichannelInboundHook");
-const { isPhoneWhitelisted } = require("../../handlers/inboxWhitelistHandler");
+const { getWhitelistMode } = require("../../handlers/inboxWhitelistHandler");
 
 const msgLog = pino({ level: process.env.LOG_LEVEL || "info", name: "whatsapp_messages" });
 
@@ -280,14 +280,17 @@ async function handle(normalized) {
     return;
   }
 
-  // Whitelist de números operativos: propietario, admin, pruebas → ignorar
-  if (await isPhoneWhitelisted(normalized.fromPhone)) {
+  // Whitelist de números operativos
+  const _wlMode = await getWhitelistMode(normalized.fromPhone);
+  if (_wlMode === "ignore") {
     msgLog.info(
       { fromPhone: normalized.fromPhone, messageId: normalized.messageId },
-      "tipo_h_skip: número en whitelist operativo"
+      "tipo_h_skip: número en whitelist operativo (ignore)"
     );
     return;
   }
+  // mode='muted' → continúa la ingesta, pero el chat se marcará is_operational=true
+  const _isOperational = _wlMode === "muted";
 
   msgLog.info(
     { fromPhone: normalized.fromPhone, messageId: normalized.messageId, eventType, type: normalized.type },
@@ -365,6 +368,7 @@ async function handle(normalized) {
         lastMessageAt: lastAt,
         lastMessageText: preview,
         lastMessageType: normalized.type || "text",
+        isOperational: _isOperational,
       });
       postChatId = chatRow.id;
 
@@ -474,6 +478,7 @@ async function handle(normalized) {
           lastMessageAt: lastAt,
           lastMessageText: preview,
           lastMessageType: normalized.type || "text",
+          isOperational: _isOperational,
         });
         postChatId = chatRow.id;
 
@@ -524,6 +529,7 @@ async function handle(normalized) {
           lastMessageAt: lastAt,
           lastMessageText: preview,
           lastMessageType: normalized.type || "text",
+          isOperational: _isOperational,
         });
         postChatId = chatRow.id;
         await saveMessageAndUpdateChat(client, {
@@ -582,7 +588,7 @@ async function handle(normalized) {
           const logSkip = (step, r) => {
             if (!r || r.ok) return;
             const o = r.outcome;
-            if (o === "already_sent" || o === "not_pending") return;
+            if (o === "already_sent" || o === "not_pending" || o === "duplicate_ask_suppressed") return;
             msgLog.info({ ...ctx, step, outcome: o }, "crm_welcome_no_enviado");
           };
           Promise.resolve()

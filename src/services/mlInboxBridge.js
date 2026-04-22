@@ -6,7 +6,9 @@
  */
 
 const { pool } = require("../../db");
+const sseBroker = require("../realtime/sseBroker");
 const { applyInboundOmnichannelHook } = require("./omnichannelInboundHook");
+const { applyOutboundOmnichannelHook } = require("./omnichannelOutboundHook");
 
 function q(client) {
   return client && typeof client.query === "function" ? client : pool;
@@ -302,6 +304,23 @@ async function upsertMlMessageChat(messageRow, client) {
 }
 
 /**
+ * Tras insertar/actualizar la respuesta ML en CRM: mismo cierre que un envío agente
+ * (PENDING_RESPONSE → ATTENDED, SLA off) + refetch de bandeja sin sonido de mensaje nuevo.
+ * @param {import('pg').Pool|import('pg').PoolClient} dbClient
+ * @param {number} chatId
+ */
+async function finalizeAnsweredMlQuestionInCrm(dbClient, chatId) {
+  const cid = Number(chatId);
+  if (!Number.isFinite(cid) || cid <= 0) return;
+  try {
+    await applyOutboundOmnichannelHook(dbClient, cid);
+    sseBroker.broadcast("clear_notification", { chat_id: cid });
+  } catch (e) {
+    console.error("[mlInboxBridge] finalizeAnsweredMlQuestionInCrm", e && e.message ? e.message : e);
+  }
+}
+
+/**
  * Tras persistir ml_questions_answered (webhook, refresh, IA auto): refleja la respuesta en
  * crm_messages + crm_chats para que el omnicanal muestre la burbuja aunque nadie usó
  * POST /api/inbox/.../ml-question/answer. Idempotente: no duplica si ya hay outbound con
@@ -384,6 +403,7 @@ async function syncAnsweredMlQuestionToCrm(answeredRow, client = null) {
        WHERE id = $2`,
       [answerText.slice(0, 5000), chatId]
     );
+    await finalizeAnsweredMlQuestionInCrm(db, chatId);
     return { ok: true, chat_id: chatId, skipped: "outbound_already_exists" };
   }
 
@@ -415,6 +435,8 @@ async function syncAnsweredMlQuestionToCrm(answeredRow, client = null) {
      WHERE id = $2`,
     [answerText.slice(0, 5000), chatId]
   );
+
+  await finalizeAnsweredMlQuestionInCrm(db, chatId);
 
   return { ok: true, chat_id: chatId };
 }

@@ -48,6 +48,102 @@ async function listChats({ q, limit, offset, needs_followup }) {
   }
 }
 
+/**
+ * Pregunta ML respondida en ML (answered o pending ANSWERED).
+ */
+async function isMlQuestionAnswered(mlQuestionId) {
+  if (mlQuestionId == null) return false;
+  const qid = Number(mlQuestionId);
+  if (!Number.isFinite(qid) || qid <= 0) return false;
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM ml_questions_answered WHERE ml_question_id = $1
+       UNION ALL
+       SELECT 1 FROM ml_questions_pending WHERE ml_question_id = $1 AND ml_status = 'ANSWERED'
+       LIMIT 1`,
+      [qid]
+    );
+    return rows.length > 0;
+  } catch (_e) {
+    return false;
+  }
+}
+
+/**
+ * Calcula chat_stage alineado a CHAT_STAGE_EXPR en inboxService.js (6 etapas, sin ml_answer ni approved).
+ */
+function computeChatStage(chat, order, extra = {}) {
+  const quoteStatus =
+    extra.quoteStatus != null && String(extra.quoteStatus).trim() !== ""
+      ? String(extra.quoteStatus).trim()
+      : null;
+  const mqAns = extra.mlQuestionAnswered === true;
+
+  if (order) {
+    const st = order.status;
+    if (st === "completed" || st === "cancelled") return "closed";
+    if (order.payment_status === "approved" && order.fulfillment_type) return "dispatch";
+    if (order.payment_status === "pending") return "payment";
+    return "order";
+  }
+  if (quoteStatus === "approved") return "order";
+  if (["draft", "borrador", "sent"].includes(quoteStatus)) return "quote";
+  if (chat.source_type === "ml_question") {
+    return mqAns ? "quote" : "contact";
+  }
+  if (chat.source_type === "ml_message") return "order";
+  return "contact";
+}
+
+/** Resuelve customers.id a partir de ml_buyers.buyer_id (primary o tabla de vínculo). */
+async function findCustomerIdFromMlBuyerId(mlBuyerId) {
+  if (mlBuyerId == null) return null;
+  const bid = Number(mlBuyerId);
+  if (!Number.isFinite(bid) || bid <= 0) return null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.id AS customer_id
+       FROM customers c
+       WHERE c.primary_ml_buyer_id = $1
+       LIMIT 1`,
+      [bid]
+    );
+    if (rows.length) return Number(rows[0].customer_id);
+    const r2 = await pool.query(
+      `SELECT cmb.customer_id
+       FROM customer_ml_buyers cmb
+       WHERE cmb.ml_buyer_id = $1
+       LIMIT 1`,
+      [bid]
+    );
+    if (r2.rows.length) return Number(r2.rows[0].customer_id);
+  } catch (_e) {
+    /* tablas opcionales */
+  }
+  return null;
+}
+
+/** buyer_id de la pregunta ML (pending o answered). */
+async function findMlQuestionBuyerId(mlQuestionId) {
+  if (mlQuestionId == null) return null;
+  const qid = Number(mlQuestionId);
+  if (!Number.isFinite(qid) || qid <= 0) return null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT buyer_id FROM ml_questions_pending WHERE ml_question_id = $1
+       UNION ALL
+       SELECT buyer_id FROM ml_questions_answered WHERE ml_question_id = $1
+       LIMIT 1`,
+      [qid]
+    );
+    if (!rows.length || rows[0].buyer_id == null) return null;
+    const b = Number(rows[0].buyer_id);
+    return Number.isFinite(b) && b > 0 ? b : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
 async function getChatContext(chatId) {
   const id = Number(chatId);
   if (!Number.isFinite(id) || id <= 0) {
@@ -60,28 +156,35 @@ async function getChatContext(chatId) {
     if (!rows.length) return null;
     const chat = rows[0];
 
+    // Customer directo del chat + orden vinculada (conversation_id o ml_order_id = sales_orders.id)
+    const [customerResult, orderResult] = await Promise.all([
+      chat.customer_id
+        ? CustomerModel.getWithVehicles(chat.customer_id).catch(() => null)
+        : Promise.resolve(null),
+      pool.query(
+        `SELECT so.id, so.payment_status::text AS payment_status, so.fulfillment_type,
+                so.channel_id, so.status, so.customer_id
+         FROM sales_orders so
+         WHERE (so.conversation_id = $1
+                OR ($2::bigint IS NOT NULL AND so.id = $2::bigint))
+         ORDER BY
+           CASE WHEN so.conversation_id = $1 THEN 0 ELSE 1 END,
+           so.created_at DESC NULLS LAST
+         LIMIT 1`,
+        [id, chat.ml_order_id ?? null]
+      ).catch(() => ({ rows: [] })),
+    ]);
+
     let customer = null;
     let vehicles = [];
-    if (chat.customer_id) {
-      const withV = await CustomerModel.getWithVehicles(chat.customer_id);
-      if (withV) {
-        const { vehicles: v, ...cust } = withV;
-        customer = rowToCustomerApi(cust);
-        vehicles = Array.isArray(v) ? v : [];
-      }
+    if (customerResult) {
+      const { vehicles: v, ...cust } = customerResult;
+      customer = rowToCustomerApi(cust);
+      vehicles = Array.isArray(v) ? v : [];
     }
 
-    // Orden activa vinculada al chat (misma regla que GET /api/inbox — sales_orders.conversation_id)
     let order = null;
-    const { rows: orderRows } = await pool.query(
-      `SELECT so.id, so.payment_status::text AS payment_status, so.fulfillment_type, so.channel_id
-       FROM sales_orders so
-       WHERE so.conversation_id = $1
-         AND so.status NOT IN ('completed', 'cancelled')
-       ORDER BY so.created_at DESC NULLS LAST
-       LIMIT 1`,
-      [id]
-    );
+    const orderRows = orderResult.rows ?? [];
     if (orderRows.length) {
       const r = orderRows[0];
       order = {
@@ -89,10 +192,63 @@ async function getChatContext(chatId) {
         payment_status: r.payment_status,
         fulfillment_type: r.fulfillment_type,
         channel_id: r.channel_id != null ? Number(r.channel_id) : null,
+        status: r.status ?? null,
+        customer_id: r.customer_id != null ? Number(r.customer_id) : null,
       };
     }
 
-    return { chat, customer, vehicles, order };
+    // Resolver cliente para la ficha aunque crm_chats.customer_id sea NULL:
+    // orden ERP → buyer ML del chat → buyer de la pregunta ML.
+    let resolvedCustomerId =
+      chat.customer_id != null ? Number(chat.customer_id) : null;
+    if (!resolvedCustomerId && order && order.customer_id) {
+      resolvedCustomerId = order.customer_id;
+    }
+    if (!resolvedCustomerId && chat.ml_buyer_id != null) {
+      resolvedCustomerId = await findCustomerIdFromMlBuyerId(chat.ml_buyer_id);
+    }
+    if (!resolvedCustomerId && chat.ml_question_id != null) {
+      const bid = await findMlQuestionBuyerId(chat.ml_question_id);
+      if (bid) resolvedCustomerId = await findCustomerIdFromMlBuyerId(bid);
+    }
+
+    if (!customer && resolvedCustomerId) {
+      const withV = await CustomerModel.getWithVehicles(resolvedCustomerId).catch(() => null);
+      if (withV) {
+        const { vehicles: v, ...cust } = withV;
+        customer = rowToCustomerApi(cust);
+        vehicles = Array.isArray(v) ? v : [];
+      }
+    }
+
+    const chatOut =
+      resolvedCustomerId != null
+        ? { ...chat, customer_id: resolvedCustomerId }
+        : { ...chat };
+
+    const [mlQuestionAnswered, quoteIq] = await Promise.all([
+      chat.source_type === "ml_question" && chat.ml_question_id
+        ? isMlQuestionAnswered(chat.ml_question_id)
+        : Promise.resolve(false),
+      pool
+        .query(
+          `SELECT ip2.status AS quote_status
+           FROM inventario_presupuesto ip2
+           WHERE ip2.chat_id = $1 AND ip2.status NOT IN ('converted', 'expired')
+           ORDER BY ip2.fecha_creacion DESC NULLS LAST
+           LIMIT 1`,
+          [id]
+        )
+        .catch(() => ({ rows: [] })),
+    ]);
+    const quoteStatus = quoteIq.rows?.[0]?.quote_status ?? null;
+
+    const chat_stage = computeChatStage(chat, order, {
+      mlQuestionAnswered,
+      quoteStatus,
+    });
+
+    return { chat: chatOut, chat_stage, customer, vehicles, order };
   } catch (err) {
     throw mapSchemaError(err);
   }

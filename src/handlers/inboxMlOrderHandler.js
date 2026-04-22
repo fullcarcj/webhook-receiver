@@ -192,6 +192,22 @@ async function handleInboxMlOrderRequest(req, res, url) {
       if (m) mlOrderId = m[1];
     }
 
+    // Fallback: buscar external_order_id en sales_orders por conversation_id
+    // (cubre chats ml_question / wa_inbound cuya orden está vinculada por conversation_id)
+    if (mlOrderId == null) {
+      const { rows: soRows } = await pool.query(
+        `SELECT external_order_id
+         FROM sales_orders
+         WHERE conversation_id = $1 AND external_order_id IS NOT NULL
+         ORDER BY created_at DESC NULLS LAST
+         LIMIT 1`,
+        [chatId]
+      );
+      if (soRows.length && soRows[0].external_order_id) {
+        mlOrderId = soRows[0].external_order_id;
+      }
+    }
+
     if (mlOrderId == null) {
       writeJson(res, 200, null);
       return true;

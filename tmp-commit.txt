@@ -1,7 +1,0 @@
-feat(inbox): ficha 360 con pregunta ML, orden ML, producto y WMS
-
-- inboxMlQuestionHandler: UNION pending+answered, descarga publicacion ML si falta en ml_listings, _sync_debug, answered_by acepta string
-- inboxMlOrderHandler (nuevo): extrae order_id del phone mlm:{uid}:{order_id} si ml_order_id es null; enriquece items con ml_item_sku_map/sku_old, thumbnail ml_listings y ubicaciones v_picking_route WMS
-- chatService.getChatContext: incluye orden activa (sales_orders.conversation_id) en el contexto
-- inboxService.listInbox: anade ml_question_id y customer_id al SELECT y al objeto mapeado
-- server.js: monta handleInboxMlOrderRequest en GET /api/inbox/:chatId/ml-order

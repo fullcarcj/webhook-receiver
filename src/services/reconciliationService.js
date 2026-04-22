@@ -7,15 +7,18 @@ const exceptionsService = require("./exceptionsService");
  * Servicio de Conciliación Automática de Pagos.
  *
  * Cruza bank_statements (API Banesco cada 30s) + payment_attempts (comprobantes WA)
- * contra sales_orders pendientes, aplicando tolerancias distintas por fuente:
+ * contra sales_orders pendientes y, si no hay orden, contra inventario_presupuesto del mismo chat
+ * (monto en Bs con tasa del día + misma conversación WA), aplicando tolerancias distintas por fuente:
  *
  *   BANK_STATEMENT:  ±0.05 Bs  (redondeo bancario) — referencia: match PARCIAL (contains)
- *   PAYMENT_ATTEMPT: ±0.01 Bs  (IA lee print exacto) — referencia: match EXACTA (===)
+ *   PAYMENT_ATTEMPT: tolerancia por env `RECONCILIATION_ATTEMPT_TOLERANCE_BS` (default ±0,50 Bs)
  *
  * Niveles de match:
- *   NIVEL 1 — monto + referencia + fecha (0–1 día) → confidence 1.00 → auto-aprobado
- *   NIVEL 2 — monto + fecha (0–2 días)             → confidence 0.85 → auto-aprobado
- *   NIVEL 3 — monto + fecha > 2 días               → confidence 0.60 → revisión manual
+ *   NIVEL 1 — monto + referencia + fecha (−1 a +1 día)  → confidence 1.00 → auto-aprobado
+ *   NIVEL 2 — monto + fecha (−2 a +2 días)              → confidence 0.85/0.78 → auto-aprobado
+ *   NIVEL 3 — monto + fecha fuera de ventana            → confidence 0.60 → revisión manual
+ *
+ * Ventana negativa (−2 días): el cliente transfiere antes de que se genere la orden (flujo cotización/proforma).
  *
  * Recordatorio WA si no hay match (entre 6 h y 24 h desde la orden): RECONCILIATION_WA_REMINDERS_ENABLED=1 (por defecto apagado).
  *
@@ -32,10 +35,291 @@ const {
   emitPaymentOverdue,
 } = require("./sseService");
 
+// Tolerancia de monto por fuente.
+// PAYMENT_ATTEMPT puede ser mayor a 0.01 porque la tasa de cambio con la que el cliente calculó
+// puede diferir ligeramente de la usada al generar la orden (redondeos, deslizamiento intradía).
+// Se puede sobreescribir con RECONCILIATION_ATTEMPT_TOLERANCE_BS en el entorno (ej. "0.5").
+const _attemptTolEnv = parseFloat(process.env.RECONCILIATION_ATTEMPT_TOLERANCE_BS || "");
 const TOLERANCE = {
   BANK_STATEMENT:  0.05,
-  PAYMENT_ATTEMPT: 0.01,
+  PAYMENT_ATTEMPT: Number.isFinite(_attemptTolEnv) && _attemptTolEnv > 0 ? _attemptTolEnv : 0.50,
 };
+
+function fmtDateLong(iso) {
+  if (iso == null || String(iso).trim() === "") return "—";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso).slice(0, 10);
+    return d.toLocaleDateString("es-VE", { day: "2-digit", month: "long", year: "numeric" });
+  } catch {
+    return String(iso).slice(0, 10);
+  }
+}
+
+/** Texto WA post-conciliación exitosa (extracto o comprobante IA). */
+function buildPaymentConfirmedWaMessage(order, match) {
+  const orderId = order.id;
+  const totalFmt = Number(order.total_orden).toLocaleString("es-VE");
+  let amountBsFmt;
+  let refFull;
+  let dateStr;
+  let sourceHuman;
+  if (match.sourceType === "bank") {
+    const r = match.row;
+    const amt = r.amount != null ? Number(r.amount) : Number(order.total_orden);
+    amountBsFmt = Number(amt).toLocaleString("es-VE");
+    refFull =
+      r.reference_number != null && String(r.reference_number).trim() !== ""
+        ? String(r.reference_number).trim()
+        : r.description != null && String(r.description).trim() !== ""
+          ? String(r.description).trim().slice(0, 120)
+          : "—";
+    dateStr = fmtDateLong(r.tx_date);
+    sourceHuman = "movimiento en el extracto bancario";
+  } else {
+    const r = match.row;
+    const amt = r.extracted_amount_bs != null ? Number(r.extracted_amount_bs) : Number(order.total_orden);
+    amountBsFmt = Number(amt).toLocaleString("es-VE");
+    refFull =
+      r.extracted_reference != null && String(r.extracted_reference).trim() !== ""
+        ? String(r.extracted_reference).trim()
+        : "—";
+    dateStr = fmtDateLong(r.extracted_date);
+    sourceHuman = "comprobante enviado por WhatsApp";
+  }
+  return (
+    `✅ *Pago confirmado*\n\n` +
+    `Tu pago de *Bs ${amountBsFmt}* con referencia *${refFull}* ` +
+    `(fecha del comprobante o del banco: *${dateStr}*) quedó conciliado correctamente ` +
+    `con la orden *#${orderId}* mediante ${sourceHuman}.\n\n` +
+    `El monto registrado en la orden es *Bs ${totalFmt}*. ` +
+    `Tu pedido *pasará a la etapa de despacho* cuando el sistema tenga el tipo de entrega configurado; ` +
+    `un operador puede coordinar contigo por este canal.`
+  );
+}
+
+async function resolveWaNotifyPhone(order, chatId) {
+  let phone = order.customer_phone;
+  if (phone && String(phone).replace(/\D/g, "").length >= 10) return String(phone);
+  if (chatId != null && Number.isFinite(Number(chatId)) && Number(chatId) > 0) {
+    const { rows } = await pool.query(`SELECT phone FROM crm_chats WHERE id = $1 LIMIT 1`, [
+      Number(chatId),
+    ]);
+    if (rows[0]?.phone && String(rows[0].phone).replace(/\D/g, "").length >= 10) {
+      return String(rows[0].phone);
+    }
+  }
+  if (order.customer_id != null) {
+    const { rows } = await pool.query(`SELECT phone FROM customers WHERE id = $1 LIMIT 1`, [
+      order.customer_id,
+    ]);
+    if (rows[0]?.phone && String(rows[0].phone).replace(/\D/g, "").length >= 10) {
+      return String(rows[0].phone);
+    }
+  }
+  return null;
+}
+
+/** Referencia humana de cotización (alineado a inboxQuotationHandler.buildReference). */
+function presupuestoReference(channelId, id) {
+  const ch = Number(channelId);
+  if (ch === 2) return `COT-WA-${id}`;
+  if (ch === 3) return `COT-ML-${id}`;
+  return `COT-${id}`;
+}
+
+/** Misma lógica que PaymentLinkPanel / link-bank-statement: max(1 Bs, 0,5 % del monto). */
+function tolQuotationVsAttemptBs(quotationBs) {
+  return Math.max(1, Math.abs(Number(quotationBs) || 0) * 0.005);
+}
+
+/**
+ * Si no hubo match con sales_orders: misma conversación (chat_id), cotización sent|approved,
+ * monto comprobante ≈ total USD × tasa, y cliente_id coherente cuando ambos existen.
+ * @returns {Promise<boolean>}
+ */
+async function maybeMatchQuotationFromAttempt(attempt, attemptChatId, attemptCustomerId) {
+  if (!attemptChatId) return false;
+
+  const { rows: chk } = await pool.query(`SELECT id FROM crm_chats WHERE id = $1 LIMIT 1`, [
+    attemptChatId,
+  ]);
+  if (!chk.length) return false;
+
+  const { getTodayRate } = require("./currencyService");
+  const rateRow = await getTodayRate(1).catch(() => null);
+  const rate = rateRow && Number(rateRow.active_rate) > 0 ? Number(rateRow.active_rate) : null;
+  if (!rate) {
+    log.warn({ attemptId: attempt.id }, "reconcileAttempt: match cotización omitido (sin tasa del día)");
+    return false;
+  }
+
+  const ext = Number(attempt.extracted_amount_bs);
+  if (!Number.isFinite(ext)) return false;
+
+  const { rows: quotes } = await pool.query(
+    `SELECT id, channel_id, cliente_id, total::numeric AS total_usd,
+            lower(status::text) AS st
+       FROM inventario_presupuesto
+      WHERE chat_id = $1
+        AND lower(status::text) NOT IN ('converted', 'expired', 'rejected')
+      ORDER BY fecha_creacion DESC
+      LIMIT 30`,
+    [attemptChatId]
+  );
+
+  let best = null;
+  let bestDiff = Infinity;
+  for (const q of quotes) {
+    const st = String(q.st || "").trim();
+    if (!["sent", "approved"].includes(st)) continue;
+    if (
+      attemptCustomerId != null &&
+      q.cliente_id != null &&
+      Number(q.cliente_id) !== Number(attemptCustomerId)
+    ) {
+      continue;
+    }
+    const qBs = Number(q.total_usd) * rate;
+    const tol = tolQuotationVsAttemptBs(qBs);
+    const diff = Math.abs(ext - qBs);
+    if (diff <= tol && diff < bestDiff) {
+      bestDiff = diff;
+      best = q;
+    }
+  }
+
+  if (!best) return false;
+
+  const ref = presupuestoReference(best.channel_id, best.id);
+
+  let upd;
+  const settlementSvc = require("./quotationPaymentSettlementService");
+  const useAlloc = await settlementSvc.allocationTableExists(null).catch(() => false);
+
+  if (useAlloc) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      upd = await client.query(
+        `UPDATE payment_attempts
+           SET reconciliation_status = 'matched',
+               reconciled_quotation_id = $2,
+               reconciled_order_id = NULL,
+               reconciled_at = NOW()
+         WHERE id = $1
+           AND reconciliation_status = 'pending'
+         RETURNING id`,
+        [attempt.id, best.id]
+      );
+      if (!upd.rows.length) {
+        await client.query("ROLLBACK");
+        return false;
+      }
+      try {
+        await settlementSvc.insertAllocation(client, {
+          quotationId:      best.id,
+          paymentAttemptId: attempt.id,
+          sourceCurrency:   "VES",
+          amountOriginal:   ext,
+          fxRateBsPerUsd:   rate,
+          userId:           null,
+        });
+        await settlementSvc.assertAllocationTotalsWithinTolerance(client, best.id);
+      } catch (allocErr) {
+        await client.query("ROLLBACK");
+        if (allocErr && allocErr.code === "23505") {
+          log.info({ attemptId: attempt.id, quotationId: best.id }, "reconcileAttempt: imputación duplicada; rollback");
+          return false;
+        }
+        if (allocErr && String(allocErr.code) === "OVER_ALLOCATED") {
+          log.warn({ attemptId: attempt.id, quotationId: best.id }, "reconcileAttempt: imputación excede total; rollback");
+          return false;
+        }
+        throw allocErr;
+      }
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => {});
+      if (e && e.code === "42703") {
+        log.warn(
+          { attemptId: attempt.id },
+          "reconcileAttempt: falta columna reconciled_quotation_id — ejecutar sql/20260426_payment_attempts_reconciled_quotation.sql"
+        );
+        return false;
+      }
+      throw e;
+    } finally {
+      client.release();
+    }
+  } else {
+    try {
+      upd = await pool.query(
+        `UPDATE payment_attempts
+           SET reconciliation_status = 'matched',
+               reconciled_quotation_id = $2,
+               reconciled_order_id = NULL,
+               reconciled_at = NOW()
+         WHERE id = $1
+           AND reconciliation_status = 'pending'
+         RETURNING id`,
+        [attempt.id, best.id]
+      );
+    } catch (e) {
+      if (e && e.code === "42703") {
+        log.warn(
+          { attemptId: attempt.id },
+          "reconcileAttempt: falta columna reconciled_quotation_id — ejecutar sql/20260426_payment_attempts_reconciled_quotation.sql"
+        );
+        return false;
+      }
+      throw e;
+    }
+    if (!upd.rows.length) return false;
+  }
+
+  const { emitQuotationReceiptMatched } = require("./sseService");
+  emitQuotationReceiptMatched({
+    quotationId: best.id,
+    chatId:       attemptChatId,
+    attemptId:    attempt.id,
+    amountBs:     ext,
+    reference:    ref,
+  });
+
+  const waOrderLite = { customer_phone: null, customer_id: attemptCustomerId };
+  await maybeSendQuotationReceiptWa(waOrderLite, attemptChatId, ref, ext);
+
+  log.info(
+    { attemptId: attempt.id, quotationId: best.id, reference: ref, diff_bs: bestDiff },
+    "reconcileAttempt: MATCH contra cotización (mismo chat + monto)"
+  );
+  return true;
+}
+
+async function maybeSendQuotationReceiptWa(orderLite, chatId, quotationRef, amountBs) {
+  try {
+    const { sendWasenderTextMessage } = require("../../wasender-client");
+    const apiKey = process.env.WASENDER_API_KEY;
+    const apiBaseUrl = process.env.WASENDER_API_BASE_URL || "https://www.wasenderapi.com";
+    if (!apiKey) return;
+    const toPhone = await resolveWaNotifyPhone(orderLite, chatId);
+    if (!toPhone) return;
+    const amtFmt = Number(amountBs).toLocaleString("es-VE");
+    const text =
+      `✅ *Recibimos tu comprobante*\n\n` +
+      `El monto de *Bs ${amtFmt}* coincide con la cotización *${quotationRef}* de esta conversación. ` +
+      `En breve el equipo registrará tu *orden de compra* y te avisará por aquí.`;
+    await sendWasenderTextMessage({
+      apiKey,
+      apiBaseUrl,
+      to: `+${String(toPhone).replace(/\D/g, "")}`,
+      text,
+      messageType: "CRITICAL",
+      customerId: orderLite.customer_id != null ? Number(orderLite.customer_id) : undefined,
+    }).catch((e) => log.error({ err: e.message }, "reconciliation: WA cotización-match falló"));
+  } catch (_) { /* opcional */ }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Función principal — llamada por el worker cada 30s
@@ -49,17 +333,19 @@ async function runReconciliation() {
     manual:    0, no_match:   0, errors: 0,
   };
 
-  // Órdenes pendientes · solo canales de pago bancario (CH-2 WA/redes, CH-5 fuerza ventas).
+  // Órdenes pendientes · canales de pago bancario (CH-2 WA/redes, CH-3 cotizaciones ML, CH-5 fuerza ventas).
   // Comparar total_amount_bs (VES canónico, ADR-008) contra bank_statements.amount (siempre VES).
+  // conversation_id: vínculo al crm_chat — usado para avanzar el pipeline tras conciliar.
   const { rows: orders } = await pool.query(`
     SELECT so.id, so.source, so.external_order_id,
            so.customer_id, so.total_amount_bs AS total_orden, so.notes,
            so.created_at, so.payment_method, so.wa_payment_reminder_at,
+           so.conversation_id,
            c.phone AS customer_phone
     FROM sales_orders so
     LEFT JOIN customers c ON c.id = so.customer_id
     WHERE so.payment_status = 'pending'
-      AND so.channel_id IN (2, 5)
+      AND so.channel_id IN (2, 3, 5)
       AND so.total_amount_bs IS NOT NULL
       AND so.total_amount_bs > 0
     ORDER BY so.created_at ASC
@@ -106,8 +392,10 @@ async function runReconciliation() {
         continue;
       }
 
+      const orderChatId = order.conversation_id != null ? Number(order.conversation_id) : null;
+
       if (best.level === 1 || best.level === 2) {
-        await applyMatch(order, best);
+        await applyMatch(order, best, orderChatId);
         if (best.sourceType === "bank") {
           best.level === 1 ? stats.bank_l1++ : stats.bank_l2++;
           // Eliminar del pool en memoria para que no concilie dos órdenes
@@ -119,7 +407,7 @@ async function runReconciliation() {
           if (idx !== -1) attemptPool.splice(idx, 1);
         }
       } else {
-        await applyManualReview(order, best);
+        await applyManualReview(order, best, orderChatId);
         stats.manual++;
       }
     } catch (err) {
@@ -150,8 +438,10 @@ function findBestMatch(order, rows, tolerance, sourceType) {
 
     const refMatch = checkReference(refField, order, sourceType);
     const daysDiff = getDaysDiff(dateField, order.created_at);
-    const inRange  = daysDiff >= 0 && daysDiff <= 1;
-    const extended = daysDiff >= 0 && daysDiff <= 2;
+    // Ventana simétrica: el pago puede llegar hasta 2 días ANTES de la orden (cotización/proforma)
+    // o hasta 2 días DESPUÉS (acreditación diferida). daysDiff = fecha_pago − fecha_orden.
+    const inRange  = daysDiff >= -2 && daysDiff <= 1;
+    const extended = daysDiff >= -2 && daysDiff <= 2;
 
     let level, score;
     if (refMatch && inRange) { level = 1; score = 1.00; }
@@ -199,18 +489,20 @@ function chooseBest(bankMatch, attemptMatch) {
 // Aplicar conciliación exitosa (L1 o L2)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function applyMatch(order, match) {
+async function applyMatch(order, match, chatId = null) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
+    // Actualizar la orden: approved + vincular al chat si la orden no tiene conversation_id aún
     await client.query(
       `UPDATE sales_orders
        SET status         = 'paid',
            payment_status = 'approved',
+           conversation_id = COALESCE(conversation_id, $2),
            updated_at     = NOW()
        WHERE id = $1`,
-      [order.id]
+      [order.id, chatId ?? null]
     );
 
     if (match.sourceType === "bank") {
@@ -259,6 +551,7 @@ async function applyMatch(order, match) {
       score:      match.score,
       diff:       match.diff,
       tolerance:  match.tolerance,
+      chatId,
     }, `reconciliation: NIVEL ${match.level} aprobado`);
 
     // Notificar frontend en tiempo real — después del COMMIT (no afecta la transacción)
@@ -292,21 +585,23 @@ async function applyMatch(order, match) {
   } catch (_) { /* loyalty opcional */ }
 
   try {
-    if (order.customer_phone) {
-      const { sendWasenderTextMessage } = require("../../wasender-client");
-      const apiKey     = process.env.WASENDER_API_KEY;
-      const apiBaseUrl = process.env.WASENDER_API_BASE_URL || "https://www.wasenderapi.com";
-      if (apiKey) {
-        const sourceLabel = match.sourceType === "bank" ? "estado de cuenta" : "comprobante enviado";
-        const totalFmt    = Number(order.total_orden).toLocaleString("es-VE");
+    const { sendWasenderTextMessage } = require("../../wasender-client");
+    const apiKey     = process.env.WASENDER_API_KEY;
+    const apiBaseUrl = process.env.WASENDER_API_BASE_URL || "https://www.wasenderapi.com";
+    if (apiKey) {
+      const toPhone = await resolveWaNotifyPhone(order, chatId);
+      if (toPhone) {
+        const text = buildPaymentConfirmedWaMessage(order, match);
         await sendWasenderTextMessage({
           apiKey,
           apiBaseUrl,
-          to:   `+${String(order.customer_phone).replace(/\D/g, "")}`,
-          text: `✅ *¡Pago confirmado!*\n\nTu orden *#${order.id}* fue conciliada vía ${sourceLabel}.\nMonto: *Bs ${totalFmt}*\n\nEn breve coordinamos la entrega. 🔧`,
+          to:   `+${String(toPhone).replace(/\D/g, "")}`,
+          text,
           messageType: "CRITICAL",
           customerId: order.customer_id != null ? Number(order.customer_id) : undefined,
         }).catch((e) => log.error({ err: e.message }, "reconciliation: WA notify post-match falló"));
+      } else {
+        log.warn({ orderId: order.id, chatId }, "reconciliation: WA notify omitido (sin teléfono)");
       }
     }
   } catch (_) { /* notificación WA opcional */ }
@@ -339,7 +634,7 @@ async function applyMatch(order, match) {
 
   // Log de trazabilidad (Paso 2 · fire-and-forget, no revierte el match)
   botActionsService.log({
-    chatId:       null,
+    chatId:       chatId ?? null,
     orderId:      order.id,
     actionType:   "payment_reconciled",
     inputContext: {
@@ -457,16 +752,17 @@ async function maybeSendBankProofEducationWa(order, match) {
 // Revisión manual (L3)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function applyManualReview(order, match) {
+async function applyManualReview(order, match, chatId = null) {
   // L3: marcar la orden como pendiente de aprobación humana.
   // Usamos approval_status (workflow de revisión) en lugar de payment_status (estado del dinero).
   // Decisión 2026-04-20: ver ADR-006 amendment nota 2. payment_status permanece 'pending'.
   await pool.query(
     `UPDATE sales_orders
      SET approval_status = 'pending',
+         conversation_id = COALESCE(conversation_id, $2),
          updated_at = NOW()
      WHERE id = $1`,
-    [order.id]
+    [order.id, chatId ?? null]
   );
 
   if (match.sourceType === "bank") {
@@ -523,10 +819,10 @@ async function applyManualReview(order, match) {
         sourceRowId: match.row.id,
         diff:        match.diff,
       },
-      chatId: null,
+      chatId: chatId ?? null,
     }),
     botActionsService.log({
-      chatId:       null,
+      chatId:       chatId ?? null,
       orderId:      order.id,
       actionType:   "manual_review_required",
       inputContext: { matchLevel: match.level, score: match.score, sourceType: match.sourceType },
@@ -629,16 +925,17 @@ async function reconcileStatements(bankStatementIds) {
 
   if (!statements.length) return;
 
-  // Órdenes pendientes · solo canales bancarios (CH-2, CH-5) · total_amount_bs canónico (ADR-008)
+  // Órdenes pendientes · canales bancarios (CH-2, CH-3 cotizaciones ML, CH-5) · total_amount_bs canónico (ADR-008)
   const { rows: orders } = await pool.query(`
     SELECT so.id, so.source, so.external_order_id,
            so.customer_id, so.total_amount_bs AS total_orden, so.notes,
            so.created_at, so.payment_method, so.wa_payment_reminder_at,
+           so.conversation_id,
            c.phone AS customer_phone
     FROM sales_orders so
     LEFT JOIN customers c ON c.id = so.customer_id
     WHERE so.payment_status = 'pending'
-      AND so.channel_id IN (2, 5)
+      AND so.channel_id IN (2, 3, 5)
       AND so.total_amount_bs IS NOT NULL
       AND so.total_amount_bs > 0
     ORDER BY so.created_at ASC
@@ -652,21 +949,22 @@ async function reconcileStatements(bankStatementIds) {
 
   for (const order of orderPool) {
     if (!stmtPool.length) break;
+    const orderChatId = order.conversation_id != null ? Number(order.conversation_id) : null;
     try {
       // findBestMatch(order, rows, tolerance, sourceType) — busca en rows el mejor match para order
       const match = findBestMatch(order, stmtPool, TOLERANCE.BANK_STATEMENT, "bank");
       if (!match) continue;
 
       if (match.level === 1 || match.level === 2) {
-        await applyMatch(order, match);
+        await applyMatch(order, match, orderChatId);
         // Evitar reusar el mismo statement para otra orden
         const idx = stmtPool.findIndex((s) => s.id === match.row.id);
         if (idx !== -1) stmtPool.splice(idx, 1);
-        log.info({ orderId: order.id, statementId: match.row.id, level: match.level },
+        log.info({ orderId: order.id, statementId: match.row.id, level: match.level, chatId: orderChatId },
           "reconcileStatements: MATCH aplicado");
       } else {
-        await applyManualReview(order, match);
-        log.warn({ orderId: order.id, statementId: match.row.id },
+        await applyManualReview(order, match, orderChatId);
+        log.warn({ orderId: order.id, statementId: match.row.id, chatId: orderChatId },
           "reconcileStatements: enviado a revisión manual");
       }
     } catch (err) {
@@ -685,7 +983,7 @@ async function reconcileAttempt(paymentAttemptId) {
   if (!paymentAttemptId) return;
 
   const { rows: attempts } = await pool.query(
-    `SELECT id, customer_id, extracted_reference,
+    `SELECT id, customer_id, chat_id, extracted_reference,
             extracted_amount_bs, extracted_date, extraction_confidence
      FROM payment_attempts
      WHERE id = $1
@@ -697,46 +995,90 @@ async function reconcileAttempt(paymentAttemptId) {
   if (!attempts.length) return;
   const attempt = attempts[0];
 
-  // Órdenes pendientes · solo canales bancarios (CH-2, CH-5) · total_amount_bs canónico (ADR-008)
-  const { rows: orders } = await pool.query(`
-    SELECT so.id, so.source, so.external_order_id,
-           so.customer_id, so.total_amount_bs AS total_orden, so.notes,
-           so.created_at, so.payment_method, so.wa_payment_reminder_at,
-           c.phone AS customer_phone
-    FROM sales_orders so
-    LEFT JOIN customers c ON c.id = so.customer_id
-    WHERE so.payment_status = 'pending'
-      AND so.channel_id IN (2, 5)
-      AND so.total_amount_bs IS NOT NULL
-      AND so.total_amount_bs > 0
-    ORDER BY so.created_at ASC
-  `);
+  const attemptCustomerId = attempt.customer_id != null ? Number(attempt.customer_id) : null;
+  const attemptChatId     = attempt.chat_id     != null ? Number(attempt.chat_id)     : null;
 
-  if (!orders.length) return;
+  // ── Paso 1: buscar órdenes directamente vinculadas al chat del attempt ───────
+  // La cotización y/o la orden pueden tener conversation_id = chat_id → prioridad máxima.
+  let chatLinkedOrderIds = new Set();
+  if (attemptChatId) {
+    const { rows: chatOrders } = await pool.query(
+      `SELECT so.id
+       FROM sales_orders so
+       WHERE so.payment_status = 'pending'
+         AND so.channel_id IN (2, 3, 5)
+         AND so.total_amount_bs IS NOT NULL
+         AND so.total_amount_bs > 0
+         AND (
+           so.conversation_id = $1
+           OR so.id IN (
+             SELECT ip.order_id FROM inventario_presupuesto ip
+             WHERE ip.chat_id = $1 AND ip.order_id IS NOT NULL
+           )
+         )`,
+      [attemptChatId]
+    );
+    for (const r of chatOrders) chatLinkedOrderIds.add(Number(r.id));
+  }
 
-  // findBestMatch espera (order, rows[], tolerance, sourceType).
-  // Para un solo attempt: pasar [attempt] como pool y buscar para cada orden cuál es mejor match.
+  // ── Paso 2: todas las órdenes elegibles, ordenadas: chat-linked → mismo customer → resto ──
+  const { rows: orders } = await pool.query(
+    `SELECT so.id, so.source, so.external_order_id,
+            so.customer_id, so.total_amount_bs AS total_orden, so.notes,
+            so.created_at, so.payment_method, so.wa_payment_reminder_at,
+            so.conversation_id,
+            c.phone AS customer_phone
+     FROM sales_orders so
+     LEFT JOIN customers c ON c.id = so.customer_id
+     WHERE so.payment_status = 'pending'
+       AND so.channel_id IN (2, 3, 5)
+       AND so.total_amount_bs IS NOT NULL
+       AND so.total_amount_bs > 0
+     ORDER BY
+       CASE WHEN so.conversation_id = $1 THEN 0
+            WHEN so.id = ANY($2::int[]) THEN 0
+            ELSE 1 END,
+       CASE WHEN so.customer_id = $3    THEN 0
+            ELSE 1 END,
+       so.created_at ASC`,
+    [
+      attemptChatId    ?? 0,
+      chatLinkedOrderIds.size ? [...chatLinkedOrderIds] : [0],
+      attemptCustomerId ?? 0,
+    ]
+  );
+
   let matched = false;
   try {
     for (const order of orders) {
       const match = findBestMatch(order, [attempt], TOLERANCE.PAYMENT_ATTEMPT, "attempt");
       if (!match) continue;
 
+      // Determinar chatId efectivo: del attempt, o del vínculo de la orden
+      const effectiveChatId =
+        attemptChatId ??
+        (order.conversation_id != null ? Number(order.conversation_id) : null);
+
       matched = true;
       if (match.level === 1 || match.level === 2) {
-        await applyMatch(order, match);
-        log.info({ attemptId: attempt.id, orderId: order.id, level: match.level },
-          "reconcileAttempt: MATCH aplicado");
+        await applyMatch(order, match, effectiveChatId);
+        log.info({
+          attemptId: attempt.id, orderId: order.id, level: match.level,
+          chatId: effectiveChatId, customerId: attemptCustomerId,
+        }, "reconcileAttempt: MATCH aplicado");
       } else {
-        await applyManualReview(order, match);
-        log.warn({ attemptId: attempt.id, orderId: order.id },
+        await applyManualReview(order, match, effectiveChatId);
+        log.warn({ attemptId: attempt.id, orderId: order.id, chatId: effectiveChatId },
           "reconcileAttempt: enviado a revisión manual");
       }
-      // Solo una orden puede conciliarse con este attempt
       break;
     }
 
-    // Ninguna orden tuvo monto dentro de la tolerancia ±0.01 Bs
+    if (!matched) {
+      const qOk = await maybeMatchQuotationFromAttempt(attempt, attemptChatId, attemptCustomerId);
+      if (qOk) matched = true;
+    }
+
     if (!matched) {
       await pool.query(
         `UPDATE payment_attempts
@@ -748,7 +1090,8 @@ async function reconcileAttempt(paymentAttemptId) {
         attemptId:     attempt.id,
         amount_bs:     attempt.extracted_amount_bs,
         reference:     attempt.extracted_reference,
-        bank:          attempt.extracted_bank,
+        customerId:    attemptCustomerId,
+        chatId:        attemptChatId,
         ordersChecked: orders.length,
         tolerance_bs:  TOLERANCE.PAYMENT_ATTEMPT,
       }, "reconcileAttempt: sin match de monto — attempt marcado no_match");

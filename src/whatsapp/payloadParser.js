@@ -149,6 +149,29 @@ function normalizeBaileysEnvelope(body) {
         ? Math.floor(Number(d.timestamp) / 1000)
         : Math.floor(Date.now() / 1000);
     n.sentBy = "wasender_api";
+    // Texto del ack: si falta, processors/sent.js no puede fusionar con la fila de sendChatMessage
+    // y se duplica el mensaje en bandeja (API ya insertó en crm_messages).
+    const pickTxt = (v) => {
+      if (v == null) return null;
+      const s = String(v).trim();
+      return s !== "" ? s : null;
+    };
+    let sentText =
+      pickTxt(d.text) ||
+      pickTxt(d.body) ||
+      pickTxt(d.messageText) ||
+      pickTxt(d.caption) ||
+      (typeof d.message === "string" ? pickTxt(d.message) : null);
+    const dm = d.message && typeof d.message === "object" ? d.message : null;
+    if (dm) {
+      sentText =
+        sentText ||
+        pickTxt(dm.conversation) ||
+        pickTxt(dm.extendedTextMessage && dm.extendedTextMessage.text);
+    }
+    if (sentText) {
+      n.content.text = sentText;
+    }
     return n;
   }
 

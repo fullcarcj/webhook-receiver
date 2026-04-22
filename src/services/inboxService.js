@@ -7,47 +7,72 @@ const exceptionsService = require("./exceptionsService");
 const FILTERS = new Set(["unread", "payment_pending", "quote", "dispatch"]);
 const SRCS = new Set(["wa", "ml", "ml_question", "ml_message", "wa_ml_linked"]);
 
+/** Filtro de resultado comercial (última orden por chat, alias `sol`). */
+const RESULTS = new Set(["no_conversion", "converted", "in_progress"]);
+
 /**
- * Etapas canónicas del pipeline de un chat (8 valores).
+ * Etapas canónicas del pipeline de un chat (7 valores).
  * Distinto de LIFECYCLE_STAGE_VALUES (salesService.js) que es feedback ML post-venta.
  *
- * Orden de avance del pipeline:
- *   contact → ml_answer → quote → approved → order → payment → dispatch → closed
+ * Orden de avance:
+ *   contact → quote → order → payment → dispatch → closed  (6 etapas)
  *
- * 'order': orden existe y está activa, pero payment_status no es 'pending' ni
- *          ('approved' con fulfillment_type). Caso típico: pago confirmado pero
- *          fulfillment_type aún sin asignar, u orden recién creada sin payment_status.
+ * Pregunta ML: no hay etapa "Resp. ML". Sin respuesta en ML → contact; respondida
+ * en ML → quote (siguiente paso operativo: cotización formal en ERP).
+ *
+ * 'order': cotización aprobada (quote_status=approved) O existe orden activa en ERP.
+ *          Unifica las antiguas etapas 'approved' y 'order' en una sola.
  */
 const CHAT_STAGE_VALUES = new Set([
   "contact",
-  "ml_answer",
   "quote",
-  "approved",
   "order",
   "payment",
   "dispatch",
   "closed",
 ]);
 
-/** Orden activa por chat (excluye completed/cancelled — usada para filtros de lista). */
+/**
+ * Orden activa por chat (excluye completed/cancelled — usada para filtros de lista).
+ * Busca por conversation_id primero; si el chat tiene ml_order_id lo usa como fallback.
+ *
+ * Para chats ml_question: se omite el match por conversation_id porque lookupMlConversation
+ * asigna automáticamente conversation_id durante la importación de órdenes, lo que generaría
+ * falsos positivos de pipeline. Para esos chats solo se acepta cc.ml_order_id (vínculo
+ * explícito vía "Vincular Orden ML").
+ */
 const JOIN_ORDER = `
   LEFT JOIN LATERAL (
     SELECT so2.id, so2.payment_status, so2.fulfillment_type, so2.channel_id, so2.status
     FROM sales_orders so2
-    WHERE so2.conversation_id = cc.id
+    WHERE (
+      (cc.source_type != 'ml_question' AND so2.conversation_id = cc.id)
+      OR (cc.ml_order_id IS NOT NULL AND so2.id = cc.ml_order_id)
+    )
       AND so2.status NOT IN ('completed', 'cancelled')
-    ORDER BY so2.created_at DESC NULLS LAST
+    ORDER BY
+      CASE WHEN cc.ml_order_id IS NOT NULL AND so2.id = cc.ml_order_id THEN 0 ELSE 1 END,
+      so2.created_at DESC NULLS LAST
     LIMIT 1
   ) so ON true
 `;
 
-/** Orden más reciente por chat sin filtro de estado — usada solo para calcular chat_stage. */
+/**
+ * Orden más reciente por chat sin filtro de estado — usada solo para calcular chat_stage.
+ * Igual que JOIN_ORDER pero sin excluir completed/cancelled para detectar 'closed'.
+ * Aplica la misma exclusión de conversation_id para ml_question.
+ */
 const JOIN_ORDER_LATEST = `
   LEFT JOIN LATERAL (
     SELECT so3.id, so3.payment_status, so3.fulfillment_type, so3.status
     FROM sales_orders so3
-    WHERE so3.conversation_id = cc.id
-    ORDER BY so3.created_at DESC NULLS LAST
+    WHERE (
+      (cc.source_type != 'ml_question' AND so3.conversation_id = cc.id)
+      OR (cc.ml_order_id IS NOT NULL AND so3.id = cc.ml_order_id)
+    )
+    ORDER BY
+      CASE WHEN cc.ml_order_id IS NOT NULL AND so3.id = cc.ml_order_id THEN 0 ELSE 1 END,
+      so3.created_at DESC NULLS LAST
     LIMIT 1
   ) sol ON true
 `;
@@ -64,14 +89,40 @@ const JOIN_QUOTE_ACTIVE = `
   ) iq ON true
 `;
 
+/** Último mensaje del hilo (dirección real); fuente de verdad para “pendiente vendedor” vs atendido. */
+const JOIN_LAST_MESSAGE = `
+  LEFT JOIN LATERAL (
+    SELECT m.direction::text AS direction
+    FROM crm_messages m
+    WHERE m.chat_id = cc.id
+    ORDER BY m.created_at DESC NULLS LAST, m.id DESC
+    LIMIT 1
+  ) last_msg ON true
+`;
+
+/** Pregunta ML ya respondida en ML (tabla answered o pending marcada ANSWERED). */
+const JOIN_ML_QUESTION_ANSWERED = `
+  LEFT JOIN LATERAL (
+    SELECT TRUE AS answered
+    FROM (
+      SELECT 1 FROM ml_questions_answered mqa
+      WHERE mqa.ml_question_id = cc.ml_question_id
+      UNION ALL
+      SELECT 1 FROM ml_questions_pending p
+      WHERE p.ml_question_id = cc.ml_question_id AND p.ml_status = 'ANSWERED'
+    ) x
+    LIMIT 1
+  ) mlq_ans ON true
+`;
+
 /**
  * Expresión SQL que calcula el chat_stage.
- * Requiere los alias sol (JOIN_ORDER_LATEST) e iq (JOIN_QUOTE_ACTIVE).
- * Prioridad de evaluación (primera rama que aplica gana):
- *   closed → dispatch → payment → order → approved → quote → ml_answer → contact
+ * Requiere sol, iq, mlq_ans (JOIN_ORDER_LATEST, JOIN_QUOTE_ACTIVE, JOIN_ML_QUESTION_ANSWERED).
+ * Prioridad: closed → dispatch → payment → order → quote (ERP) →
+ *   ml_question respondida en ML → quote | ml_question sin respuesta → contact |
+ *   ml_message → order | else contact.
  *
- * Nota: 'order' se emite cuando hay orden activa pero payment_status no es 'pending'
- * ni ('approved' + fulfillment_type). Ejemplo: pago aprobado sin tipo de despacho aún.
+ * 'approved' (cotización aprobada) ahora se mapea a 'order' — mismo estado visual.
  */
 const CHAT_STAGE_EXPR = `
   CASE
@@ -79,11 +130,37 @@ const CHAT_STAGE_EXPR = `
     WHEN sol.payment_status = 'approved' AND sol.fulfillment_type IS NOT NULL           THEN 'dispatch'
     WHEN sol.payment_status = 'pending'                                                 THEN 'payment'
     WHEN sol.id IS NOT NULL                                                             THEN 'order'
-    WHEN iq.quote_status = 'approved'                                                   THEN 'approved'
+    WHEN iq.quote_status = 'approved'                                                   THEN 'order'
     WHEN iq.quote_status IN ('draft', 'borrador', 'sent')                               THEN 'quote'
-    WHEN cc.source_type = 'ml_question'                                                 THEN 'ml_answer'
+    WHEN cc.source_type = 'ml_question' AND mlq_ans.answered IS TRUE                    THEN 'quote'
+    WHEN cc.source_type = 'ml_question'                                                 THEN 'contact'
+    WHEN cc.source_type = 'ml_message'                                                  THEN 'order'
     ELSE 'contact'
   END
+`;
+
+/**
+ * Canal de venta ERP (sales_channels.id) alineado a órdenes activas: si hay `so` de JOIN_ORDER,
+ * usa `so.channel_id`; si no, infiere solo por hilo (ML → 3, WA / WA+ML → 2).
+ * Debe coincidir con la intención de columnas `order.channel_id` en GET /api/inbox.
+ */
+const INFERRED_SALES_CHANNEL_SQL = `
+  CASE
+    WHEN cc.source_type IN ('ml_question', 'ml_message') THEN 3::smallint
+    WHEN cc.source_type IN ('wa_inbound', 'wa_ml_linked') THEN 2::smallint
+    ELSE NULL::smallint
+  END
+`;
+
+const RESOLVED_SALES_CHANNEL_SQL = `COALESCE(so.channel_id, (${INFERRED_SALES_CHANNEL_SQL}))`;
+
+/** Misma base de JOIN que listInbox para totales por faceta comparables con ?src=&stage=. */
+const FACET_FROM = `
+  FROM crm_chats cc
+  ${JOIN_ORDER}
+  ${JOIN_ORDER_LATEST}
+  ${JOIN_QUOTE_ACTIVE}
+  ${JOIN_ML_QUESTION_ANSWERED}
 `;
 
 function clampLimit(raw) {
@@ -103,7 +180,76 @@ function parseCursor(raw) {
   return d.toISOString();
 }
 
-function buildFilters(filter, src, search, cursorIso) {
+/**
+ * @param {string|null} srcRaw
+ * @returns {string[]|null} tokens válidos o null si vacío
+ */
+function parseSrcList(srcRaw) {
+  if (srcRaw == null || String(srcRaw).trim() === "") return null;
+  const parts = String(srcRaw)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!parts.length) return null;
+  for (const s of parts) {
+    if (!SRCS.has(s)) return null;
+  }
+  return parts;
+}
+
+/**
+ * @param {string|null} stageRaw
+ * @returns {string[]|null}
+ */
+function parseStageList(stageRaw) {
+  if (stageRaw == null || String(stageRaw).trim() === "") return null;
+  const parts = String(stageRaw)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!parts.length) return null;
+  for (const s of parts) {
+    if (!CHAT_STAGE_VALUES.has(s)) return null;
+  }
+  return parts;
+}
+
+/**
+ * @param {string[]} srcParts
+ */
+function pushSrcOrConds(conds, srcParts) {
+  if (!srcParts || !srcParts.length) return;
+  const branches = [];
+  for (const src of srcParts) {
+    if (src === "wa") {
+      branches.push(`cc.source_type = 'wa_inbound'`);
+    } else if (src === "ml") {
+      branches.push(`cc.source_type IN ('ml_question','ml_message','wa_ml_linked')`);
+    } else if (src === "ml_question") {
+      branches.push(`cc.source_type = 'ml_question'`);
+    } else if (src === "ml_message") {
+      branches.push(`cc.source_type = 'ml_message'`);
+    } else if (src === "wa_ml_linked") {
+      branches.push(`cc.source_type = 'wa_ml_linked'`);
+    }
+  }
+  if (!branches.length) return;
+  if (branches.length === 1) {
+    conds.push(branches[0]);
+  } else {
+    conds.push(`(${branches.join(" OR ")})`);
+  }
+}
+
+/**
+ * @param {string|null} filter
+ * @param {string[]|null} srcParts
+ * @param {string|null} search
+ * @param {string|null} cursorIso
+ * @param {string[]|null} stageList
+ * @param {string|null} result
+ */
+function buildFilters(filter, srcParts, search, cursorIso, stageList, result) {
   const conds = [];
   const params = [];
   let p = 1;
@@ -119,18 +265,22 @@ function buildFilters(filter, src, search, cursorIso) {
     conds.push(`so.fulfillment_type IS NOT NULL`);
   }
 
-  if (src === "wa") {
-    conds.push(`cc.source_type = 'wa_inbound'`);
-  } else if (src === "ml") {
+  pushSrcOrConds(conds, srcParts);
+
+  if (stageList && stageList.length) {
+    conds.push(`((${CHAT_STAGE_EXPR}))::text = ANY($${p}::text[])`);
+    params.push(stageList);
+    p += 1;
+  }
+
+  if (result === "no_conversion") {
+    conds.push(`sol.id IS NULL`);
+  } else if (result === "converted") {
+    conds.push(`sol.id IS NOT NULL`);
+  } else if (result === "in_progress") {
     conds.push(
-      `cc.source_type IN ('ml_question','ml_message','wa_ml_linked')`
+      `((${CHAT_STAGE_EXPR}))::text IN ('quote','order','payment','dispatch')`
     );
-  } else if (src === "ml_question") {
-    conds.push(`cc.source_type = 'ml_question'`);
-  } else if (src === "ml_message") {
-    conds.push(`cc.source_type = 'ml_message'`);
-  } else if (src === "wa_ml_linked") {
-    conds.push(`cc.source_type = 'wa_ml_linked'`);
   }
 
   if (search) {
@@ -152,43 +302,46 @@ function buildFilters(filter, src, search, cursorIso) {
 /**
  * @param {object} opts
  * @param {string|null} [opts.filter]
- * @param {string|null} [opts.src]
+ * @param {string|null} [opts.src] coma-separado, p. ej. wa,ml_question
  * @param {string|null} [opts.search]
  * @param {string|null} [opts.cursor]
+ * @param {string|null} [opts.stage] coma-separado (valores CHAT_STAGE_VALUES)
+ * @param {string|null} [opts.result] no_conversion | converted | in_progress
  * @param {number} [opts.limit]
  */
 async function listInbox(opts) {
   const limit = clampLimit(opts.limit);
   const filter = opts.filter && FILTERS.has(String(opts.filter)) ? String(opts.filter) : null;
-  const src = opts.src && SRCS.has(String(opts.src)) ? String(opts.src) : null;
+  const srcParts = opts.src != null && String(opts.src).trim() !== "" ? parseSrcList(String(opts.src).trim()) : null;
   const search =
     opts.search != null && String(opts.search).trim() !== "" ? String(opts.search).trim() : null;
   const cursorIso = opts.cursor ? parseCursor(opts.cursor) : null;
+  const stageList =
+    opts.stage != null && String(opts.stage).trim() !== ""
+      ? parseStageList(String(opts.stage).trim())
+      : null;
+  const result =
+    opts.result != null && RESULTS.has(String(opts.result).trim())
+      ? String(opts.result).trim()
+      : null;
 
-  const { where, params } = buildFilters(filter, src, search, cursorIso);
+  const { where, params } = buildFilters(filter, srcParts, search, cursorIso, stageList, result);
 
-  // fromSql usa JOIN_ORDER (filtra completed/cancelled) para que los filtros de lista sean correctos.
-  const fromSql = `
-    FROM crm_chats cc
-    LEFT JOIN customers c ON cc.customer_id = c.id
-    ${JOIN_ORDER}
-    WHERE 1=1
-    ${where}
-  `;
-
-  // fromExtSql añade los joins adicionales para chat_stage (solo en el SELECT, no en COUNT ni filtros).
-  const fromExtSql = `
+  // COUNT y SELECT comparten los mismos JOIN (incl. sol/iq) para filtros por etapa/resultado.
+  const fromCommon = `
     FROM crm_chats cc
     LEFT JOIN customers c ON cc.customer_id = c.id
     ${JOIN_ORDER}
     ${JOIN_ORDER_LATEST}
     ${JOIN_QUOTE_ACTIVE}
+    ${JOIN_ML_QUESTION_ANSWERED}
+    ${JOIN_LAST_MESSAGE}
     WHERE 1=1
     ${where}
   `;
 
   try {
-    const countSql = `SELECT COUNT(*)::bigint AS n ${fromSql}`;
+    const countSql = `SELECT COUNT(*)::bigint AS n ${fromCommon}`;
     const { rows: countRows } = await pool.query(countSql, [...params]);
     const total = Number(countRows[0].n) || 0;
 
@@ -209,7 +362,11 @@ async function listInbox(opts) {
         cc.assigned_to,
         cc.status,
         cc.sla_deadline_at,
+        cc.last_inbound_at,
         cc.last_outbound_at,
+        last_msg.direction AS last_message_direction,
+        (last_msg.direction = 'inbound') AS customer_waiting_reply,
+        COALESCE(cc.is_operational, FALSE) AS is_operational,
         c.full_name AS customer_name,
         so.id AS order_id,
         so.payment_status::text AS payment_status,
@@ -225,7 +382,7 @@ async function listInbox(opts) {
           WHERE ex2.chat_id = cc.id AND ex2.status = 'open'
           ORDER BY ex2.created_at DESC LIMIT 1
         ) AS top_exception_reason
-      ${fromExtSql}
+      ${fromCommon}
       ORDER BY cc.last_message_at DESC NULLS LAST, cc.id DESC
       LIMIT $${limPos}
     `;
@@ -263,11 +420,18 @@ async function listInbox(opts) {
         status: r.status != null ? String(r.status) : "UNASSIGNED",
         sla_deadline_at:
           r.sla_deadline_at != null ? new Date(r.sla_deadline_at).toISOString() : null,
+        last_inbound_at:
+          r.last_inbound_at != null ? new Date(r.last_inbound_at).toISOString() : null,
         last_outbound_at:
           r.last_outbound_at != null ? new Date(r.last_outbound_at).toISOString() : null,
+        last_message_direction:
+          r.last_message_direction != null ? String(r.last_message_direction) : null,
+        /** Último mensaje es del cliente/comprador: pendiente respuesta vendedor (p. ej. badge “abandonado” rojo). */
+        customer_waiting_reply: r.customer_waiting_reply === true,
         has_active_exception: r.has_active_exception === true,
         top_exception_reason: r.top_exception_reason || null,
         top_exception_code: r.top_exception_reason || null,
+        is_operational: r.is_operational === true,
       };
     });
 
@@ -281,6 +445,96 @@ async function listInbox(opts) {
   } catch (err) {
     throw mapSchemaError(err);
   }
+}
+
+/**
+ * Totales por faceta con los mismos JOIN que `listInbox` (etapa, ML respondida, cotización activa).
+ * Sirve para badges de filtros alineados a `GET /api/inbox?src=&stage=`.
+ * @param {import('pg').QueryResultRow} fr
+ */
+function buildInboxFacetsPayload(fr) {
+  const waIn = Number(fr.src_wa_inbound) || 0;
+  const waLk = Number(fr.src_wa_ml_linked) || 0;
+  const mq = Number(fr.src_ml_question) || 0;
+  const mm = Number(fr.src_ml_message) || 0;
+  return {
+    by_source_type: {
+      wa_inbound: waIn,
+      wa_ml_linked: waLk,
+      ml_question: mq,
+      ml_message: mm,
+    },
+    ml_question: {
+      unanswered: Number(fr.ml_question_unanswered) || 0,
+      answered: Number(fr.ml_question_answered) || 0,
+    },
+    /** Catálogo `sales_channels.id`: 1 Mostrador, 2 WA/Redes, 3 ML, 4 E-com, 5 Fuerza ventas. */
+    by_sales_channel_id: {
+      "1": Number(fr.sc_1) || 0,
+      "2": Number(fr.sc_2) || 0,
+      "3": Number(fr.sc_3) || 0,
+      "4": Number(fr.sc_4) || 0,
+      "5": Number(fr.sc_5) || 0,
+      null: Number(fr.sc_null) || 0,
+    },
+    by_chat_stage: {
+      contact: Number(fr.st_contact) || 0,
+      quote: Number(fr.st_quote) || 0,
+      order: Number(fr.st_order) || 0,
+      payment: Number(fr.st_payment) || 0,
+      dispatch: Number(fr.st_dispatch) || 0,
+      closed: Number(fr.st_closed) || 0,
+    },
+    /** Alineado a tokens `src` de listInbox (`wa` = solo wa_inbound; `ml` = ml_* + wa_ml_linked). */
+    src_compound: {
+      wa: waIn,
+      ml: mq + mm + waLk,
+    },
+    /** Hilos “WhatsApp” en sentido amplio (incluye unificados WA+ML). */
+    whatsapp_threads: waIn + waLk,
+    /** Alineado a `GET /api/inbox?result=` (última orden por chat = `sol`). */
+    by_result: {
+      no_conversion: Number(fr.res_no_conversion) || 0,
+      converted: Number(fr.res_converted) || 0,
+      in_progress: Number(fr.res_in_progress) || 0,
+    },
+  };
+}
+
+async function fetchInboxFacets() {
+  const facetSql = `
+    SELECT
+      COUNT(DISTINCT cc.id) FILTER (WHERE cc.source_type = 'wa_inbound') AS src_wa_inbound,
+      COUNT(DISTINCT cc.id) FILTER (WHERE cc.source_type = 'wa_ml_linked') AS src_wa_ml_linked,
+      COUNT(DISTINCT cc.id) FILTER (WHERE cc.source_type = 'ml_question') AS src_ml_question,
+      COUNT(DISTINCT cc.id) FILTER (WHERE cc.source_type = 'ml_message') AS src_ml_message,
+      COUNT(DISTINCT cc.id) FILTER (
+        WHERE cc.source_type = 'ml_question' AND (mlq_ans.answered IS NOT TRUE)
+      ) AS ml_question_unanswered,
+      COUNT(DISTINCT cc.id) FILTER (
+        WHERE cc.source_type = 'ml_question' AND mlq_ans.answered IS TRUE
+      ) AS ml_question_answered,
+      COUNT(DISTINCT cc.id) FILTER (WHERE (${RESOLVED_SALES_CHANNEL_SQL})::int = 1) AS sc_1,
+      COUNT(DISTINCT cc.id) FILTER (WHERE (${RESOLVED_SALES_CHANNEL_SQL})::int = 2) AS sc_2,
+      COUNT(DISTINCT cc.id) FILTER (WHERE (${RESOLVED_SALES_CHANNEL_SQL})::int = 3) AS sc_3,
+      COUNT(DISTINCT cc.id) FILTER (WHERE (${RESOLVED_SALES_CHANNEL_SQL})::int = 4) AS sc_4,
+      COUNT(DISTINCT cc.id) FILTER (WHERE (${RESOLVED_SALES_CHANNEL_SQL})::int = 5) AS sc_5,
+      COUNT(DISTINCT cc.id) FILTER (WHERE (${RESOLVED_SALES_CHANNEL_SQL}) IS NULL) AS sc_null,
+      COUNT(DISTINCT cc.id) FILTER (WHERE ((${CHAT_STAGE_EXPR}))::text = 'contact') AS st_contact,
+      COUNT(DISTINCT cc.id) FILTER (WHERE ((${CHAT_STAGE_EXPR}))::text = 'quote') AS st_quote,
+      COUNT(DISTINCT cc.id) FILTER (WHERE ((${CHAT_STAGE_EXPR}))::text = 'order') AS st_order,
+      COUNT(DISTINCT cc.id) FILTER (WHERE ((${CHAT_STAGE_EXPR}))::text = 'payment') AS st_payment,
+      COUNT(DISTINCT cc.id) FILTER (WHERE ((${CHAT_STAGE_EXPR}))::text = 'dispatch') AS st_dispatch,
+      COUNT(DISTINCT cc.id) FILTER (WHERE ((${CHAT_STAGE_EXPR}))::text = 'closed') AS st_closed,
+      COUNT(DISTINCT cc.id) FILTER (WHERE sol.id IS NULL) AS res_no_conversion,
+      COUNT(DISTINCT cc.id) FILTER (WHERE sol.id IS NOT NULL) AS res_converted,
+      COUNT(DISTINCT cc.id) FILTER (
+        WHERE ((${CHAT_STAGE_EXPR}))::text IN ('quote', 'order', 'payment', 'dispatch')
+      ) AS res_in_progress
+    ${FACET_FROM}
+  `;
+  const { rows } = await pool.query(facetSql);
+  return buildInboxFacetsPayload(rows[0] || {});
 }
 
 async function getInboxCounts() {
@@ -330,26 +584,29 @@ async function getInboxCounts() {
   `;
 
   try {
-    const [{ rows }, handoffResult, unreviewedResult, incorrectResult] = await Promise.all([
-      pool.query(sql),
-      pool.query(handoffSql).catch((err) => {
-        // Tabla bot_handoffs aún no migrada — degradar a 0 sin error
-        if (err.code === "42P01") return { rows: [{ handed_over: "0" }] };
-        throw err;
-      }),
-      // Columna is_reviewed añadida en db:bot-actions-review — degradar si aún no existe
-      pool.query(unreviewedSql).catch((err) => {
-        if (err.code === "42703" || err.code === "42P01") return { rows: [{ bot_actions_unreviewed: 0 }] };
-        throw err;
-      }),
-      pool.query(incorrectTodaySql).catch((err) => {
-        if (err.code === "42703" || err.code === "42P01") return { rows: [{ bot_actions_incorrect_today: 0 }] };
-        throw err;
-      }),
-    ]);
-    const r  = rows[0] || {};
-    const h  = handoffResult.rows[0] || {};
-    const u  = unreviewedResult.rows[0] || {};
+    const [mainRes, facets, handoffResult, unreviewedResult, incorrectResult, exceptionsCount] =
+      await Promise.all([
+        pool.query(sql),
+        fetchInboxFacets(),
+        pool.query(handoffSql).catch((err) => {
+          // Tabla bot_handoffs aún no migrada — degradar a 0 sin error
+          if (err.code === "42P01") return { rows: [{ handed_over: "0" }] };
+          throw err;
+        }),
+        // Columna is_reviewed añadida en db:bot-actions-review — degradar si aún no existe
+        pool.query(unreviewedSql).catch((err) => {
+          if (err.code === "42703" || err.code === "42P01") return { rows: [{ bot_actions_unreviewed: 0 }] };
+          throw err;
+        }),
+        pool.query(incorrectTodaySql).catch((err) => {
+          if (err.code === "42703" || err.code === "42P01") return { rows: [{ bot_actions_incorrect_today: 0 }] };
+          throw err;
+        }),
+        exceptionsService.countOpen().catch(() => 0),
+      ]);
+    const r = mainRes.rows[0] || {};
+    const h = handoffResult.rows[0] || {};
+    const u = unreviewedResult.rows[0] || {};
     const ic = incorrectResult.rows[0] || {};
     return {
       total: Number(r.total) || 0,
@@ -361,14 +618,22 @@ async function getInboxCounts() {
       ml: Number(r.ml) || 0,
       // BE-1.8
       handed_over: Number(h.handed_over) || 0,
-      exceptions: await exceptionsService.countOpen().catch(() => 0),
+      exceptions: Number(exceptionsCount) || 0,
       // BE-2.8
       bot_actions_unreviewed: Number(u.bot_actions_unreviewed) || 0,
       bot_actions_incorrect_today: Number(ic.bot_actions_incorrect_today) || 0,
+      facets,
     };
   } catch (err) {
     throw mapSchemaError(err);
   }
 }
 
-module.exports = { listInbox, getInboxCounts, FILTERS, SRCS, CHAT_STAGE_VALUES };
+module.exports = {
+  listInbox,
+  getInboxCounts,
+  FILTERS,
+  SRCS,
+  CHAT_STAGE_VALUES,
+  RESULTS,
+};

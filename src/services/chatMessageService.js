@@ -34,9 +34,10 @@ function extractWasenderMsgId(res) {
  * @param {number|string} chatId
  * @param {string} text
  * @param {string|null|undefined} sentBy — texto libre (usuario / sistema)
+ * @param {{ skipThrottle?: boolean }} [options] — p. ej. cotización enviada por operador (omite cap diario / quiet hours / anti-spam Wasender)
  * @returns {Promise<{ messageId: string, ok: boolean }>}
  */
-async function sendChatMessage(chatId, text, sentBy) {
+async function sendChatMessage(chatId, text, sentBy, options = {}) {
   const cid = Number(chatId);
   if (!Number.isFinite(cid) || cid <= 0) {
     const e = new Error("invalid_chat_id");
@@ -86,12 +87,14 @@ async function sendChatMessage(chatId, text, sentBy) {
     text: body,
     messageType: "CHAT",
     customerId,
+    skipThrottle: Boolean(options.skipThrottle),
   });
 
   if (!res.ok) {
-    const e = new Error(
-      res.reason ? `wasender_blocked:${res.reason}` : `wasender_failed:${res.status}`
-    );
+    let detail = res.reason ? `wasender_blocked:${res.reason}` : `wasender_failed:${res.status}`;
+    if (res.throttled) detail = "wasender_throttled:daily_cap";
+    if (res.quiet_hours) detail = "wasender_blocked:quiet_hours";
+    const e = new Error(detail);
     e.code = "WASENDER_ERROR";
     e.httpStatus = typeof res.status === "number" ? res.status : 502;
     throw e;

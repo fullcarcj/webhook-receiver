@@ -19,7 +19,7 @@
  * Con valor 0 o negativo no hay tope por edad (comportamiento anterior). Compara con `date_created` de la pregunta (ML).
  *
  * Texto extra (opcional): ML_QUESTIONS_IA_AUTO_EXTRA_LINE se añade al final de la plantilla elegida
- * (p. ej. avisos de Semana Santa). Vacío = no se añade nada. Cuenta para ML_QUESTIONS_IA_MAX_CHARS.
+ * (avisos puntuales: feriados, promociones, etc.). Vacío = no se añade nada. Cuenta para ML_QUESTIONS_IA_MAX_CHARS.
  *
  * Importante en producción: las variables deben estar en el **servidor** (p. ej. Render). `oauth-env.json`
  * solo aplica en local si el archivo existe; no sustituye env del panel si allí sigue ENABLED=1.
@@ -95,17 +95,21 @@ function resolveQuestionsIaAutoPollMs() {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** Sufijo fijo con horario de tienda (todas las plantillas Tipo D). */
+const ML_QUESTIONS_IA_SCHEDULE_SUFFIX =
+  "(Respuesta automática: lunes a viernes de 8 a.m. a 5 p.m.; sábados de 9 a.m. a 5 p.m.; domingos no trabajamos.)";
+
 const QUESTION_IA_BODIES = Object.freeze([
-  "Hola. Si el producto que buscas es el de la publicación, lo más probable es que esté disponible y el precio sea el publicado. Aceptamos tasa BCV. Somos tienda física; mañana abrimos de 9:00 a 16:00. Este mensaje fue generado por una IA; mañana habrá una persona para ayudarte.",
-  "Buenas. Si la publicación coincide con lo que necesitas, en general el artículo está y el precio es el que ves publicado. Trabajamos a tasa BCV. Tienda física. Mañana atendemos de 9 a 16 h. Respuesta automática por IA; mañana te atiende un humano.",
-  "Hola, gracias por escribir. Si buscas exactamente lo publicado, lo más probable es que haya stock y el monto sea el del aviso. Aceptamos tasa BCV. Somos tienda física; mañana de 9:00 a 16:00. Aviso: mensaje automático (IA); mañana puedes hablar con alguien del equipo.",
-  "Buen día. Si tu consulta es sobre la publicación que estás viendo, lo habitual es que el producto esté y el precio sea el publicado. Cobramos a tasa BCV. Tienda física; mañana abrimos 9–16 h. Generado por IA; mañana hay atención humana.",
-  "Hola. Para la publicación que miras: lo más probable es disponibilidad y precio según lo publicado. Aceptamos tasa BCV. Somos tienda física; mañana de 9 a 16. Este texto es automático (IA); mañana te ayuda una persona.",
-  "Buenas tardes/noches. Si coincide con el aviso, el precio suele ser el publicado y el producto suele estar. Tasa BCV. Local físico; mañana 9:00–16:00. Mensaje de sistema (IA); mañana atención humana.",
-  "Hola. Si es el ítem de la publicación, lo más probable es que esté y el valor sea el publicado. Trabajamos con tasa BCV. Tienda física; mañana abrimos de 9 a 16 h. Respuesta automática por IA; mañana puedes consultar con el local.",
-  "Gracias por tu pregunta. Si te referís a lo publicado, lo normal es que el precio sea el del aviso y que haya unidad. Aceptamos BCV. Somos tienda física; mañana 9:00 a 16:00. Generado por IA; mañana hay personal disponible.",
-  "Hola. Publicación = precio publicado en lo posible y disponibilidad habitual. Cobro a tasa BCV. Tienda física; mañana de 9 a 16. Aviso: IA; mañana te responde un humano.",
-  "Buenas. Si buscas el producto del aviso, lo más probable es que el precio sea el publicado y que podamos atenderte. Tasa BCV. Local físico; mañana 9–16 h. Mensaje automático (IA); mañana atención personal.",
+  "¡Hola! Gracias por tu consulta. Te invitamos a hacernos una oferta por el artículo de la publicación; en cuanto la recibamos te mandamos toda la información para cerrar tu compra sin ningún inconveniente. Somos tienda física ubicada cerca del CC El Recreo. Si no puedes venir hasta nosotros, contamos con delivery y puedes pagar al recibir el producto, a plena satisfacción. ¡Esperamos tu oferta!",
+  "¡Buenas! Nos alegra tu interés. Anímate a hacernos una oferta por el producto que viste publicado; una vez que la recibamos te enviamos toda la información necesaria para concretar la compra. Estamos como tienda física cerca del CC El Recreo. Si prefieres, también hacemos delivery y aceptamos pago contra entrega, a plena satisfacción. ¡Te esperamos!",
+  "¡Hola, gracias por escribirnos! Para que podamos darte todos los detalles y cerrar tu compra, te pedimos que nos hagas una oferta por el artículo de la publicación. Somos tienda física cerca del CC El Recreo, con delivery disponible y la opción de pagar al momento de recibir tu producto, con total confianza. ¡Anímate a ofertar!",
+  "¡Buen día! Gracias por tu interés en nuestro producto. Te invitamos a enviarnos una oferta y, en cuanto la veamos, te hacemos llegar toda la información para que puedas concretar tu compra de forma segura. Tenemos tienda física a pasos del CC El Recreo; si estás lejos, con gusto coordinamos el delivery y puedes pagar al recibir. ¡Esperamos tu oferta!",
+  "¡Hola! ¿Te interesa el artículo? Mándanos una oferta y te enviamos de inmediato toda la información que necesitas para cerrar la compra. Somos tienda física cerca del CC El Recreo, con servicio de delivery y pago contra entrega para tu tranquilidad. ¡No dudes en ofertar!",
+  "¡Buenas! Gracias por contactarnos. Para orientarte mejor y darte todos los detalles de la compra, te invitamos a hacernos una oferta por el producto publicado. Estamos cerca del CC El Recreo; también hacemos envíos a domicilio y puedes pagar al recibir el artículo a plena satisfacción. ¡Te esperamos con tu oferta!",
+  "¡Hola! Nos da gusto saber de ti. Oferta el artículo de la publicación y te mandamos enseguida toda la información para que tu compra sea rápida y segura. Somos tienda física cerca del CC El Recreo; si lo prefieres, coordinamos delivery con pago al momento de la entrega. ¡Estamos listos para atenderte!",
+  "¡Buenas tardes! Gracias por tu interés. Envíanos una oferta por el producto que te llamó la atención y, en cuanto la recibamos, te hacemos llegar toda la información necesaria para concretar tu compra. Tenemos local físico cerca del CC El Recreo y también hacemos delivery con pago contra entrega, a plena satisfacción. ¡Anímate!",
+  "¡Hola! Gracias por escribirnos. Para brindarte todos los detalles y cerrar tu pedido, te pedimos que nos hagas una oferta por el artículo publicado. Somos tienda física ubicada cerca del CC El Recreo; si no puedes visitarnos, contamos con delivery y puedes pagar al recibir el producto sin ningún riesgo. ¡Te esperamos!",
+  "¡Buenas! Qué bueno que te interesa el producto. Mándanos tu oferta y te enviamos de inmediato toda la información para que puedas hacer tu compra con total confianza. Estamos como tienda física muy cerca del CC El Recreo; también tenemos delivery disponible y aceptamos pago al recibir el pedido a plena satisfacción. ¡Esperamos tu oferta!",
 ]);
 
 function getQuestionsIaMaxChars() {
@@ -114,7 +118,7 @@ function getQuestionsIaMaxChars() {
   return Math.min(4000, Math.floor(n));
 }
 
-/** Aviso temporal (p. ej. Semana Santa); vacío = omitir. */
+/** Línea opcional desde env (feriados, campañas, etc.); vacío = omitir. */
 function getQuestionsIaAutoExtraLine() {
   const raw = process.env.ML_QUESTIONS_IA_AUTO_EXTRA_LINE;
   if (raw == null || String(raw).trim() === "") return "";
@@ -586,7 +590,7 @@ async function tryQuestionIaAutoAnswer(args) {
 
   const { text, index } = pickRandomIaBody(null);
   const maxC = getQuestionsIaMaxChars();
-  let body = String(text).trim();
+  let body = `${String(text).trim()} ${ML_QUESTIONS_IA_SCHEDULE_SUFFIX}`.trim();
   const extraLine = getQuestionsIaAutoExtraLine();
   if (extraLine) {
     body = `${body} ${extraLine}`;
@@ -875,5 +879,6 @@ module.exports = {
   getQuestionsIaTimezone,
   getLocalMinutesAndWeekdayInTz,
   QUESTION_IA_BODIES,
+  ML_QUESTIONS_IA_SCHEDULE_SUFFIX,
   pickRandomIaBody,
 };

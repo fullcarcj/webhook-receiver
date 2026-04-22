@@ -2132,7 +2132,7 @@ const server = http.createServer(async (req, res) => {
           delete_all_ml_questions_pending:
             "DELETE /admin/ml-questions-pending (cabecera X-Admin-Secret) vacía ml_questions_pending (solo BD local; no afecta preguntas en ML)",
           respuesta_automatica_ia:
-            "Tipo D (preguntas): ML_QUESTIONS_IA_AUTO_ENABLED=1 → POST /answers, plantillas QUESTION_IA_BODIES + ML_QUESTIONS_IA_AUTO_EXTRA_LINE opcional al final (avisos p. ej. Semana Santa). Ventana START/END (TIMEZONE); domingo 24 h salvo SUNDAY_IGNORE_WINDOW=0; DAYS; IGNORE_WINDOW/FORCE. Éxito → answered + borrar pending.",
+            "Tipo D (preguntas): ML_QUESTIONS_IA_AUTO_ENABLED=1 → POST /answers, plantillas QUESTION_IA_BODIES + sufijo fijo de horario de tienda + ML_QUESTIONS_IA_AUTO_EXTRA_LINE opcional (avisos puntuales). Ventana START/END (TIMEZONE); domingo 24 h salvo SUNDAY_IGNORE_WINDOW=0; DAYS; IGNORE_WINDOW/FORCE. Éxito → answered + borrar pending.",
           log_ia_auto_omitidos:
             "GET /preguntas-ia-auto-log?k=ADMIN_SECRET — ml_questions_ia_auto_log (intentos sin POST /answers cuando IA desactivada u otros motivos; ?format=json&limit=)",
           retry_ia_auto_pending:

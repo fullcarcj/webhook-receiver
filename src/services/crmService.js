@@ -159,7 +159,15 @@ async function getCustomer(customerId) {
   }
   try {
     const { rows } = await pool.query(
-      `SELECT * FROM v_customers_full WHERE customer_id = $1`,
+      `SELECT c.*,
+        (SELECT COUNT(*)::int FROM customer_ml_buyers cmb WHERE cmb.customer_id = c.id) AS ml_accounts_count,
+        COALESCE(
+          (SELECT cw.balance FROM customer_wallets cw
+           WHERE cw.customer_id = c.id AND cw.currency = 'USD' LIMIT 1),
+          0
+        ) AS wallet_balance_usd
+       FROM customers c
+       WHERE c.id = $1`,
       [id]
     );
     return rows[0] || null;
@@ -288,8 +296,8 @@ async function updateCustomer({ customerId, ...body }) {
   }
 
   const ALLOWED = [
-    "full_name", "id_type", "id_number", "email", "phone",
-    "address", "city", "customer_type", "notes", "tags", "is_active",
+    "full_name", "id_type", "id_number", "email", "phone", "phone_2",
+    "address", "city", "customer_type", "crm_status", "notes", "tags", "is_active",
   ];
 
   const sets = [];

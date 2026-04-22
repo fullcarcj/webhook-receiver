@@ -6,7 +6,8 @@ const skuPrefixService = require('../services/skuPrefixService');
 const { generateSuggestedPurchaseOrder } = require('../workers/inventoryWorker');
 const { allocateNextSku } = require('../services/skuGeneratorService');
 const pricingService = require('../services/pricingService');
-const { requireAdminOrPermission } = require('../utils/authMiddleware');
+const { requireAdminOrPermission, checkAdminSecretOrJwt } = require('../utils/authMiddleware');
+const { getTodayRate } = require('../services/currencyService');
 
 // ── Auth + helpers ────────────────────────────────────────────────────────────
 
@@ -66,6 +67,12 @@ const ProductConfigSchema = z.object({
   safety_factor:  z.number().min(1.0).max(5.0).optional(),
   stock_max:      z.number().min(0).optional(),
   supplier_id:    z.number().int().positive().optional(),
+}).strict();
+
+/** POST /api/inventory/products/:id/price-adjustment */
+const PriceAdjustmentSchema = z.object({
+  unit_price_usd: z.coerce.number().min(0),
+  reason:         z.string().min(1).max(300).optional(),
 }).strict();
 
 /** PATCH /api/inventory/products/:id — catálogo + stock básico */
@@ -599,8 +606,39 @@ async function handleInventoryApiRequest(req, res, url) {
       const q = url.searchParams.get('q') || '';
       if (!q) return fail(res, 'MISSING_QUERY', 'Parámetro q requerido'), true;
       const limit = Math.min(Number(url.searchParams.get('limit') || 20), 100);
-      const data  = await svc.searchProducts(q, { limit });
-      return ok(res, { products: data }), true;
+      const companyId = parseCompanyIdQuery(url, 1);
+      const rows = await svc.searchProducts(q, { limit });
+      let quoteFx = null;
+      let bin = null;
+      try {
+        quoteFx = await getTodayRate(companyId);
+        if (quoteFx && Number(quoteFx.binance_rate) > 0) {
+          bin = Number(quoteFx.binance_rate);
+        }
+      } catch (_e) {
+        quoteFx = null;
+      }
+      const products = rows.map((p) => {
+        const usd = p.unit_price_usd != null ? Number(p.unit_price_usd) : null;
+        const unitPriceBsQuote =
+          bin != null && usd != null && Number.isFinite(usd)
+            ? Math.round(usd * bin * 100) / 100
+            : null;
+        return { ...p, unit_price_bs_quote: unitPriceBsQuote };
+      });
+      return ok(res, {
+        products,
+        quote_fx: quoteFx
+          ? {
+              company_id: companyId,
+              rate_date: quoteFx.rate_date,
+              binance_rate: quoteFx.binance_rate != null ? Number(quoteFx.binance_rate) : null,
+              bcv_rate: quoteFx.bcv_rate != null ? Number(quoteFx.bcv_rate) : null,
+              active_rate: quoteFx.active_rate != null ? Number(quoteFx.active_rate) : null,
+              active_rate_type: quoteFx.active_rate_type || null,
+            }
+          : null,
+      }), true;
     }
 
     // POST /api/inventory/products/deactivate  body: { product_id } (preferido; evita rutas anidadas raras)
@@ -882,6 +920,34 @@ async function handleInventoryApiRequest(req, res, url) {
         }
       }
 
+      // POST /api/inventory/products/:id/price-adjustment — ajuste de precio con historial
+      // Auth: ya pasó catalog:write al inicio del handler; no exigir settings (muchos SUPERVISOR no lo tienen).
+      if (method === 'POST' && parts[4] === 'price-adjustment') {
+        const auditUser = await checkAdminSecretOrJwt(req, res);
+        if (!auditUser) return true;
+        const body = await readBody(req);
+        const parsed = PriceAdjustmentSchema.safeParse(body);
+        if (!parsed.success) return fail(res, 'VALIDATION', parsed.error.issues[0].message), true;
+        const meta = {
+          userId:   auditUser.userId != null ? Number(auditUser.userId) : null,
+          userName: auditUser.username != null ? String(auditUser.username) : null,
+          reason:   parsed.data.reason   ?? null,
+          source:   'ui',
+        };
+        const result = await svc.addPriceAdjustment(productId, parsed.data.unit_price_usd, meta);
+        if (!result) return fail(res, 'NOT_FOUND', 'Producto no encontrado', 404), true;
+        return ok(res, result), true;
+      }
+
+      // GET /api/inventory/products/:id/price-history — historial de ajustes de precio
+      if (method === 'GET' && parts[4] === 'price-history') {
+        const qs = req.url ? new URL(req.url, 'http://localhost').searchParams : new URLSearchParams();
+        const limit  = Math.min(Number(qs.get('limit')  ?? 50), 200);
+        const offset = Math.max(Number(qs.get('offset') ?? 0),  0);
+        const data = await svc.getPriceHistory(productId, { limit, offset });
+        return ok(res, data), true;
+      }
+
       // POST /api/inventory/products/:id/duplicate — copia superficial con nuevo SKU
       if (method === 'POST' && parts[4] === 'duplicate') {
         const client = await pool.connect();
@@ -1001,6 +1067,8 @@ async function handleInventoryApiRequest(req, res, url) {
       const sp     = url.searchParams;
       const alertV = sp.get('alert');
       const search = sp.get('search')?.trim() || undefined;
+      const rawSearchBy = sp.get('search_by') || '';
+      const searchBy = rawSearchBy === 'name' || rawSearchBy === 'sku' ? rawSearchBy : undefined;
       const maxLimit = search ? 500 : 200;
       const rawLimit = Number(sp.get('limit') || (search ? 200 : 50));
       const limit = Math.min(Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 50), maxLimit);
@@ -1011,6 +1079,7 @@ async function handleInventoryApiRequest(req, res, url) {
         category: sp.get('category') || undefined,
         brand:    sp.get('brand')    || undefined,
         search,
+        searchBy,
       });
       return ok(res, data), true;
     }

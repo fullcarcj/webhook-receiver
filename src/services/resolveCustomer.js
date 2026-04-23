@@ -226,8 +226,12 @@ async function resolveCustomer(identity, options = {}) {
   const normalizedPhone2 = data.phone2 ? normalizePhone(data.phone2) : null;
 
   const { rows: identityRows } = await db.query(
-    `SELECT customer_id FROM crm_customer_identities
-     WHERE source = $1::crm_identity_source AND external_id = $2
+    `SELECT cci.customer_id
+     FROM crm_customer_identities cci
+     INNER JOIN customers c ON c.id = cci.customer_id
+     WHERE cci.source = $1::crm_identity_source
+       AND cci.external_id = $2
+       AND c.is_active = TRUE
      LIMIT 1`,
     [source, normalizedExternalId]
   );
@@ -253,7 +257,7 @@ async function resolveCustomer(identity, options = {}) {
          FROM customers c
          INNER JOIN customer_ml_buyers cmb ON cmb.customer_id = c.id
          INNER JOIN ml_buyers mb ON mb.buyer_id = cmb.ml_buyer_id
-         WHERE mb.buyer_id = $1 AND c.company_id = $2
+         WHERE mb.buyer_id = $1 AND c.company_id = $2 AND c.is_active = TRUE
          LIMIT 1`,
         [bid, companyId]
       );
@@ -284,6 +288,7 @@ async function resolveCustomer(identity, options = {}) {
        WHERE NULLIF(TRIM(c.phone), '') IS NOT NULL
          AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
          AND c.company_id = $2
+         AND c.is_active = TRUE
        UNION
        SELECT c.id AS customer_id
        FROM crm_customer_identities ci
@@ -291,6 +296,7 @@ async function resolveCustomer(identity, options = {}) {
        WHERE ci.external_id = $1
          AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
          AND c.company_id = $2
+         AND c.is_active = TRUE
        LIMIT 1`,
       [phoneToSearch, companyId]
     );
@@ -315,6 +321,7 @@ async function resolveCustomer(identity, options = {}) {
     const { rows: docRows } = await db.query(
       `SELECT id AS customer_id FROM customers
        WHERE id_type = $1 AND id_number = $2 AND company_id = $3
+         AND is_active = TRUE
        LIMIT 1`,
       [data.id_type, data.id_number, companyId]
     );
@@ -339,6 +346,7 @@ async function resolveCustomer(identity, options = {}) {
     const { rows: emailRows } = await db.query(
       `SELECT id AS customer_id FROM customers
        WHERE LOWER(TRIM(email)) = $1 AND company_id = $2
+         AND is_active = TRUE
        LIMIT 1`,
       [em, companyId]
     );

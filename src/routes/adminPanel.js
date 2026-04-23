@@ -4,9 +4,26 @@
  * Panel administrador — Tasas · Shipments · Reconciliación · Wallet
  * GET /admin-panel?k=ADMIN_SECRET
  *
+ * Deprecación: el dashboard operativo vive en el ERP Next (p. ej. /dashboard).
+ * GET /admin → 302 a ERP_DASHBOARD_URL o http://localhost:3000/dashboard por defecto.
+ *
  * El ADMIN_SECRET se inyecta como variable JS en el HTML.
  * Todas las llamadas API usan X-Admin-Secret en cabecera (mismo origen).
  */
+
+/** URL absoluta del panel global Next (sin barra final). Producción: definir ERP_DASHBOARD_URL. */
+function resolveErpDashboardUrl() {
+  const u = String(process.env.ERP_DASHBOARD_URL || "").trim();
+  if (u) return u.replace(/\/+$/, "");
+  return "http://localhost:3000/dashboard";
+}
+
+function escHtmlAttr(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;");
+}
 
 function isEnabled() {
   const v = process.env.ADMIN_PANEL_ENABLED;
@@ -43,8 +60,9 @@ body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-seri
 /* ── Layout ── */
 .app{display:grid;grid-template-rows:auto 1fr;min-height:100vh}
 header{background:var(--surface);border-bottom:1px solid var(--border);
-  padding:.75rem 1.5rem;display:flex;align-items:center;gap:1rem;justify-content:space-between}
+  padding:.75rem 1.5rem;display:flex;align-items:center;gap:1rem;justify-content:space-between;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:.6rem}
+.header-right{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-left:auto}
 .brand-icon{width:2rem;height:2rem;background:var(--primary);border-radius:var(--rad);
   display:flex;align-items:center;justify-content:center;font-size:1rem}
 .brand h1{font-size:.95rem;font-weight:700;color:var(--txt)}
@@ -112,6 +130,15 @@ tr:hover td{background:var(--surface2);color:var(--txt)}
 .b-blue{background:var(--primary-light);color:var(--primary)}
 .b-purple{background:var(--purple-bg);color:var(--purple)}
 .b-gray{background:var(--surface3);color:var(--txt2)}
+
+/* Piloto IA Tipo M (Groq) — badge cabecera */
+.hdr-groq{font-size:.68rem;font-weight:800;letter-spacing:.05em;text-transform:uppercase;
+  padding:.38rem .8rem;border-radius:999px;border:1px solid var(--border2);white-space:nowrap;line-height:1.2;
+  cursor:default;transition:background .15s,color .15s,border-color .15s}
+.hdr-groq--loading{color:var(--txt3);background:var(--surface2)}
+.hdr-groq--on{background:var(--green-bg);color:var(--green);border-color:rgba(34,197,94,.45)}
+.hdr-groq--off{background:var(--red-bg);color:var(--red);border-color:rgba(239,68,68,.45)}
+.hdr-groq--warn{background:var(--yellow-bg);color:var(--yellow);border-color:rgba(245,158,11,.45)}
 
 /* ── Buttons ── */
 .btn{display:inline-flex;align-items:center;gap:.4rem;padding:.45rem 1rem;
@@ -192,6 +219,16 @@ tr:hover td{background:var(--surface2);color:var(--txt)}
   padding:.1rem .4rem;border-radius:999px;background:var(--surface3);color:var(--txt3)}
 .spread-ok{color:var(--green)}.spread-warn{color:var(--yellow)}.spread-bad{color:var(--red)}
 
+/* Deprecación — enlace al ERP Next */
+.erp-deprecation-banner{
+  background:var(--yellow-bg);border-bottom:1px solid rgba(245,158,11,.45);
+  color:var(--txt);padding:.55rem 1.25rem;font-size:.78rem;line-height:1.45;
+  display:flex;align-items:center;justify-content:center;gap:.65rem;flex-wrap:wrap;text-align:center
+}
+.erp-deprecation-banner code{font-size:.72rem;background:var(--surface2);padding:.1rem .35rem;border-radius:4px;color:var(--txt2)}
+.erp-deprecation-banner a{color:var(--primary);font-weight:700;text-decoration:underline}
+.erp-deprecation-banner a:hover{color:var(--primary-dark)}
+
 /* ── Responsive ── */
 @media(max-width:720px){
   .content{grid-template-columns:1fr;grid-template-rows:auto 1fr}
@@ -204,6 +241,13 @@ tr:hover td{background:var(--surface2);color:var(--txt)}
 </style>
 </head>
 <body>
+${(() => {
+    const erp = resolveErpDashboardUrl();
+    return `<div class="erp-deprecation-banner" role="status">
+  <span>Este panel HTML está <strong>deprecado</strong> para operación diaria. Usá el dashboard ERP Next.</span>
+  <a href="${escHtmlAttr(erp)}" target="_blank" rel="noopener noreferrer">Abrir dashboard ERP →</a>
+</div>`;
+  })()}
 <div class="app">
 
 <!-- Header -->
@@ -215,10 +259,13 @@ tr:hover td{background:var(--surface2);color:var(--txt)}
       <p>Panel de Administración</p>
     </div>
   </div>
-  <div class="header-status">
-    <span class="status-dot" id="hdr-dot"></span>
-    <span id="hdr-status">Conectando…</span>
-    <span id="hdr-rate" style="margin-left:.75rem;font-weight:700;color:var(--green)"></span>
+  <div class="header-right">
+    <div class="header-status">
+      <span class="status-dot" id="hdr-dot"></span>
+      <span id="hdr-status">Conectando…</span>
+      <span id="hdr-rate" style="margin-left:.75rem;font-weight:700;color:var(--green)"></span>
+    </div>
+    <span id="hdr-groq" class="hdr-groq hdr-groq--loading" title="Estado del piloto IA (Groq) para WhatsApp CRM (Tipo M).">IA GROQ · …</span>
   </div>
 </header>
 
@@ -567,6 +614,35 @@ async function loadTasaHoy(){
   }
 }
 loadTasaHoy();
+
+async function loadGroqBanner(){
+  const el=document.getElementById('hdr-groq');
+  if(!el)return;
+  try{
+    const j=await apiFetch('/api/ai-responder/stats');
+    el.classList.remove('hdr-groq--loading','hdr-groq--on','hdr-groq--off','hdr-groq--warn');
+    if(j.worker_running){
+      el.textContent='IA GROQ · ACTIVA';
+      el.classList.add('hdr-groq--on');
+      el.title='Tipo M: worker + cola con GROQ_API_KEY y piloto habilitado (no suspendido).';
+    }else{
+      el.textContent='IA GROQ · INACTIVA';
+      el.classList.add('hdr-groq--off');
+      const bits=[];
+      if(!j.provider||!j.provider.groq_key_ok)bits.push('falta GROQ_API_KEY');
+      if(j.ai_responder_suspended)bits.push('AI_RESPONDER_SUSPENDED');
+      else if(!j.ai_responder_env_enabled)bits.push('AI_RESPONDER_ENABLED distinto de 1');
+      el.title=bits.length?bits.join(' · '):'Piloto IA inactivo o sin requisitos para ejecutar.';
+    }
+  }catch(e){
+    el.classList.remove('hdr-groq--loading','hdr-groq--on','hdr-groq--off');
+    el.classList.add('hdr-groq--warn');
+    el.textContent='IA GROQ · ?';
+    el.title='No se pudo leer /api/ai-responder/stats: '+String(e.message||e);
+  }
+}
+loadGroqBanner();
+setInterval(loadGroqBanner,120000);
 
 async function loadHistorial(){
   const from=document.getElementById('tasa-from').value;
@@ -1014,7 +1090,10 @@ function handleAdminPanel(req, res, url) {
     res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
     res.end(
       "<!DOCTYPE html><meta charset=utf-8><title>Admin</title>" +
-        "<p>Acceso denegado. Usá <code>/admin-panel?k=TU_ADMIN_SECRET</code>.</p>"
+        "<p>Acceso denegado. Usá <code>/admin-panel?k=TU_ADMIN_SECRET</code> " +
+        "o el dashboard ERP en <code>" +
+        escHtmlAttr(resolveErpDashboardUrl()) +
+        "</code>.</p>"
     );
     return true;
   }
@@ -1029,4 +1108,26 @@ function handleAdminPanel(req, res, url) {
   return true;
 }
 
-module.exports = { handleAdminPanel };
+/**
+ * GET|HEAD /admin — redirige al dashboard ERP Next (misma URL que la franja de deprecación).
+ * @returns {boolean}
+ */
+function handleAdminLegacyRedirect(req, res, url) {
+  const path = (url.pathname || "").replace(/\/+$/, "") || "/";
+  if (path !== "/admin") return false;
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.writeHead(405, { Allow: "GET, HEAD" });
+    res.end();
+    return true;
+  }
+  const loc = resolveErpDashboardUrl();
+  res.writeHead(302, {
+    Location: loc,
+    "Cache-Control": "no-store",
+    "X-Robots-Tag": "noindex",
+  });
+  res.end();
+  return true;
+}
+
+module.exports = { handleAdminPanel, handleAdminLegacyRedirect, resolveErpDashboardUrl };

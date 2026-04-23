@@ -158,10 +158,13 @@ async function handleChatApiRequest(req, res, url) {
       const before_id = url.searchParams.get("before_id");
       const limit = url.searchParams.get("limit");
       const markReadParam = url.searchParams.get("mark_read");
-      const skipMarkRead =
-        markReadParam === "0" ||
-        markReadParam === "false" ||
-        String(markReadParam || "").toLowerCase() === "no";
+      // Opt-in: solo marcar leído si el cliente lo pide (evita que listas/vistas previas
+      // de mensajes vacíen unread_count y los hilos “desaparezcan” del filtro Sin leer).
+      const markReadExplicit =
+        markReadParam === "1" ||
+        String(markReadParam || "").toLowerCase() === "true" ||
+        String(markReadParam || "").toLowerCase() === "yes" ||
+        String(markReadParam || "").toLowerCase() === "on";
       const lim =
         limit != null && String(limit).trim() !== ""
           ? Number(limit)
@@ -172,7 +175,7 @@ async function handleChatApiRequest(req, res, url) {
       });
       const isFirstPage =
         before_id == null || String(before_id).trim() === "";
-      if (isFirstPage && !skipMarkRead) {
+      if (isFirstPage && markReadExplicit) {
         try {
           await markChatRead(msgMatch[1]);
         } catch (e) {

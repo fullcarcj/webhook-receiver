@@ -8,12 +8,51 @@
  */
 
 const { pool }  = require("../../db");
+const { getStats } = require("../handlers/aiResponderApiHandler");
 const {
   fillGaps,
   calcChange,
   calcPct,
   V_SALES_UNIFIED_BS_AMOUNT,
 } = require("../utils/statsHelpers");
+
+/** Estado piloto IA Tipo M (Groq) para dashboards que consumen /api/stats/overview|realtime (permiso ventas). */
+async function buildAiGroqStatusSnapshot() {
+  try {
+    const s = await getStats();
+    const active = Boolean(s.worker_running);
+    const bits = [];
+    if (!(s.provider && s.provider.groq_key_ok)) bits.push("sin GROQ_API_KEY");
+    if (s.ai_responder_suspended) bits.push("AI_RESPONDER_SUSPENDED");
+    else if (!s.ai_responder_env_enabled) bits.push("AI_RESPONDER_ENABLED distinto de 1");
+    return {
+      active,
+      label: active ? "ACTIVA" : "INACTIVA",
+      detail: active
+        ? "Tipo M: worker y GROQ_API_KEY con piloto habilitado"
+        : bits.length
+          ? bits.join(" · ")
+          : "Piloto IA inactivo",
+      worker_running: Boolean(s.worker_running),
+      groq_key_ok: Boolean(s.provider && s.provider.groq_key_ok),
+      ai_responder_enabled: Boolean(s.ai_responder_enabled),
+      ai_responder_env_enabled: Boolean(s.ai_responder_env_enabled),
+      ai_responder_suspended: Boolean(s.ai_responder_suspended),
+    };
+  } catch (e) {
+    return {
+      active: false,
+      label: "?",
+      detail: String((e && e.message) || e || "error"),
+      error: true,
+      worker_running: false,
+      groq_key_ok: false,
+      ai_responder_enabled: false,
+      ai_responder_env_enabled: false,
+      ai_responder_suspended: false,
+    };
+  }
+}
 
 /** Importe en Bs por fila de `v_sales_unified` (alias `vu`). */
 const VU_REVENUE_BS = `(
@@ -33,7 +72,7 @@ const VU_REVENUE_USD = `(
 // ─── OVERVIEW ─────────────────────────────────────────────────────────────────
 
 async function getOverview() {
-  const [todayRows, yesterdayRows, customersRow, messagesRow, reconcRow, debitRow] =
+  const [todayRows, yesterdayRows, customersRow, messagesRow, reconcRow, debitRow, aiGroq] =
     await Promise.all([
       // Ventas hoy (POS + omnicanal)
       pool.query(`
@@ -82,6 +121,7 @@ async function getOverview() {
         LEFT JOIN debit_justifications dj ON dj.bank_statement_id = bs.id
         WHERE bs.tx_type = 'DEBIT' AND dj.id IS NULL
       `).catch(() => ({ rows: [{ unjustified_debits: 0 }] })),
+      buildAiGroqStatusSnapshot(),
     ]);
 
   const t = todayRows.rows[0];
@@ -122,13 +162,14 @@ async function getOverview() {
       revenue_pct: calcChange(Number(t.revenue_bs),  Number(y.revenue_bs)),
     },
     alerts,
+    ai_groq: aiGroq,
   };
 }
 
 // ─── REALTIME ─────────────────────────────────────────────────────────────────
 
 async function getRealtime() {
-  const [ordersRow, chatsRow, reconcRow] = await Promise.all([
+  const [ordersRow, chatsRow, reconcRow, aiGroq] = await Promise.all([
     pool.query(`
       SELECT COUNT(*)::bigint AS orders, COALESCE(SUM(${V_SALES_UNIFIED_BS_AMOUNT}), 0) AS revenue_bs
       FROM v_sales_unified WHERE created_at >= NOW() - INTERVAL '60 minutes'
@@ -145,6 +186,7 @@ async function getRealtime() {
       FROM reconciliation_log
       WHERE DATE(created_at AT TIME ZONE 'America/Caracas') = CURRENT_DATE
     `).catch(() => ({ rows: [{ matched_today: 0, manual_today: 0, last_match_at: null }] })),
+    buildAiGroqStatusSnapshot(),
   ]);
 
   return {
@@ -158,6 +200,7 @@ async function getRealtime() {
       matched_today:  Number(reconcRow.rows[0].matched_today),
       manual_today:   Number(reconcRow.rows[0].manual_today),
     },
+    ai_groq: aiGroq,
   };
 }
 

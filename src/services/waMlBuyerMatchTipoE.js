@@ -125,7 +125,7 @@ async function tryWhatsappSalesNameMatchBeforeNewCustomer(conn, { normalizedPhon
   const orderRowsForBuyer = rows.filter((r) => Number(r.buyer_id) === buyerId);
 
   const { rows: hadBefore } = await conn.query(
-    `SELECT id FROM customers WHERE primary_ml_buyer_id = $1 LIMIT 1`,
+    `SELECT id FROM customers WHERE primary_ml_buyer_id = $1 AND is_active = TRUE LIMIT 1`,
     [buyerId]
   );
   const hadCustomer = hadBefore.rows.length > 0;

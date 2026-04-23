@@ -69,6 +69,14 @@ async function isMlQuestionAnswered(mlQuestionId) {
   }
 }
 
+/** Alineado a inboxService.js: orden/cotización aprobada no imponen etapa `order` en ML sin identidad. */
+function isChatIdentityRecognizedForStage(chat) {
+  const cid = chat.customer_id != null ? Number(chat.customer_id) : NaN;
+  if (Number.isFinite(cid) && cid > 0) return true;
+  const s = String(chat.identity_status || "").trim();
+  return s === "auto_matched" || s === "manual_linked" || s === "declared";
+}
+
 /**
  * Calcula chat_stage alineado a CHAT_STAGE_EXPR en inboxService.js (6 etapas, sin ml_answer ni approved).
  */
@@ -78,20 +86,23 @@ function computeChatStage(chat, order, extra = {}) {
       ? String(extra.quoteStatus).trim()
       : null;
   const mqAns = extra.mlQuestionAnswered === true;
+  const suppressErpOrderStage =
+    (chat.source_type === "ml_message" || chat.source_type === "ml_question") &&
+    !isChatIdentityRecognizedForStage(chat);
 
   if (order) {
     const st = order.status;
     if (st === "completed" || st === "cancelled") return "closed";
     if (order.payment_status === "approved" && order.fulfillment_type) return "dispatch";
     if (order.payment_status === "pending") return "payment";
-    return "order";
+    if (!suppressErpOrderStage) return "order";
   }
-  if (quoteStatus === "approved") return "order";
+  if (quoteStatus === "approved" && !suppressErpOrderStage) return "order";
   if (["draft", "borrador", "sent"].includes(quoteStatus)) return "quote";
   if (chat.source_type === "ml_question") {
     return mqAns ? "quote" : "contact";
   }
-  if (chat.source_type === "ml_message") return "order";
+  if (chat.source_type === "ml_message") return "contact";
   return "contact";
 }
 

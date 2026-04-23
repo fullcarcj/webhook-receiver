@@ -105,6 +105,7 @@ async function findExistingCustomerByPhone(db, phoneRaw) {
      FROM customers c
      WHERE NULLIF(TRIM(c.phone), '') IS NOT NULL
        AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
+       AND c.is_active = TRUE
      LIMIT 1`,
     [digits]
   );

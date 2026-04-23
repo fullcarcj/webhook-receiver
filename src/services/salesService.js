@@ -298,6 +298,7 @@ async function fetchOrderItems(client, salesOrderId) {
  * @param {string} [p.identityExternalId] — clave en crm_customer_identities (default: external_order_id)
  * @param {number} [p.companyId] — tasas Bs (currency)
  * @param {number|undefined|null} [p.zoneId] — zona delivery (opcional)
+ * @param {number|undefined|null} [p.deliveryClientPriceBs] — costo carrera al cliente en Bs.; con `zoneId` pisa el precio de lista de la zona
  * @param {number} [p.paymentAmount] — monto cobrado (USD o Bs según medio; opcional, default total orden)
  * @param {number} [p.exchangeRate] — tasa Bs/USD para EFECTIVO_BS (opcional)
  * @param {string} [p.proofUrl] — URL comprobante (opcional)
@@ -320,6 +321,7 @@ async function createOrder({
   identityExternalId,
   companyId,
   zoneId,
+  deliveryClientPriceBs,
   paymentAmount,
   exchangeRate,
   proofUrl,
@@ -522,7 +524,13 @@ async function createOrder({
         throw e;
       }
       const zone = zrows[0];
-      const deliveryAddedBs = Number(zone.client_price_bs || 0);
+      const listClientBs = Number(zone.client_price_bs || 0);
+      let clientBs = listClientBs;
+      if (deliveryClientPriceBs != null && deliveryClientPriceBs !== "") {
+        const o = Number(deliveryClientPriceBs);
+        if (Number.isFinite(o) && o > 0) clientBs = o;
+      }
+      const deliveryAddedBs = clientBs;
       if (deliveryAddedBs > 0) {
         await client.query(
           `UPDATE sales_orders
@@ -545,7 +553,12 @@ async function createOrder({
         );
       }
       const deliveryService = require("./deliveryService");
-      await deliveryService.createDeliveryService(client, { orderId, zoneId: zId, zone });
+      const zoneForSvc = Object.assign({}, zone, { client_price_bs: clientBs });
+      await deliveryService.createDeliveryService(client, {
+        orderId,
+        zoneId: zId,
+        zone: zoneForSvc,
+      });
     }
 
     if (needsCashApproval) {
@@ -987,6 +1000,8 @@ async function listSalesOrders({
     LEFT JOIN sales_orders so
       ON vu.source_table = 'sales_orders'
      AND vu.source_id = so.id
+    LEFT JOIN ml_accounts ma
+      ON ma.ml_user_id = so.ml_user_id
     LEFT JOIN ml_orders mo
       ON so.source = 'mercadolibre'
      AND so.ml_user_id IS NOT NULL
@@ -1001,6 +1016,8 @@ async function listSalesOrders({
              vu.order_total_amount, vu.loyalty_points_earned,
              vu.notes, vu.sold_by, vu.created_at,
              vu.reconciled_statement_id,
+             so.ml_user_id AS ml_user_id,
+             ma.nickname AS ml_account_nickname,
              (${lifecycleStageExpr}) AS lifecycle_stage,
              (${waitingBuyerExpr}) AS waiting_buyer_feedback
       ${enrichedFrom}
@@ -1027,6 +1044,8 @@ async function listSalesOrders({
               e.order_total_amount, e.loyalty_points_earned,
               e.notes, e.sold_by, e.created_at,
               e.reconciled_statement_id,
+              e.ml_user_id,
+              e.ml_account_nickname,
               e.lifecycle_stage,
               e.waiting_buyer_feedback
        FROM filtered e
@@ -1082,6 +1101,14 @@ async function listSalesOrders({
           created_at: o.created_at,
           reconciled_statement_id:
             o.reconciled_statement_id != null ? Number(o.reconciled_statement_id) : null,
+          ml_user_id:
+            o.ml_user_id != null && Number.isFinite(Number(o.ml_user_id))
+              ? Number(o.ml_user_id)
+              : null,
+          ml_account_nickname:
+            o.ml_account_nickname != null && String(o.ml_account_nickname).trim() !== ""
+              ? String(o.ml_account_nickname).trim()
+              : null,
           lifecycle_stage: o.lifecycle_stage != null ? String(o.lifecycle_stage) : null,
           waiting_buyer_feedback: Boolean(o.waiting_buyer_feedback),
         };
@@ -1304,11 +1331,18 @@ async function patchSalesOrderStatus(orderId, newStatus) {
 async function resolveCustomerIdFromMlBuyer(client, buyerId) {
   const bid = Number(buyerId);
   if (!Number.isFinite(bid) || bid <= 0) return null;
-  const r1 = await client.query(`SELECT id FROM customers WHERE primary_ml_buyer_id = $1 LIMIT 1`, [bid]);
+  const r1 = await client.query(
+    `SELECT id FROM customers WHERE primary_ml_buyer_id = $1 AND is_active = TRUE LIMIT 1`,
+    [bid]
+  );
   if (r1.rows.length) return Number(r1.rows[0].id);
   try {
     const r2 = await client.query(
-      `SELECT customer_id FROM customer_ml_buyers WHERE ml_buyer_id = $1 LIMIT 1`,
+      `SELECT cmb.customer_id
+       FROM customer_ml_buyers cmb
+       INNER JOIN customers c ON c.id = cmb.customer_id AND c.is_active = TRUE
+       WHERE cmb.ml_buyer_id = $1
+       LIMIT 1`,
       [bid]
     );
     if (r2.rows.length) return Number(r2.rows[0].customer_id);

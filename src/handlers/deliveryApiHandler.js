@@ -3,7 +3,7 @@
 const { z } = require("zod");
 const { safeParse } = require("../middleware/validateCrm");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
-const { requireAdminOrPermission } = require("../utils/authMiddleware");
+const { checkAdminSecretOrJwt, requirePermission } = require("../utils/authMiddleware");
 const deliveryService = require("../services/deliveryService");
 
 function writeJson(res, status, body) {
@@ -67,6 +67,14 @@ const liquidateSchema = z
     message: "Debe indicar statement_id o manual_tx_id del pago",
   });
 
+function userHasModuleAction(user, module, action) {
+  if (user.role === "SUPERUSER") return true;
+  return (
+    Array.isArray(user.permissions) &&
+    user.permissions.some((p) => p.module === module && p.action === action)
+  );
+}
+
 async function handleDeliveryApiRequest(req, res, url) {
   const pathname = url.pathname || "";
   if (!pathname.startsWith("/api/delivery")) return false;
@@ -77,7 +85,28 @@ async function handleDeliveryApiRequest(req, res, url) {
     res.end();
     return true;
   }
-  if (!await requireAdminOrPermission(req, res, 'settings')) return true;
+  const user = await checkAdminSecretOrJwt(req, res);
+  if (!user) return true;
+  const resolvedAction =
+    req.method === "GET" ? "read" : req.method === "DELETE" ? "admin" : "write";
+  const isGetZones = req.method === "GET" && pathname === "/api/delivery/zones";
+  if (isGetZones) {
+    if (
+      !userHasModuleAction(user, "ventas", "read") &&
+      !userHasModuleAction(user, "settings", "read")
+    ) {
+      res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          error: "FORBIDDEN",
+          message: "Se requiere ventas:read o settings:read para listar zonas de delivery",
+        })
+      );
+      return true;
+    }
+  } else if (!requirePermission(user, "settings", resolvedAction, res)) {
+    return true;
+  }
 
   try {
     // GET /api/delivery/zones

@@ -254,7 +254,8 @@ function isWaContactNameBlockedForFullName(raw) {
  *   PASO 4 — Decisión por cantidad de palabras SIN IA:
  *              0 o >4 palabras → false; 1 palabra → 'ASK_SURNAME'
  *   PASO 5 — Validación semántica con IA (solo 2-4 palabras)
- *              Si IA falla → fallback estático (isLikelyChatNotName + sanitizeWaPersonName)
+ *              Si IA falla → por defecto **false** (no guardar nombre dudoso). Opcional: WA_NAME_ALLOW_STATIC_FALLBACK=1
+ *              restaura fallback heurístico (isLikelyChatNotName + sanitizeWaPersonName).
  *
  * @returns {Promise<true|false|'ASK_SURNAME'>}
  */
@@ -304,11 +305,18 @@ async function isValidFullName(input) {
   // PASO 5 — Validación semántica con IA (2-4 palabras)
   const aiResult = await _validateWithAI(clean);
   if (aiResult === null) {
-    // IA falló → fallback a lógica estática original para no bloquear el flujo
-    if (isLikelyChatNotName(clean)) return false;
-    const fallback = sanitizeWaPersonName(clean) !== null;
-    log.warn({ input: clean, fallback }, "fallback estático activado");
-    return fallback;
+    const allowFallback = String(process.env.WA_NAME_ALLOW_STATIC_FALLBACK || "")
+      .trim()
+      .toLowerCase();
+    if (allowFallback === "1" || allowFallback === "true" || allowFallback === "yes" || allowFallback === "on") {
+      if (isLikelyChatNotName(clean)) return false;
+      const fallback = sanitizeWaPersonName(clean) !== null;
+      log.warn({ input: clean, fallback }, "fallback estático (WA_NAME_ALLOW_STATIC_FALLBACK)");
+      return fallback;
+    }
+    await _logSkippedAI("ia_unavailable_strict_reject");
+    log.warn({ input: clean }, "validación nombre: IA no disponible — rechazo estricto (sin contaminar customers)");
+    return false;
   }
   return aiResult;
 }

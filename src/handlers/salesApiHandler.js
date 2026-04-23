@@ -16,12 +16,72 @@ const { resolveCustomer } = require("../services/resolveCustomer");
 const sseBroker          = require("../realtime/sseBroker");
 const slaTimerManager    = require("../services/slaTimerManager");
 const { transition: smTransition, EVENTS: SM_EVENTS } = require("../services/crmChatStateMachine");
+const { resolveMlPackFromSaleId } = require("../services/salesMlPackMessaging");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info", name: "salesApi" });
 
 function writeJson(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
+}
+
+/** Respuesta de mercadoLibrePostJsonForUser / mercadoLibreFetchForUser (sin token). */
+function mlPackApiErrorDetail(mlRes) {
+  if (!mlRes || typeof mlRes !== "object") return {};
+  const d = mlRes.data;
+  let mlMessage = null;
+  let mlError = null;
+  if (d && typeof d === "object" && !Array.isArray(d)) {
+    if (d.message != null) mlMessage = String(d.message);
+    if (d.error != null) mlError = String(d.error);
+    if (d.cause && typeof d.cause === "object" && d.cause.message != null) {
+      mlMessage = mlMessage || String(d.cause.message);
+    }
+  }
+  return {
+    http_status: mlRes.status,
+    ml_path: mlRes.path,
+    ml_error: mlError,
+    ml_message: mlMessage,
+    body_preview:
+      typeof mlRes.rawText === "string" && mlRes.rawText.length > 0
+        ? mlRes.rawText.slice(0, 2000)
+        : null,
+  };
+}
+
+/** Texto único para toasts que solo leen `error` (evita mostrar solo "not_found"). */
+function buildMlPackResolveUserError(ctx) {
+  const base = ctx.message != null ? String(ctx.message) : "Error al resolver mensajería ML.";
+  const d = ctx.detail;
+  if (!d || typeof d !== "object") return base;
+  const extra = [];
+  if (d.hint) extra.push(String(d.hint));
+  if (d.external_order_id != null) extra.push(`external_order_id=${d.external_order_id}`);
+  if (d.sale_id_requested != null) extra.push(`sale_id=${d.sale_id_requested}`);
+  if (d.parsed_ml_order_id != null) extra.push(`order_id_ml=${d.parsed_ml_order_id}`);
+  if (d.ml_user_id != null) extra.push(`ml_user_id=${d.ml_user_id}`);
+  if (d.ml_orders_row_found === false) extra.push("sin fila en ml_orders para esa cuenta y orden");
+  if (d.lookup) extra.push(`consulta=${d.lookup}`);
+  if (d.source) extra.push(`source=${d.source}`);
+  if (extra.length === 0) return base;
+  return `${base} — ${extra.join(" · ")}`;
+}
+
+function buildMlPackSyncUserMessage(syncMeta) {
+  if (!syncMeta || typeof syncMeta !== "object") return null;
+  if (syncMeta.skipped) {
+    return syncMeta.hint != null ? String(syncMeta.hint) : "Sincronización omitida.";
+  }
+  if (syncMeta.ok === false) {
+    const parts = [syncMeta.error != null ? String(syncMeta.error) : "Error al sincronizar mensajes con ML"];
+    if (syncMeta.ml_message) parts.push(String(syncMeta.ml_message));
+    if (syncMeta.ml_error) parts.push(String(syncMeta.ml_error));
+    if (syncMeta.http_status != null) parts.push(`HTTP ${syncMeta.http_status}`);
+    if (syncMeta.ml_path) parts.push(String(syncMeta.ml_path));
+    return parts.join(" — ");
+  }
+  return null;
 }
 
 async function parseJsonBody(req) {
@@ -87,6 +147,10 @@ const createBodySchema = z.object({
   identity_external_id: z.string().min(1).max(255).optional(),
   company_id: z.number().int().positive().optional(),
   zone_id: z.number().int().positive().optional(),
+  /**
+   * Costo carrera al cliente en Bs. (opcional). Solo con `zone_id`: si se omite se usa el precio de lista de la zona.
+   */
+  delivery_client_price_bs: z.number().positive().max(99999999).optional(),
   /** Monto cobrado (misma unidad que el medio: USD para Zelle, Bs para efectivo_bs si aplica) */
   payment_amount: z.number().positive().optional(),
   exchange_rate: z.number().positive().optional(),
@@ -98,7 +162,16 @@ const createBodySchema = z.object({
   consumidor_final: z.boolean().optional(),
   /** ID de crm_chats · vincula la orden al chat de origen (opcional) */
   conversation_id: z.number().int().positive().optional(),
-});
+})
+  .superRefine((data, ctx) => {
+    if (data.delivery_client_price_bs != null && data.zone_id == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "delivery_client_price_bs requiere zone_id",
+        path: ["delivery_client_price_bs"],
+      });
+    }
+  });
 
 const quoteCreateSchema = z.object({
   source: z.enum(["mostrador", "social_media", "mercadolibre", "ecommerce"]),
@@ -170,6 +243,14 @@ function parseSalesPath(pathname) {
   return trimmed;
 }
 
+/** `sales_orders.id` desde el id de listado unificado (`123` o `so-123`). `pos-*` u otros → NaN. */
+function mlPackPathSalePkFromCapture(idPart) {
+  const s = String(idPart ?? "").trim();
+  if (/^so-\d+$/i.test(s)) return Number(s.slice(3));
+  if (/^\d+$/.test(s)) return Number(s);
+  return NaN;
+}
+
 /** `sales_orders` no tiene `company_id` en todas las migraciones; se usa el de `customers` o env. */
 function resolveSalesCompanyIdFromUrl(url) {
   const raw = url.searchParams.get("company_id");
@@ -236,6 +317,46 @@ async function handleSalesApiRequest(req, res, url) {
           exclude_completed_default: !includeCompleted,
           timestamp: new Date().toISOString(),
         },
+      });
+      return true;
+    }
+
+    /** GET /api/sales/resolve-ml-order?ml_order_id= — id unificado `so-*` para pack ML (bandeja → pedidos). */
+    if (req.method === "GET" && segment === "resolve-ml-order") {
+      if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+      const rawOid = url.searchParams.get("ml_order_id");
+      const oidStr = rawOid != null ? String(rawOid).trim() : "";
+      if (!/^\d{5,20}$/.test(oidStr)) {
+        writeJson(res, 400, {
+          code: "BAD_ML_ORDER_ID",
+          error: "ml_order_id debe ser un número de orden ML (solo dígitos).",
+        });
+        return true;
+      }
+      const { rows } = await pool.query(
+        `SELECT ('so-' || so.id::text) AS id, so.external_order_id
+         FROM sales_orders so
+         WHERE so.source = 'mercadolibre'
+           AND so.external_order_id ~ '^[0-9]+-[0-9]+$'
+           AND split_part(so.external_order_id, '-', 2)::bigint = $1::bigint
+         ORDER BY so.updated_at DESC NULLS LAST, so.id DESC
+         LIMIT 1`,
+        [oidStr]
+      );
+      if (!rows.length) {
+        writeJson(res, 404, {
+          code: "NOT_FOUND",
+          error: "No hay venta importada en ERP para esa orden de Mercado Libre.",
+          message: "Importá la orden o sincronizá ventas ML.",
+        });
+        return true;
+      }
+      writeJson(res, 200, {
+        data: {
+          id: rows[0].id,
+          external_order_id: rows[0].external_order_id != null ? String(rows[0].external_order_id) : null,
+        },
+        meta: { timestamp: new Date().toISOString() },
       });
       return true;
     }
@@ -320,6 +441,7 @@ async function handleSalesApiRequest(req, res, url) {
         identityExternalId: d.identity_external_id,
         companyId: d.company_id,
         zoneId: d.zone_id,
+        deliveryClientPriceBs: d.delivery_client_price_bs,
         paymentAmount: d.payment_amount,
         exchangeRate: d.exchange_rate,
         proofUrl: d.proof_url,
@@ -563,6 +685,181 @@ async function handleSalesApiRequest(req, res, url) {
           message: "No se pudo resolver el cliente. Verifique datos del comprador.",
         });
       }
+      return true;
+    }
+
+    /** GET /api/sales/:id/ml-pack-messages — historial pack ML (BD); ?sync=1 refresca desde API ML */
+    const mlPackMsgMatch = segment && segment.match(/^(\d+|so-\d+)\/ml-pack-messages\/?$/i);
+    if (req.method === "GET" && mlPackMsgMatch) {
+      if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+      const saleId = mlPackPathSalePkFromCapture(mlPackMsgMatch[1]);
+      const ctx = await resolveMlPackFromSaleId(saleId);
+      if (!ctx.ok) {
+        const st = ctx.code === "NOT_FOUND" ? 404 : 422;
+        writeJson(res, st, {
+          ok: false,
+          code: ctx.code,
+          error: buildMlPackResolveUserError(ctx),
+          error_slug: String(ctx.code || "").toLowerCase(),
+          message: ctx.message,
+          detail: ctx.detail != null ? ctx.detail : undefined,
+        });
+        return true;
+      }
+      const sync = url.searchParams.get("sync") === "1" || url.searchParams.get("sync") === "true";
+      let syncMeta = null;
+      if (sync) {
+        const { syncPackMessagesForOrder, resolveMlPackApplicationId } = require("../../ml-pack-messages-sync");
+        const tag = (process.env.ML_PACK_MESSAGES_SYNC_TAG || "post_sale").trim() || "post_sale";
+        const appId = resolveMlPackApplicationId();
+        const pageSize = Math.min(
+          100,
+          Math.max(1, Number(process.env.ML_PACK_MESSAGES_SYNC_PAGE_SIZE) || 50)
+        );
+        const delayMs = Math.max(0, Number(process.env.ML_PACK_MESSAGES_SYNC_DELAY_MS) || 0);
+        syncMeta = await syncPackMessagesForOrder(ctx.ml_user_id, ctx.ml_order_id, {
+          tag,
+          appId,
+          pageSize,
+          delayMs,
+        });
+      }
+      const { listMlOrderPackMessagesByUser } = require("../../db");
+      const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 300));
+      const rows = await listMlOrderPackMessagesByUser(ctx.ml_user_id, limit, {
+        order_id: ctx.ml_order_id,
+      });
+      const chronological = [...rows].reverse();
+      const syncUserMsg = syncMeta != null ? buildMlPackSyncUserMessage(syncMeta) : null;
+      writeJson(res, 200, {
+        data: {
+          messages: chronological,
+          ml_order_id: ctx.ml_order_id,
+          ml_user_id: ctx.ml_user_id,
+          buyer_id: ctx.buyer_id,
+          chat_id: ctx.chat_id,
+          external_order_id: ctx.external_order_id,
+        },
+        meta: {
+          timestamp: new Date().toISOString(),
+          ...(syncMeta != null ? { sync: syncMeta } : {}),
+          ...(syncUserMsg ? { sync_error: syncUserMsg } : {}),
+        },
+      });
+      return true;
+    }
+
+    /** POST /api/sales/:id/ml-pack-messages/send — envío post_sale vía API ML (texto; adjuntos no soportados aún) */
+    const mlPackSendMatch = segment && segment.match(/^(\d+|so-\d+)\/ml-pack-messages\/send\/?$/i);
+    if (req.method === "POST" && mlPackSendMatch) {
+      if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+      const saleId = mlPackPathSalePkFromCapture(mlPackSendMatch[1]);
+      let body = {};
+      try {
+        body = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const text = body && body.text != null ? String(body.text).trim() : "";
+      if (!text) {
+        writeJson(res, 400, { code: "MISSING_TEXT", message: "El texto es obligatorio" });
+        return true;
+      }
+      if (text.length > 350) {
+        writeJson(res, 400, {
+          code: "TEXT_TOO_LONG",
+          message: "Máximo 350 caracteres (límite ML post_sale)",
+        });
+        return true;
+      }
+      const ctx = await resolveMlPackFromSaleId(saleId);
+      if (!ctx.ok) {
+        const st = ctx.code === "NOT_FOUND" ? 404 : 422;
+        writeJson(res, st, {
+          ok: false,
+          code: ctx.code,
+          error: buildMlPackResolveUserError(ctx),
+          error_slug: String(ctx.code || "").toLowerCase(),
+          message: ctx.message,
+          detail: ctx.detail != null ? ctx.detail : undefined,
+        });
+        return true;
+      }
+      const crypto = require("crypto");
+      const { mercadoLibrePostJsonForUser } = require("../../oauth-token");
+      const { resolveMlPackApplicationId } = require("../../ml-pack-messages-sync");
+      const appId = resolveMlPackApplicationId();
+      const q = new URLSearchParams({ application_id: appId, tag: "post_sale" });
+      const path = `/messages/packs/${ctx.ml_order_id}/sellers/${ctx.ml_user_id}?${q.toString()}`;
+      const mlRes = await mercadoLibrePostJsonForUser(ctx.ml_user_id, path, {
+        from: { user_id: ctx.ml_user_id },
+        to: { user_id: ctx.buyer_id },
+        option_id: "OTHER",
+        text,
+      });
+      const okHttp = mlRes.ok && (mlRes.status === 200 || mlRes.status === 201);
+      if (!okHttp) {
+        logger.warn({ saleId, status: mlRes.status }, "sales ml-pack send failed");
+        const apiBits = mlPackApiErrorDetail(mlRes);
+        const dSend = {
+          sale_id: saleId,
+          ml_user_id: ctx.ml_user_id,
+          ml_order_id: ctx.ml_order_id,
+          buyer_id: ctx.buyer_id,
+          ...apiBits,
+        };
+        const sendUserErr = [
+          "Mercado Libre rechazó el envío o hubo error de red.",
+          apiBits.http_status != null ? `HTTP ${apiBits.http_status}` : null,
+          apiBits.ml_message,
+          apiBits.ml_error,
+          apiBits.ml_path,
+        ]
+          .filter(Boolean)
+          .join(" ");
+        writeJson(res, 502, {
+          ok: false,
+          code: "ML_SEND_FAILED",
+          error: sendUserErr,
+          message: "Mercado Libre rechazó el envío o hubo error de red",
+          detail: dSend,
+        });
+        return true;
+      }
+
+      if (ctx.chat_id != null) {
+        const extId = `ml_sale_${saleId}_${Date.now()}_${crypto.randomBytes(5).toString("hex")}`;
+        const answeredBy =
+          body.answered_by != null && String(body.answered_by).trim() !== ""
+            ? String(body.answered_by).trim()
+            : "ventas_pedidos";
+        await pool.query(
+          `INSERT INTO crm_messages (
+             chat_id, external_message_id, direction, type, content,
+             sent_by, is_read, created_at
+           ) VALUES (
+             $1, $2, 'outbound', 'text', $3::jsonb,
+             $4, true, NOW()
+           )
+           ON CONFLICT (external_message_id) DO NOTHING`,
+          [ctx.chat_id, extId, JSON.stringify({ text, source: "ventas_ml_pack" }), answeredBy]
+        );
+        await pool.query(
+          `UPDATE crm_chats SET
+             last_message_text = $1,
+             last_message_at = NOW(),
+             updated_at = NOW()
+           WHERE id = $2`,
+          [text.slice(0, 5000), ctx.chat_id]
+        );
+      }
+
+      writeJson(res, 200, {
+        ok: true,
+        data: { ml_order_id: ctx.ml_order_id, chat_id: ctx.chat_id },
+        meta: { timestamp: new Date().toISOString() },
+      });
       return true;
     }
 

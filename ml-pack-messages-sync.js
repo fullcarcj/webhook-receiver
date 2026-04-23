@@ -2,7 +2,7 @@
  * Sincroniza mensajería post-venta (pack) por orden desde la API de Mercado Libre hacia PostgreSQL.
  *
  * GET /messages/packs/{order_id}/sellers/{seller_id}?tag=post_sale&api_version=4&limit=&offset=&mark_as_read=false
- * (el id del pack en post-venta suele ser el order_id; multicuenta: un seller_id por fila en ml_accounts).
+ * (Mercado Libre Venezuela: el id del pack en post-venta coincide con order_id; multicuenta: un seller_id por fila en ml_accounts).
  *
  * ═══════════════════════════════════════════════════════════════════════════════════
  * LÍMITES DE API (no hay “sync sin límite” real)
@@ -88,6 +88,22 @@ function packMessagesPath(mlUserId, orderId, offset, limit, tag, appId) {
   return `/messages/packs/${orderId}/sellers/${mlUserId}?${p.toString()}`;
 }
 
+/**
+ * `application_id` en GET/POST `/messages/packs/.../sellers/...` (post_sale).
+ * Misma prioridad que el webhook `messages` en `server.js` y el CLI de este archivo:
+ * env → fallback numérico (app histórica en el código del webhook).
+ */
+function resolveMlPackApplicationId() {
+  const s = String(
+    process.env.ML_APPLICATION_ID ||
+      process.env.OAUTH_CLIENT_ID ||
+      process.env.ML_CLIENT_ID ||
+      ""
+  ).trim();
+  if (s) return s;
+  return "1837222235616049";
+}
+
 function orderDateForFilter(row, sinceCutoffMs) {
   if (sinceCutoffMs == null) return true;
   const dc = row.date_created;
@@ -127,10 +143,36 @@ async function syncPackMessagesForOrder(mlUserId, orderId, opts) {
 
       if (!res.ok) {
         const errText = (res.rawText || `HTTP ${res.status}`).slice(0, 2000);
+        const apiPath = res.path || path;
         if (res.status === 404) {
-          return { ok: true, upserted, pages, error: null, empty: true };
+          return {
+            ok: true,
+            upserted,
+            pages,
+            error: null,
+            empty: true,
+            http_status: 404,
+            ml_path: apiPath,
+            note: "ML respondió 404: sin hilo pack aún o recurso inexistente para ese order_id.",
+          };
         }
-        return { ok: false, upserted, pages, error: errText };
+        let mlMsg = null;
+        let mlErr = null;
+        const d = res.data;
+        if (d && typeof d === "object" && !Array.isArray(d)) {
+          if (d.message != null) mlMsg = String(d.message);
+          if (d.error != null) mlErr = String(d.error);
+        }
+        return {
+          ok: false,
+          upserted,
+          pages,
+          error: errText,
+          http_status: res.status,
+          ml_path: apiPath,
+          ml_error: mlErr,
+          ml_message: mlMsg,
+        };
       }
 
       const data = res.data && typeof res.data === "object" ? res.data : {};
@@ -161,7 +203,7 @@ async function syncPackMessagesForOrder(mlUserId, orderId, opts) {
     return { ok: true, upserted, pages };
   } catch (e) {
     const msg = e && e.message ? String(e.message) : String(e);
-    return { ok: false, upserted, pages, error: msg };
+    return { ok: false, upserted, pages, error: msg, exception: true };
   }
 }
 
@@ -218,9 +260,7 @@ async function main() {
   }
 
   const tag = (process.env.ML_PACK_MESSAGES_SYNC_TAG || "post_sale").trim() || "post_sale";
-  const appId = String(
-    process.env.ML_APPLICATION_ID || process.env.OAUTH_CLIENT_ID || "1837222235616049"
-  ).trim();
+  const appId = resolveMlPackApplicationId();
   const pageSize = DEFAULT_PAGE_SIZE;
   const delayMs = Math.max(0, Number(process.env.ML_PACK_MESSAGES_SYNC_DELAY_MS) || 0);
   const orderLimitEnv = Number(process.env.ML_PACK_MESSAGES_SYNC_ORDER_LIMIT);
@@ -294,4 +334,9 @@ if (require.main === module) {
   });
 }
 
-module.exports = { syncPackMessagesForOrder, packMessagesPath, persistPackMessageFromWebhookFetch };
+module.exports = {
+  syncPackMessagesForOrder,
+  packMessagesPath,
+  persistPackMessageFromWebhookFetch,
+  resolveMlPackApplicationId,
+};

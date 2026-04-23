@@ -1237,6 +1237,24 @@ async function handleInboxQuotationRequest(req, res, url) {
       const bodyChat =
         body.chat_id != null && body.chat_id !== "" ? Number(body.chat_id) : NaN;
 
+      let createOrderZoneId = null;
+      if (body.zone_id != null && body.zone_id !== "") {
+        const z = Number(body.zone_id);
+        if (Number.isFinite(z) && z > 0) createOrderZoneId = z;
+      }
+      let createOrderDeliveryBs = undefined;
+      if (body.delivery_client_price_bs != null && body.delivery_client_price_bs !== "") {
+        const b = Number(body.delivery_client_price_bs);
+        if (Number.isFinite(b) && b > 0) createOrderDeliveryBs = b;
+      }
+      if (createOrderDeliveryBs != null && createOrderZoneId == null) {
+        writeJson(res, 400, {
+          error: "bad_request",
+          message: "delivery_client_price_bs requiere zone_id",
+        });
+        return true;
+      }
+
       const uid = user.userId != null ? Number(user.userId) : null;
       const soldBy = String(user.username ?? user.email ?? user.userId ?? "crm");
 
@@ -1349,6 +1367,8 @@ async function handleInboxQuotationRequest(req, res, url) {
           externalOrderId: extKey,
           paymentMethod: "pago_movil",
           conversationId: Number(ip.chat_id),
+          zoneId: createOrderZoneId,
+          deliveryClientPriceBs: createOrderDeliveryBs,
         });
         orderId = Number(created.id);
         if (!Number.isFinite(orderId) || orderId <= 0) {

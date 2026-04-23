@@ -138,6 +138,7 @@ async function handle(normalized) {
          WHERE ci.customer_id = c.id
            AND ci.source = 'whatsapp'::crm_identity_source
            AND ci.external_id = $2
+           AND c.is_active = TRUE
            AND (c.full_name LIKE 'WA-%' OR TRIM(c.full_name) IN ('Cliente WhatsApp', 'Cliente'))`,
         [safeName, phone]
       );
@@ -153,6 +154,7 @@ async function handle(normalized) {
       const idRow = await pool.query(
         `SELECT ci.customer_id
          FROM crm_customer_identities ci
+         INNER JOIN customers c ON c.id = ci.customer_id AND c.is_active = TRUE
          WHERE ci.source = 'whatsapp'::crm_identity_source
            AND ci.external_id = $1
          LIMIT 1`,

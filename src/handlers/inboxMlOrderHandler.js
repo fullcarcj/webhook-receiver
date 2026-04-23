@@ -12,6 +12,12 @@
 const pino = require("pino");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const { requireAdminOrPermission } = require("../utils/authMiddleware");
+const { resolveMercadoLibreListingUrl } = require("../utils/mlItemPublicUrl");
+const {
+  resolveLinkedMlOrderId,
+  resolveMlOrderReferenceBs,
+} = require("../utils/chatMlOrderReference");
+const { getTodayRate } = require("../services/currencyService");
 const { pool } = require("../../db");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info", name: "inbox_ml_order_api" });
@@ -23,6 +29,17 @@ function writeJson(res, status, body) {
 
 function normalizePath(p) {
   return String(p || "").replace(/\/{2,}/g, "/").replace(/\/+$/, "") || "/";
+}
+
+function extractListingPicturesFromOrderLine(it) {
+  const pics = it?.item?.pictures;
+  if (!Array.isArray(pics)) return [];
+  const out = [];
+  for (const p of pics) {
+    const u = p && (p.secure_url || p.url);
+    if (u) out.push(String(u).trim());
+  }
+  return out;
 }
 
 /** Parsea los order_items del raw_json de la orden ML */
@@ -39,6 +56,7 @@ function parseOrderItems(rawJson) {
       unit_price:   it?.unit_price  != null ? Number(it.unit_price) : null,
       currency_id:  it?.currency_id != null ? String(it.currency_id) : null,
       seller_sku:   it?.item?.seller_sku != null ? String(it.item.seller_sku).trim() : null,
+      listing_pictures: extractListingPicturesFromOrderLine(it),
     }));
   } catch {
     return [];
@@ -136,16 +154,28 @@ async function getWmsLocations(productSku) {
   }
 }
 
-/** Trae thumbnail desde ml_listings por item_id */
-async function getMlThumbnail(mlItemId) {
+/** Trae thumbnail, permalink y site desde ml_listings por item_id */
+async function getMlListingRow(mlItemId) {
   if (!mlItemId) return null;
   try {
     const { rows } = await pool.query(
-      `SELECT thumbnail, title, status FROM ml_listings WHERE item_id = $1 LIMIT 1`,
+      `SELECT thumbnail, title, status, permalink, site_id
+       FROM ml_listings WHERE item_id = $1 LIMIT 1`,
       [mlItemId]
     );
     return rows[0] || null;
-  } catch {
+  } catch (e) {
+    if (e && e.code === "42703") {
+      try {
+        const { rows } = await pool.query(
+          `SELECT thumbnail, title, status FROM ml_listings WHERE item_id = $1 LIMIT 1`,
+          [mlItemId]
+        );
+        return rows[0] || null;
+      } catch {
+        return null;
+      }
+    }
     return null;
   }
 }
@@ -174,40 +204,7 @@ async function handleInboxMlOrderRequest(req, res, url) {
   const chatId = Number(mGet[1]);
 
   try {
-    // 1. Obtener ml_order_id del chat; si es null, extraerlo del campo phone (mlm:{uid}:{order_id})
-    const { rows: chatRows } = await pool.query(
-      `SELECT ml_order_id, phone FROM crm_chats WHERE id = $1`,
-      [chatId]
-    );
-    if (!chatRows.length) {
-      writeJson(res, 200, null);
-      return true;
-    }
-
-    let mlOrderId = chatRows[0].ml_order_id;
-
-    if (mlOrderId == null && chatRows[0].phone) {
-      // Formato: mlm:{ml_user_id}:{order_id}
-      const m = String(chatRows[0].phone).match(/^mlm:\d+:(\d+)$/);
-      if (m) mlOrderId = m[1];
-    }
-
-    // Fallback: buscar external_order_id en sales_orders por conversation_id
-    // (cubre chats ml_question / wa_inbound cuya orden está vinculada por conversation_id)
-    if (mlOrderId == null) {
-      const { rows: soRows } = await pool.query(
-        `SELECT external_order_id
-         FROM sales_orders
-         WHERE conversation_id = $1 AND external_order_id IS NOT NULL
-         ORDER BY created_at DESC NULLS LAST
-         LIMIT 1`,
-        [chatId]
-      );
-      if (soRows.length && soRows[0].external_order_id) {
-        mlOrderId = soRows[0].external_order_id;
-      }
-    }
-
+    const mlOrderId = await resolveLinkedMlOrderId(pool, chatId);
     if (mlOrderId == null) {
       writeJson(res, 200, null);
       return true;
@@ -222,7 +219,21 @@ async function handleInboxMlOrderRequest(req, res, url) {
       [String(mlOrderId)]
     );
     if (!orderRows.length) {
-      writeJson(res, 200, { ml_order_id: mlOrderId, items: [], not_synced: true });
+      const rateRow = await getTodayRate(1).catch(() => null);
+      const activeRate =
+        rateRow && rateRow.active_rate != null ? Number(rateRow.active_rate) : NaN;
+      const ref = await resolveMlOrderReferenceBs(pool, chatId, activeRate);
+      const payload = {
+        ml_order_id: mlOrderId,
+        items: [],
+        not_synced: true,
+      };
+      if (Number.isFinite(ref.referenceBs)) {
+        payload.reference_fallback_bs = ref.referenceBs;
+        payload.reference_fallback_source =
+          ref.meta && ref.meta.source ? String(ref.meta.source) : null;
+      }
+      writeJson(res, 200, payload);
       return true;
     }
     const mlOrder = orderRows[0];
@@ -235,11 +246,20 @@ async function handleInboxMlOrderRequest(req, res, url) {
       rawItems.map(async (it) => {
         const [product, listing] = await Promise.all([
           resolveProductSku(it.ml_item_id, it.variation_id, it.seller_sku),
-          getMlThumbnail(it.ml_item_id),
+          getMlListingRow(it.ml_item_id),
         ]);
         const wms_locations = product?.product_sku
           ? await getWmsLocations(product.product_sku)
           : [];
+        const picsRaw = Array.isArray(it.listing_pictures) ? it.listing_pictures : [];
+        const thumb = listing?.thumbnail ?? null;
+        const gallery = [...picsRaw];
+        if (thumb && !gallery.includes(thumb)) gallery.unshift(thumb);
+        const listingPermalink = resolveMercadoLibreListingUrl(
+          listing?.permalink,
+          it.ml_item_id,
+          listing?.site_id
+        );
         return {
           ml_item_id:   it.ml_item_id,
           variation_id: it.variation_id,
@@ -248,7 +268,10 @@ async function handleInboxMlOrderRequest(req, res, url) {
           unit_price:   it.unit_price,
           currency_id:  it.currency_id,
           seller_sku:   it.seller_sku,
-          thumbnail:    listing?.thumbnail ?? null,
+          thumbnail:    thumb,
+          listing_pictures: picsRaw,
+          listing_gallery: gallery,
+          listing_permalink: listingPermalink,
           listing_status: listing?.status ?? null,
           product: product
             ? {

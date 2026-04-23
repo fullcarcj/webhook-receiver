@@ -29,7 +29,11 @@ const {
   extractOrderIdFromFeedbackPayload,
   extractOrderIdFromMessage,
 } = require("./ml-pack-extract");
-const { syncPackMessagesForOrder, persistPackMessageFromWebhookFetch } = require("./ml-pack-messages-sync");
+const {
+  syncPackMessagesForOrder,
+  persistPackMessageFromWebhookFetch,
+  resolveMlPackApplicationId,
+} = require("./ml-pack-messages-sync");
 const { upsertOrderFeedbackFromApiResponse } = require("./ml-order-feedback-sync");
 const { extractBuyerFromOrderPayload } = require("./ml-buyer-extract");
 const { upsertBuyerFromOrdersV2Webhook } = require("./ml-buyer-order-sync");
@@ -188,7 +192,7 @@ const { handleFiscalApiRequest } = require("./src/routes/fiscal");
 const { handleFiscalDocumentsRequest } = require("./src/routes/fiscalDocuments");
 const { openCurrentPeriods } = require("./src/services/fiscalService");
 const { handleCatalogPublicPage } = require("./src/routes/catalogPublicPage");
-const { handleAdminPanel } = require("./src/routes/adminPanel");
+const { handleAdminPanel, handleAdminLegacyRedirect } = require("./src/routes/adminPanel");
 const { handleWmsTestPage } = require("./src/routes/wmsTestPage");
 const { handleLotsApiRequest } = require("./src/routes/lots");
 const { handleWalletApiRequest } = require("./src/routes/wallet");
@@ -1674,9 +1678,7 @@ function scheduleTopicFetchFromWebhook(body) {
                 process.env.ML_WEBHOOK_SYNC_PACK_ON_MESSAGE !== "false"
               ) {
                 try {
-                  const appId = String(
-                    process.env.ML_APPLICATION_ID || process.env.OAUTH_CLIENT_ID || "1837222235616049"
-                  ).trim();
+                  const appId = resolveMlPackApplicationId();
                   const pageSize = Math.min(
                     50,
                     Math.max(1, Number(process.env.ML_PACK_MESSAGES_SYNC_PAGE_SIZE) || 50)
@@ -7823,6 +7825,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleWmsTestPage(req, res, url)) {
+    return;
+  }
+
+  if (handleAdminLegacyRedirect(req, res, url)) {
     return;
   }
 

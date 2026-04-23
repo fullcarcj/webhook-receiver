@@ -27,9 +27,11 @@ async function handle(normalized) {
        FROM customers c
        WHERE NULLIF(TRIM(c.phone), '') IS NOT NULL
          AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
+         AND c.is_active = TRUE
        UNION
        SELECT ci.customer_id
        FROM crm_customer_identities ci
+       INNER JOIN customers c2 ON c2.id = ci.customer_id AND c2.is_active = TRUE
        WHERE ci.external_id = $1
          AND ci.source IN ('whatsapp'::crm_identity_source, 'mostrador'::crm_identity_source)
        LIMIT 1`,

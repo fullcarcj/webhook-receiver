@@ -17,6 +17,10 @@ const RESULTS = new Set(["no_conversion", "converted", "in_progress"]);
  * Orden de avance:
  *   contact → quote → order → payment → dispatch → closed  (6 etapas)
  *
+ * Mensajes pack ML (`ml_message`): order/payment/dispatch si `sol`/`so` enlazan una
+ * `sales_orders` (por `conversation_id`, por PK erróneo legacy, o por `ml_order_id` ML =
+ * segmento de `external_order_id` mercadolibre). Sin orden importada → contact.
+ *
  * Pregunta ML: no hay etapa "Resp. ML". Sin respuesta en ML → contact; respondida
  * en ML → quote (siguiente paso operativo: cotización formal en ERP).
  *
@@ -40,6 +44,10 @@ const CHAT_STAGE_VALUES = new Set([
  * asigna automáticamente conversation_id durante la importación de órdenes, lo que generaría
  * falsos positivos de pipeline. Para esos chats solo se acepta cc.ml_order_id (vínculo
  * explícito vía "Vincular Orden ML").
+ *
+ * Para chats ml_message: `cc.ml_order_id` es el order_id de Mercado Libre (no PK de
+ * sales_orders). Se enlaza por `external_order_id` tipo `ml_user_id-order_id` (misma
+ * lógica que GET /api/sales/resolve-ml-order).
  */
 const JOIN_ORDER = `
   LEFT JOIN LATERAL (
@@ -48,10 +56,27 @@ const JOIN_ORDER = `
     WHERE (
       (cc.source_type != 'ml_question' AND so2.conversation_id = cc.id)
       OR (cc.ml_order_id IS NOT NULL AND so2.id = cc.ml_order_id)
+      OR (
+        cc.source_type = 'ml_message'
+        AND cc.ml_order_id IS NOT NULL
+        AND so2.source = 'mercadolibre'
+        AND so2.external_order_id ~ '^[0-9]+-[0-9]+$'
+        AND split_part(so2.external_order_id, '-', 2)::bigint = cc.ml_order_id::bigint
+      )
     )
       AND so2.status NOT IN ('completed', 'cancelled')
     ORDER BY
-      CASE WHEN cc.ml_order_id IS NOT NULL AND so2.id = cc.ml_order_id THEN 0 ELSE 1 END,
+      CASE
+        WHEN cc.source_type = 'ml_message'
+          AND cc.ml_order_id IS NOT NULL
+          AND so2.source = 'mercadolibre'
+          AND so2.external_order_id ~ '^[0-9]+-[0-9]+$'
+          AND split_part(so2.external_order_id, '-', 2)::bigint = cc.ml_order_id::bigint
+          THEN 0
+        WHEN cc.ml_order_id IS NOT NULL AND so2.id = cc.ml_order_id THEN 1
+        WHEN cc.source_type != 'ml_question' AND so2.conversation_id = cc.id THEN 2
+        ELSE 3
+      END,
       so2.created_at DESC NULLS LAST
     LIMIT 1
   ) so ON true
@@ -69,9 +94,26 @@ const JOIN_ORDER_LATEST = `
     WHERE (
       (cc.source_type != 'ml_question' AND so3.conversation_id = cc.id)
       OR (cc.ml_order_id IS NOT NULL AND so3.id = cc.ml_order_id)
+      OR (
+        cc.source_type = 'ml_message'
+        AND cc.ml_order_id IS NOT NULL
+        AND so3.source = 'mercadolibre'
+        AND so3.external_order_id ~ '^[0-9]+-[0-9]+$'
+        AND split_part(so3.external_order_id, '-', 2)::bigint = cc.ml_order_id::bigint
+      )
     )
     ORDER BY
-      CASE WHEN cc.ml_order_id IS NOT NULL AND so3.id = cc.ml_order_id THEN 0 ELSE 1 END,
+      CASE
+        WHEN cc.source_type = 'ml_message'
+          AND cc.ml_order_id IS NOT NULL
+          AND so3.source = 'mercadolibre'
+          AND so3.external_order_id ~ '^[0-9]+-[0-9]+$'
+          AND split_part(so3.external_order_id, '-', 2)::bigint = cc.ml_order_id::bigint
+          THEN 0
+        WHEN cc.ml_order_id IS NOT NULL AND so3.id = cc.ml_order_id THEN 1
+        WHEN cc.source_type != 'ml_question' AND so3.conversation_id = cc.id THEN 2
+        ELSE 3
+      END,
       so3.created_at DESC NULLS LAST
     LIMIT 1
   ) sol ON true
@@ -100,7 +142,10 @@ const JOIN_LAST_MESSAGE = `
   ) last_msg ON true
 `;
 
-/** Pregunta ML ya respondida en ML (tabla answered o pending marcada ANSWERED). */
+/**
+ * ¿Respondida? Hay fila en `ml_questions_answered` (webhook/refresh/POST answer) o en
+ * `ml_questions_pending` con `ml_status = 'ANSWERED'` (transición al persistir respuesta).
+ */
 const JOIN_ML_QUESTION_ANSWERED = `
   LEFT JOIN LATERAL (
     SELECT TRUE AS answered
@@ -115,12 +160,27 @@ const JOIN_ML_QUESTION_ANSWERED = `
   ) mlq_ans ON true
 `;
 
+const CRM_IDENTITY_RECOGNIZED_SQL = `(cc.customer_id IS NOT NULL OR cc.identity_status IN ('auto_matched', 'manual_linked', 'declared'))`;
+
+/**
+ * Hilo de pregunta ML ya respondida en BD y sin cliente identificado: ocultar sin `?src=`.
+ * Importante: `syncAnsweredMlQuestionToCrm` pasa `source_type` a `ml_message`; `ml_question_id`
+ * sigue en `crm_chats`, por eso el criterio es `ml_question_id IS NOT NULL`, no solo `ml_question`.
+ */
+const EXCLUDE_ANSWERED_ML_QUESTION_IDLE_SQL = `NOT (
+  cc.ml_question_id IS NOT NULL
+  AND mlq_ans.answered IS TRUE
+  AND NOT (${CRM_IDENTITY_RECOGNIZED_SQL})
+)`;
+
 /**
  * Expresión SQL que calcula el chat_stage.
  * Requiere sol, iq, mlq_ans (JOIN_ORDER_LATEST, JOIN_QUOTE_ACTIVE, JOIN_ML_QUESTION_ANSWERED).
  * Prioridad: closed → dispatch → payment → order → quote (ERP) →
  *   ml_question respondida en ML → quote | ml_question sin respuesta → contact |
- *   ml_message → order | else contact.
+ *   ml_message: etapa comercial (order/payment/dispatch/closed) si hay `sol` enlazada;
+ *   no exige identidad CRM si hay `ml_order_id` (el hilo post-venta ML ya ancla la venta).
+ *   else contact.
  *
  * 'approved' (cotización aprobada) ahora se mapea a 'order' — mismo estado visual.
  */
@@ -129,12 +189,21 @@ const CHAT_STAGE_EXPR = `
     WHEN sol.status IN ('completed', 'cancelled')                                       THEN 'closed'
     WHEN sol.payment_status = 'approved' AND sol.fulfillment_type IS NOT NULL           THEN 'dispatch'
     WHEN sol.payment_status = 'pending'                                                 THEN 'payment'
-    WHEN sol.id IS NOT NULL                                                             THEN 'order'
-    WHEN iq.quote_status = 'approved'                                                   THEN 'order'
+    WHEN sol.id IS NOT NULL
+      AND (
+        cc.source_type NOT IN ('ml_message', 'ml_question')
+        OR (${CRM_IDENTITY_RECOGNIZED_SQL})
+        OR (cc.source_type = 'ml_message' AND cc.ml_order_id IS NOT NULL)
+      )                                                                                 THEN 'order'
+    WHEN iq.quote_status = 'approved'
+      AND (
+        cc.source_type NOT IN ('ml_message', 'ml_question')
+        OR (${CRM_IDENTITY_RECOGNIZED_SQL})
+        OR (cc.source_type = 'ml_message' AND cc.ml_order_id IS NOT NULL)
+      )                                                                                 THEN 'order'
     WHEN iq.quote_status IN ('draft', 'borrador', 'sent')                               THEN 'quote'
     WHEN cc.source_type = 'ml_question' AND mlq_ans.answered IS TRUE                    THEN 'quote'
     WHEN cc.source_type = 'ml_question'                                                 THEN 'contact'
-    WHEN cc.source_type = 'ml_message'                                                  THEN 'order'
     ELSE 'contact'
   END
 `;
@@ -154,13 +223,14 @@ const INFERRED_SALES_CHANNEL_SQL = `
 
 const RESOLVED_SALES_CHANNEL_SQL = `COALESCE(so.channel_id, (${INFERRED_SALES_CHANNEL_SQL}))`;
 
-/** Misma base de JOIN que listInbox para totales por faceta comparables con ?src=&stage=. */
+/** Misma base de JOIN que listInbox para totales por faceta comparables con `?src=` / `?stage=`. */
 const FACET_FROM = `
   FROM crm_chats cc
   ${JOIN_ORDER}
   ${JOIN_ORDER_LATEST}
   ${JOIN_QUOTE_ACTIVE}
   ${JOIN_ML_QUESTION_ANSWERED}
+  WHERE ${EXCLUDE_ANSWERED_ML_QUESTION_IDLE_SQL}
 `;
 
 function clampLimit(raw) {
@@ -248,8 +318,9 @@ function pushSrcOrConds(conds, srcParts) {
  * @param {string|null} cursorIso
  * @param {string[]|null} stageList
  * @param {string|null} result
+ * @param {boolean} [hideAnsweredIdleMlQuestion] vista “Todas” sin ?src=
  */
-function buildFilters(filter, srcParts, search, cursorIso, stageList, result) {
+function buildFilters(filter, srcParts, search, cursorIso, stageList, result, hideAnsweredIdleMlQuestion) {
   const conds = [];
   const params = [];
   let p = 1;
@@ -295,6 +366,10 @@ function buildFilters(filter, srcParts, search, cursorIso, stageList, result) {
     p += 1;
   }
 
+  if (hideAnsweredIdleMlQuestion) {
+    conds.push(EXCLUDE_ANSWERED_ML_QUESTION_IDLE_SQL);
+  }
+
   const where = conds.length ? `AND ${conds.join(" AND ")}` : "";
   return { where, params };
 }
@@ -325,7 +400,16 @@ async function listInbox(opts) {
       ? String(opts.result).trim()
       : null;
 
-  const { where, params } = buildFilters(filter, srcParts, search, cursorIso, stageList, result);
+  const hideAnsweredIdleMl = !srcParts || srcParts.length === 0;
+  const { where, params } = buildFilters(
+    filter,
+    srcParts,
+    search,
+    cursorIso,
+    stageList,
+    result,
+    hideAnsweredIdleMl
+  );
 
   // COUNT y SELECT comparten los mismos JOIN (incl. sol/iq) para filtros por etapa/resultado.
   const fromCommon = `
@@ -537,7 +621,58 @@ async function fetchInboxFacets() {
   return buildInboxFacetsPayload(rows[0] || {});
 }
 
-async function getInboxCounts() {
+/**
+ * Totales de bandeja alineados a `listInbox` (mismos JOIN + WHERE base sin `filter` ni cursor).
+ * Opcional `src`, `stage`, `result`, `search` — mismos query params que `GET /api/inbox`.
+ * Así el badge "Sin leer" coincide con la lista cuando hay filtro de etapa/origen/etc.
+ *
+ * @param {object} [opts]
+ * @param {string|null} [opts.src] compuesto validado (p. ej. `wa,ml`) o null
+ * @param {string|null} [opts.stage] compuesto validado o null
+ * @param {string|null} [opts.result] o null
+ * @param {string|null} [opts.search] o null
+ */
+async function getInboxCounts(opts = {}) {
+  const srcParts =
+    opts.src != null && String(opts.src).trim() !== ""
+      ? parseSrcList(String(opts.src).trim())
+      : null;
+  const search =
+    opts.search != null && String(opts.search).trim() !== ""
+      ? String(opts.search).trim()
+      : null;
+  const stageList =
+    opts.stage != null && String(opts.stage).trim() !== ""
+      ? parseStageList(String(opts.stage).trim())
+      : null;
+  const result =
+    opts.result != null && RESULTS.has(String(opts.result).trim())
+      ? String(opts.result).trim()
+      : null;
+
+  const hideAnsweredIdleMl = !srcParts || srcParts.length === 0;
+  const { where, params } = buildFilters(
+    null,
+    srcParts,
+    search,
+    null,
+    stageList,
+    result,
+    hideAnsweredIdleMl
+  );
+
+  const fromCommon = `
+    FROM crm_chats cc
+    LEFT JOIN customers c ON cc.customer_id = c.id
+    ${JOIN_ORDER}
+    ${JOIN_ORDER_LATEST}
+    ${JOIN_QUOTE_ACTIVE}
+    ${JOIN_ML_QUESTION_ANSWERED}
+    ${JOIN_LAST_MESSAGE}
+    WHERE 1=1
+    ${where}
+  `;
+
   const sql = `
     SELECT
       COUNT(DISTINCT cc.id) AS total,
@@ -554,8 +689,7 @@ async function getInboxCounts() {
       COUNT(DISTINCT cc.id) FILTER (
         WHERE cc.source_type IN ('ml_question','ml_message','wa_ml_linked')
       ) AS ml
-    FROM crm_chats cc
-    ${JOIN_ORDER}
+    ${fromCommon}
   `;
 
   // BE-1.8: chats con handoff activo en este momento
@@ -586,7 +720,7 @@ async function getInboxCounts() {
   try {
     const [mainRes, facets, handoffResult, unreviewedResult, incorrectResult, exceptionsCount] =
       await Promise.all([
-        pool.query(sql),
+        pool.query(sql, [...params]),
         fetchInboxFacets(),
         pool.query(handoffSql).catch((err) => {
           // Tabla bot_handoffs aún no migrada — degradar a 0 sin error
@@ -629,9 +763,25 @@ async function getInboxCounts() {
   }
 }
 
+/**
+ * Pone unread_count en 0 en todos los hilos (control operativo de bandeja).
+ * @returns {Promise<{ chats_reset: number }>}
+ */
+async function resetAllChatsUnread() {
+  try {
+    const r = await pool.query(
+      `UPDATE crm_chats SET unread_count = 0, updated_at = NOW() WHERE unread_count > 0`
+    );
+    return { chats_reset: Number(r.rowCount) || 0 };
+  } catch (err) {
+    throw mapSchemaError(err);
+  }
+}
+
 module.exports = {
   listInbox,
   getInboxCounts,
+  resetAllChatsUnread,
   FILTERS,
   SRCS,
   CHAT_STAGE_VALUES,

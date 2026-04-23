@@ -9,6 +9,7 @@ const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
   listInbox,
   getInboxCounts,
+  resetAllChatsUnread,
   FILTERS,
   SRCS,
   CHAT_STAGE_VALUES,
@@ -16,6 +17,7 @@ const {
 } = require("../services/inboxService");
 const { getTodayRate } = require("../services/currencyService");
 const exceptionsService = require("../services/exceptionsService");
+const { resolveMlOrderReferenceBs } = require("../utils/chatMlOrderReference");
 const { ensureWaChatFromCustomerPhone } = require("../services/inboxWaContactService");
 
 function validateSrcCompound(src) {
@@ -72,8 +74,9 @@ async function parseJsonBodyInbox(req) {
 
 /**
  * Inbox unificado CRM + órdenes: GET /api/inbox, GET /api/inbox/counts
- * (`counts` incluye `facets`: totales por source_type, sales_channel_id, chat_stage y result,
- *  calculados con los mismos JOIN que la lista para badges coherentes con `?src=&stage=&result=`.)
+ * (`counts` incluye `facets`: totales por source_type, sales_channel_id, chat_stage y result.
+ *  Los totales principales (`total`, `unread`, etc.) usan los mismos JOIN/WHERE que la lista
+ *  si se pasan `?src=&stage=&result=&search=` — coherentes con `GET /api/inbox`.)
  * @returns {Promise<boolean>}
  */
 async function handleInboxApiRequest(req, res, url) {
@@ -91,8 +94,43 @@ async function handleInboxApiRequest(req, res, url) {
 
   try {
     if (req.method === "GET" && pathname === "/api/inbox/counts") {
-      const data = await getInboxCounts();
+      const src = url.searchParams.get("src");
+      const search = url.searchParams.get("search");
+      const stage = url.searchParams.get("stage");
+      const result = url.searchParams.get("result");
+
+      const vsrc = validateSrcCompound(src);
+      if (!vsrc.ok) {
+        writeJson(res, 400, { error: "bad_request", message: vsrc.message });
+        return true;
+      }
+      const vstage = validateStageCompound(stage);
+      if (!vstage.ok) {
+        writeJson(res, 400, { error: "bad_request", message: vstage.message });
+        return true;
+      }
+      if (result != null && result !== "" && !RESULTS.has(result)) {
+        writeJson(res, 400, {
+          error: "bad_request",
+          message: `result inválido. Valores: ${[...RESULTS].join(", ")} o vacío`,
+        });
+        return true;
+      }
+
+      const data = await getInboxCounts({
+        src: vsrc.value,
+        search: search || null,
+        stage: vstage.value,
+        result: result || null,
+      });
       writeJson(res, 200, data);
+      return true;
+    }
+
+    const normInboxRoot = String(pathname || "").replace(/\/+$/, "") || pathname;
+    if (req.method === "POST" && normInboxRoot === "/api/inbox/reset-unread") {
+      const out = await resetAllChatsUnread();
+      writeJson(res, 200, { ok: true, chats_reset: out.chats_reset });
       return true;
     }
 
@@ -443,8 +481,25 @@ async function handleInboxApiRequest(req, res, url) {
             ? quoteUsd * activeRate
             : NaN;
 
+        /** Referencia en Bs. para validar comprobante/extracto: cotización ERP o, si no hay, total orden ML vinculada al chat. */
+        let referenceBs = quoteBs;
+        let referenceMeta = null;
+        if (Number.isFinite(quoteBs)) {
+          referenceMeta = { type: "quotation", id: quoteId };
+        } else if (Number.isFinite(cidChat) && cidChat > 0) {
+          const mlRef = await resolveMlOrderReferenceBs(pool, cidChat, activeRate);
+          if (Number.isFinite(mlRef.referenceBs)) {
+            referenceBs = mlRef.referenceBs;
+            referenceMeta = mlRef.meta;
+          }
+        }
+
         const tolBank = 0.05;
         const tolQuoteVs = (bs) => Math.max(1, Math.abs(bs || 0) * 0.005);
+        /** ML: total de plataforma suele no incluir carrera de motorizado u otros cobros por fuera → tolerancia más amplia. */
+        const tolMlOrderVs = (bs) => Math.max(5, Math.abs(bs || 0) * 0.025);
+        const tolRef = (bs) =>
+          referenceMeta && referenceMeta.type === "ml_order" ? tolMlOrderVs(bs) : tolQuoteVs(bs);
 
         const warnings = [];
         if (Number.isFinite(att) && Number.isFinite(stmtAmt) && Math.abs(att - stmtAmt) > tolBank) {
@@ -455,23 +510,57 @@ async function handleInboxApiRequest(req, res, url) {
             diff_bs: Math.abs(att - stmtAmt),
           });
         }
-        if (Number.isFinite(att) && Number.isFinite(quoteBs) && Math.abs(att - quoteBs) > tolQuoteVs(quoteBs)) {
-          warnings.push({
-            kind: "attempt_vs_quotation",
+        if (
+          Number.isFinite(att) &&
+          Number.isFinite(referenceBs) &&
+          Math.abs(att - referenceBs) > tolRef(referenceBs)
+        ) {
+          const base = {
             attempt_bs: att,
-            quotation_bs: quoteBs,
-            quotation_id: quoteId,
-            diff_bs: Math.abs(att - quoteBs),
-          });
+            reference_bs: referenceBs,
+            diff_bs: Math.abs(att - referenceBs),
+            reference: referenceMeta,
+          };
+          if (referenceMeta && referenceMeta.type === "ml_order") {
+            warnings.push(Object.assign({ kind: "attempt_vs_ml_order" }, base));
+          } else {
+            warnings.push(
+              Object.assign(
+                {
+                  kind: "attempt_vs_quotation",
+                  quotation_bs: referenceBs,
+                  quotation_id: quoteId,
+                },
+                base
+              )
+            );
+          }
         }
-        if (Number.isFinite(stmtAmt) && Number.isFinite(quoteBs) && Math.abs(stmtAmt - quoteBs) > tolQuoteVs(quoteBs)) {
-          warnings.push({
-            kind: "statement_vs_quotation",
+        if (
+          Number.isFinite(stmtAmt) &&
+          Number.isFinite(referenceBs) &&
+          Math.abs(stmtAmt - referenceBs) > tolRef(referenceBs)
+        ) {
+          const base = {
             statement_bs: stmtAmt,
-            quotation_bs: quoteBs,
-            quotation_id: quoteId,
-            diff_bs: Math.abs(stmtAmt - quoteBs),
-          });
+            reference_bs: referenceBs,
+            diff_bs: Math.abs(stmtAmt - referenceBs),
+            reference: referenceMeta,
+          };
+          if (referenceMeta && referenceMeta.type === "ml_order") {
+            warnings.push(Object.assign({ kind: "statement_vs_ml_order" }, base));
+          } else {
+            warnings.push(
+              Object.assign(
+                {
+                  kind: "statement_vs_quotation",
+                  quotation_bs: referenceBs,
+                  quotation_id: quoteId,
+                },
+                base
+              )
+            );
+          }
         }
 
         if (warnings.length && Number.isFinite(cidChat) && cidChat > 0) {

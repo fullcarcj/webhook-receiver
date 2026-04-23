@@ -25,8 +25,11 @@ async function findCustomerIdByPhoneAndPersonName(db, phoneDigits, fullNameRaw) 
   try {
     const r = await db.query(
       `SELECT id, full_name FROM customers
-       WHERE REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = $1
-          OR REGEXP_REPLACE(COALESCE(phone_2, ''), '\\D', '', 'g') = $1`,
+       WHERE is_active = TRUE
+         AND (
+           REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = $1
+           OR REGEXP_REPLACE(COALESCE(phone_2, ''), '\\D', '', 'g') = $1
+         )`,
       [d]
     );
     rows = r.rows;
@@ -34,7 +37,8 @@ async function findCustomerIdByPhoneAndPersonName(db, phoneDigits, fullNameRaw) 
     if (e && e.code === "42703") {
       const r = await db.query(
         `SELECT id, full_name FROM customers
-         WHERE REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = $1`,
+         WHERE is_active = TRUE
+           AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = $1`,
         [d]
       );
       rows = r.rows;

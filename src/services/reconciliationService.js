@@ -99,8 +99,8 @@ function buildPaymentConfirmedWaMessage(order, match) {
 }
 
 async function resolveWaNotifyPhone(order, chatId) {
-  let phone = order.customer_phone;
-  if (phone && String(phone).replace(/\D/g, "").length >= 10) return String(phone);
+  // Prioridad 1: teléfono del chat (conversación activa) — evita enviar al cliente
+  // de la orden cuando el comprobante llegó por un número diferente.
   if (chatId != null && Number.isFinite(Number(chatId)) && Number(chatId) > 0) {
     const { rows } = await pool.query(`SELECT phone FROM crm_chats WHERE id = $1 LIMIT 1`, [
       Number(chatId),
@@ -109,6 +109,9 @@ async function resolveWaNotifyPhone(order, chatId) {
       return String(rows[0].phone);
     }
   }
+  // Prioridad 2: teléfono del cliente de la orden
+  let phone = order.customer_phone;
+  if (phone && String(phone).replace(/\D/g, "").length >= 10) return String(phone);
   if (order.customer_id != null) {
     const { rows } = await pool.query(`SELECT phone FROM customers WHERE id = $1 LIMIT 1`, [
       order.customer_id,

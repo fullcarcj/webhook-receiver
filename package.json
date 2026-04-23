@@ -89,6 +89,7 @@
     "test:menu-api-v2": "node scripts/test-menu-api-v2.js",
     "test:resolve-customer": "node tests/resolveCustomer.test.js",
     "db:payment-attempts": "node scripts/run-payment-attempts-migration.js",
+    "db:payment-attempts-updated-at": "node scripts/run-sql-file-pg.js sql/20260423_payment_attempts_updated_at.sql",
     "db:payment-attempts-extraction-audit": "node scripts/run-sql-file-pg.js sql/20260428_payment_attempts_extraction_audit.sql",
     "db:reconciliation-log": "node scripts/run-reconciliation-log-migration.js",
     "db:sales-orders-overdue": "node scripts/run-sales-orders-overdue-migration.js",

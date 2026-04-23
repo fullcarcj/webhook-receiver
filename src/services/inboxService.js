@@ -131,16 +131,29 @@ const JOIN_QUOTE_ACTIVE = `
   ) iq ON true
 `;
 
-/** Último mensaje del hilo (dirección real); fuente de verdad para “pendiente vendedor” vs atendido. */
+/** Último mensaje del hilo (dirección + instante); fuente de verdad para “pendiente vendedor” vs atendido. */
 const JOIN_LAST_MESSAGE = `
   LEFT JOIN LATERAL (
-    SELECT m.direction::text AS direction
+    SELECT m.direction::text AS direction,
+           m.created_at AS msg_created_at
     FROM crm_messages m
     WHERE m.chat_id = cc.id
     ORDER BY m.created_at DESC NULLS LAST, m.id DESC
     LIMIT 1
   ) last_msg ON true
 `;
+
+/**
+ * Pendiente de respuesta del vendedor (badge “1” / filtro Sin atender):
+ * último mensaje inbound y sin override manual vigente (marked_attended_at).
+ */
+const PENDING_REPLY_EXPR = `(
+  last_msg.direction = 'inbound'
+  AND (
+    cc.marked_attended_at IS NULL
+    OR last_msg.msg_created_at > cc.marked_attended_at
+  )
+)`;
 
 /**
  * ¿Respondida? Hay fila en `ml_questions_answered` (webhook/refresh/POST answer) o en
@@ -326,9 +339,8 @@ function buildFilters(filter, srcParts, search, cursorIso, stageList, result, hi
   let p = 1;
 
   if (filter === "unread") {
-    // P1/A2: “Sin atender” = último mensaje del hilo es inbound (pendiente respuesta vendedor),
-    // alineado a `customer_waiting_reply` en listInbox — no el acumulado `unread_count`.
-    conds.push(`(last_msg.direction = 'inbound')`);
+    // P1/A2 + override manual: “Sin atender” alineado a `customer_waiting_reply` en listInbox.
+    conds.push(`(${PENDING_REPLY_EXPR})`);
   } else if (filter === "payment_pending") {
     conds.push(`so.payment_status = 'pending'::payment_status_enum`);
   } else if (filter === "quote") {
@@ -451,7 +463,7 @@ async function listInbox(opts) {
         cc.last_inbound_at,
         cc.last_outbound_at,
         last_msg.direction AS last_message_direction,
-        (last_msg.direction = 'inbound') AS customer_waiting_reply,
+        (${PENDING_REPLY_EXPR}) AS customer_waiting_reply,
         COALESCE(cc.is_operational, FALSE) AS is_operational,
         c.full_name AS customer_name,
         so.id AS order_id,
@@ -678,7 +690,7 @@ async function getInboxCounts(opts = {}) {
   const sql = `
     SELECT
       COUNT(DISTINCT cc.id) AS total,
-      COUNT(DISTINCT cc.id) FILTER (WHERE (last_msg.direction = 'inbound')) AS unread,
+      COUNT(DISTINCT cc.id) FILTER (WHERE (${PENDING_REPLY_EXPR})) AS unread,
       COUNT(DISTINCT cc.id) FILTER (
         WHERE so.payment_status = 'pending'::payment_status_enum
       ) AS payment_pending,

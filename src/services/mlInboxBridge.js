@@ -157,7 +157,7 @@ async function upsertMlQuestionChat(questionRow, client) {
 /**
  * @param {object} messageRow — fila ml_order_pack_messages (snake_case desde PG)
  * @param {import('pg').PoolClient|null} [client]
- * @returns {Promise<{ chatId: number|null, isNew: boolean, skipped?: boolean }>}
+ * @returns {Promise<{ chatId: number|null, isNew: boolean, skipped?: boolean|string, direction?: string }>}
  */
 async function upsertMlMessageChat(messageRow, client) {
   const db = q(client);
@@ -172,16 +172,13 @@ async function upsertMlMessageChat(messageRow, client) {
     return { chatId: null, isNew: false, skipped: true };
   }
 
-  if (Number.isFinite(fromUid) && fromUid === mlUid) {
-    return { chatId: null, isNew: false, skipped: true };
-  }
-
   const mlMid =
     messageRow.ml_message_id != null ? String(messageRow.ml_message_id).trim() : "";
   if (!mlMid) {
     return { chatId: null, isNew: false, skipped: true };
   }
 
+  const isSellerMessage = Number.isFinite(fromUid) && fromUid === mlUid;
   const msgText =
     messageRow.message_text != null && String(messageRow.message_text).trim() !== ""
       ? String(messageRow.message_text)
@@ -191,9 +188,56 @@ async function upsertMlMessageChat(messageRow, client) {
     messageRow.ml_pack_id != null && messageRow.ml_pack_id !== ""
       ? Number(messageRow.ml_pack_id)
       : orderId;
-
-  const buyerIdForLink = Number.isFinite(fromUid) && fromUid > 0 ? fromUid : null;
   const phone = `mlm:${mlUid}:${orderId}`;
+
+  // --- Rama vendedor: registrar outbound y marcar chat como atendido ---
+  if (isSellerMessage) {
+    const { rows: existing } = await db.query(
+      `SELECT id FROM crm_chats
+       WHERE source_type = 'ml_message'
+         AND ml_order_id = $1
+         AND phone = $2
+       LIMIT 1`,
+      [orderId, phone]
+    );
+    // Sin chat previo: el vendedor escribió primero; nada que marcar atendido.
+    if (!existing.length) {
+      return { chatId: null, isNew: false, skipped: "seller_no_chat" };
+    }
+    const chatId = Number(existing[0].id);
+
+    const insOut = await db.query(
+      `INSERT INTO crm_messages (
+         chat_id, external_message_id, direction, type, content,
+         sent_by, is_read, created_at
+       ) VALUES (
+         $1, $2, 'outbound', 'text', $3::jsonb,
+         'seller_ml', true, $4::timestamptz
+       )
+       ON CONFLICT (external_message_id) DO NOTHING`,
+      [chatId, `ml_msg_${mlMid}`, JSON.stringify({ text: msgText }), lastAt]
+    );
+
+    if (insOut.rowCount > 0) {
+      // Actualizar preview del chat solo si el timestamp del vendedor es >= al último registrado.
+      await db.query(
+        `UPDATE crm_chats
+         SET last_message_text = $2,
+             last_message_at   = $3::timestamptz,
+             updated_at        = NOW()
+         WHERE id = $1
+           AND (last_message_at IS NULL OR $3::timestamptz >= last_message_at)`,
+        [chatId, msgText, lastAt]
+      );
+      await applyOutboundOmnichannelHook(db, chatId);
+      sseBroker.broadcast("clear_notification", { chat_id: chatId });
+    }
+
+    return { chatId, isNew: false, direction: "outbound" };
+  }
+
+  // --- Rama comprador: flujo inbound original ---
+  const buyerIdForLink = Number.isFinite(fromUid) && fromUid > 0 ? fromUid : null;
 
   const { rows: existing } = await db.query(
     `SELECT id FROM crm_chats
@@ -270,7 +314,7 @@ async function upsertMlMessageChat(messageRow, client) {
     [chatId, `ml_msg_${mlMid}`, JSON.stringify({ text: msgText }), lastAt]
   );
 
-  // Bloque 1 · Motor omnicanal — inbound (omnichannelInboundHook)
+  // Motor omnicanal — inbound
   if (insM.rowCount > 0) {
     await applyInboundOmnichannelHook(db, chatId, {
       sourceType: "ml_message",

@@ -190,6 +190,41 @@ async function handleInboxApiRequest(req, res, url) {
       return true;
     }
 
+    /** PATCH /api/inbox/chats/:id/mark-attended — marca atendido manual (respuesta fuera del hilo). */
+    const markAttPath = (pathname || "").replace(/\/+$/, "") || pathname;
+    const markAttM = markAttPath.match(/^\/api\/inbox\/chats\/(\d+)\/mark-attended$/);
+    if (req.method === "PATCH" && markAttM) {
+      const chatId = Number(markAttM[1]);
+      if (!Number.isFinite(chatId) || chatId <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "chat_id inválido" });
+        return true;
+      }
+      try {
+        const r = await pool.query(
+          `UPDATE crm_chats
+           SET marked_attended_at = NOW(), updated_at = NOW()
+           WHERE id = $1
+           RETURNING id`,
+          [chatId]
+        );
+        if (!r.rowCount) {
+          writeJson(res, 404, { error: "not_found", message: "Chat no encontrado" });
+          return true;
+        }
+        writeJson(res, 200, { ok: true, chat_id: chatId });
+      } catch (e) {
+        logger.error({ err: e, chatId }, "inbox_mark_attended");
+        writeJson(res, 500, {
+          error: "internal_error",
+          message:
+            process.env.NODE_ENV !== "production" && e && e.message
+              ? String(e.message)
+              : "Error al actualizar",
+        });
+      }
+      return true;
+    }
+
     const normInboxPath = pathname.replace(/\/+$/, "") || pathname;
 
     /**

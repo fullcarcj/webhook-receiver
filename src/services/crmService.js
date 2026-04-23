@@ -14,6 +14,51 @@
  */
 
 const { pool } = require("../../db");
+const { normalizePhone } = require("../utils/phoneNormalizer");
+
+/** Valores permitidos por `chk_id_type` en customers (customer-wallet.sql). */
+const ALLOWED_CUSTOMER_ID_TYPES = new Set(["V", "E", "J", "G", "P"]);
+
+/**
+ * Valor para columnas `customers.phone` / `phone_2` (CHECK chk_phone_format: solo dígitos, 7–15).
+ * Quita espacios, +, guiones, etc. Aplica `normalizePhone` (VE por defecto) cuando aplica;
+ * si no, acepta el literal de 7–15 dígitos.
+ */
+function normalizePhoneForCustomersTable(raw) {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const viaNorm = normalizePhone(s);
+  if (viaNorm) return viaNorm;
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.length < 7 || digits.length > 15) {
+    const e = new Error(
+      "Teléfono inválido: debe quedar entre 7 y 15 dígitos (sin letras). " +
+        "Puede incluir +, espacios o guiones; se guardan solo los números."
+    );
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  return digits;
+}
+
+/** Coherente con chk_id_type: null o una letra V/E/J/G/P. */
+function normalizeIdTypeForCustomer(raw) {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const t = String(raw).trim().toUpperCase();
+  if (!t) return null;
+  if (!ALLOWED_CUSTOMER_ID_TYPES.has(t)) {
+    const e = new Error(
+      "Tipo de documento inválido. Elija V, E, J, G o P, o deje el tipo en blanco."
+    );
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  return t;
+}
 
 // ─── tx_type válidos expuestos por la API CRM ──────────────────────────────
 // Subconjunto del ENUM wallet_tx_type que tiene sentido para el CRM.
@@ -254,6 +299,14 @@ async function createCustomer(body) {
     throw e;
   }
   try {
+    const idTypeIns =
+      body.id_type !== undefined && body.id_type !== null && String(body.id_type).trim() !== ""
+        ? normalizeIdTypeForCustomer(body.id_type)
+        : null;
+    const phoneIns =
+      body.phone !== undefined && body.phone !== null && String(body.phone).trim() !== ""
+        ? normalizePhoneForCustomersTable(body.phone)
+        : null;
     const { rows } = await pool.query(
       `INSERT INTO customers
          (company_id, full_name, id_type, id_number, email, phone,
@@ -264,10 +317,10 @@ async function createCustomer(body) {
       [
         body.company_id ? Number(body.company_id) : 1,
         fullName,
-        body.id_type   ? String(body.id_type).trim()   : null,
+        idTypeIns,
         body.id_number ? String(body.id_number).trim() : null,
         body.email     ? String(body.email).trim()     : null,
-        body.phone     ? String(body.phone).trim()     : null,
+        phoneIns,
         body.address   ? String(body.address).trim()   : null,
         body.city      ? String(body.city).trim()      : null,
         customerType,
@@ -295,6 +348,17 @@ async function updateCustomer({ customerId, ...body }) {
     throw e;
   }
 
+  const patch = { ...body };
+  if (patch.phone !== undefined) {
+    patch.phone = normalizePhoneForCustomersTable(patch.phone);
+  }
+  if (patch.phone_2 !== undefined) {
+    patch.phone_2 = normalizePhoneForCustomersTable(patch.phone_2);
+  }
+  if (patch.id_type !== undefined) {
+    patch.id_type = normalizeIdTypeForCustomer(patch.id_type);
+  }
+
   const ALLOWED = [
     "full_name", "id_type", "id_number", "email", "phone", "phone_2",
     "address", "city", "customer_type", "crm_status", "notes", "tags", "is_active",
@@ -304,8 +368,8 @@ async function updateCustomer({ customerId, ...body }) {
   const params = [];
 
   for (const key of ALLOWED) {
-    if (body[key] === undefined) continue;
-    params.push(key === "tags" ? body[key] : body[key]);
+    if (patch[key] === undefined) continue;
+    params.push(key === "tags" ? patch[key] : patch[key]);
     const cast = key === "tags" ? `$${params.length}::text[]`
                : key === "is_active" ? `$${params.length}::boolean`
                : `$${params.length}`;

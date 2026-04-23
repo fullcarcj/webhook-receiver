@@ -25,19 +25,28 @@ async function buildAiGroqStatusSnapshot() {
     if (!(s.provider && s.provider.groq_key_ok)) bits.push("sin GROQ_API_KEY");
     if (s.ai_responder_suspended) bits.push("AI_RESPONDER_SUSPENDED");
     else if (!s.ai_responder_env_enabled) bits.push("AI_RESPONDER_ENABLED distinto de 1");
+    const qa = s.quota_alerts;
+    const quotaActive = Boolean(qa && qa.active);
+    let detail = active
+      ? "Tipo M: worker y GROQ_API_KEY con piloto habilitado"
+      : bits.length
+        ? bits.join(" · ")
+        : "Piloto IA inactivo";
+    if (quotaActive && qa && qa.headline) {
+      detail = `${detail} · Cuota/rate limit: ${String(qa.headline).slice(0, 160)}`;
+    }
     return {
       active,
-      label: active ? "ACTIVA" : "INACTIVA",
-      detail: active
-        ? "Tipo M: worker y GROQ_API_KEY con piloto habilitado"
-        : bits.length
-          ? bits.join(" · ")
-          : "Piloto IA inactivo",
+      label: quotaActive ? "ALERTA CUOTA" : active ? "ACTIVA" : "INACTIVA",
+      detail,
       worker_running: Boolean(s.worker_running),
       groq_key_ok: Boolean(s.provider && s.provider.groq_key_ok),
       ai_responder_enabled: Boolean(s.ai_responder_enabled),
       ai_responder_env_enabled: Boolean(s.ai_responder_env_enabled),
       ai_responder_suspended: Boolean(s.ai_responder_suspended),
+      quota_alerts_active: quotaActive,
+      quota_alerts_headline:
+        qa && (quotaActive || qa.unavailable) && qa.headline ? String(qa.headline).slice(0, 280) : null,
     };
   } catch (e) {
     return {
@@ -50,6 +59,8 @@ async function buildAiGroqStatusSnapshot() {
       ai_responder_enabled: false,
       ai_responder_env_enabled: false,
       ai_responder_suspended: false,
+      quota_alerts_active: false,
+      quota_alerts_headline: null,
     };
   }
 }

@@ -266,6 +266,22 @@ const MENU_SECTIONS = [
         apiPath: "GET /api/ai-responder/stats · GET /api/ai-responder/pending · GET /api/ai-responder/log",
         minRole: "ADMIN",
       },
+      {
+        id: "ai.logs",
+        label: "Logs IA",
+        path: "/ai-responder/logs",
+        icon: "file-text",
+        apiPath: "GET /api/ai-responder/ops-logs · GET /api/ai-responder/log",
+        minRole: "ADMIN",
+      },
+      {
+        id: "ai.config",
+        label: "Config AI",
+        path: "/ai-responder/configuracion",
+        icon: "toggle-right",
+        apiPath: "GET|PATCH /api/ai-responder/settings · quota_alerts (7d)",
+        minRole: "ADMIN",
+      },
     ],
   },
   {

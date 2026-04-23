@@ -131,6 +131,16 @@ const JOIN_QUOTE_ACTIVE = `
   ) iq ON true
 `;
 
+/** Primera cotización activa del chat (ancla ventana 48 h en vista pipeline_default). */
+const JOIN_QUOTE_WINDOW_START = `
+  LEFT JOIN LATERAL (
+    SELECT MIN(ip3.fecha_creacion) AS quote_started_at
+    FROM inventario_presupuesto ip3
+    WHERE ip3.chat_id = cc.id
+      AND ip3.status NOT IN ('converted', 'expired')
+  ) qwin ON true
+`;
+
 /** Último mensaje del hilo (dirección + instante); fuente de verdad para “pendiente vendedor” vs atendido. */
 const JOIN_LAST_MESSAGE = `
   LEFT JOIN LATERAL (
@@ -219,6 +229,40 @@ const CHAT_STAGE_EXPR = `
     WHEN cc.source_type = 'ml_question'                                                 THEN 'contact'
     ELSE 'contact'
   END
+`;
+
+/**
+ * Filtro `?pipeline_default=1`: pipeline abierto (≠ closed) con reglas de tiempo/origen.
+ * Debe declararse después de `CHAT_STAGE_EXPR`. Requiere JOIN `qwin` si se usa.
+ */
+const PIPELINE_DEFAULT_SQL = `
+(
+  ((${CHAT_STAGE_EXPR}))::text <> 'closed'
+  AND COALESCE(cc.is_operational, FALSE) = FALSE
+  AND (
+    ((${CHAT_STAGE_EXPR}))::text IN ('order', 'payment', 'dispatch')
+    OR (
+      ((${CHAT_STAGE_EXPR}))::text = 'contact'
+      AND cc.source_type IN ('wa_inbound', 'wa_ml_linked')
+      AND COALESCE(cc.last_inbound_at, cc.created_at) >= (NOW() - INTERVAL '24 hours')
+      AND cc.sales_default_hidden_at IS NULL
+    )
+    OR (
+      ((${CHAT_STAGE_EXPR}))::text = 'contact'
+      AND cc.source_type NOT IN ('wa_inbound', 'wa_ml_linked')
+      AND cc.sales_default_hidden_at IS NULL
+    )
+    OR (
+      ((${CHAT_STAGE_EXPR}))::text = 'quote'
+      AND COALESCE(
+        qwin.quote_started_at,
+        cc.ml_question_answered_at,
+        cc.created_at
+      ) >= (NOW() - INTERVAL '48 hours')
+      AND cc.sales_default_hidden_at IS NULL
+    )
+  )
+)
 `;
 
 /**
@@ -332,8 +376,18 @@ function pushSrcOrConds(conds, srcParts) {
  * @param {string[]|null} stageList
  * @param {string|null} result
  * @param {boolean} [hideAnsweredIdleMlQuestion] vista “Todas” sin ?src=
+ * @param {boolean} [pipelineDefault] `?pipeline_default=1` — ventas abiertas con ventanas 24/48 h
  */
-function buildFilters(filter, srcParts, search, cursorIso, stageList, result, hideAnsweredIdleMlQuestion) {
+function buildFilters(
+  filter,
+  srcParts,
+  search,
+  cursorIso,
+  stageList,
+  result,
+  hideAnsweredIdleMlQuestion,
+  pipelineDefault
+) {
   const conds = [];
   const params = [];
   let p = 1;
@@ -384,6 +438,10 @@ function buildFilters(filter, srcParts, search, cursorIso, stageList, result, hi
     conds.push(EXCLUDE_ANSWERED_ML_QUESTION_IDLE_SQL);
   }
 
+  if (pipelineDefault) {
+    conds.push(PIPELINE_DEFAULT_SQL);
+  }
+
   const where = conds.length ? `AND ${conds.join(" AND ")}` : "";
   return { where, params };
 }
@@ -414,6 +472,11 @@ async function listInbox(opts) {
       ? String(opts.result).trim()
       : null;
 
+  const pipelineDefault =
+    opts.pipelineDefault === true ||
+    opts.pipelineDefault === 1 ||
+    String(opts.pipelineDefault || "") === "1";
+
   const hideAnsweredIdleMl = !srcParts || srcParts.length === 0;
   const { where, params } = buildFilters(
     filter,
@@ -422,8 +485,11 @@ async function listInbox(opts) {
     cursorIso,
     stageList,
     result,
-    hideAnsweredIdleMl
+    hideAnsweredIdleMl,
+    pipelineDefault
   );
+
+  const quoteWinJoin = pipelineDefault ? JOIN_QUOTE_WINDOW_START : "";
 
   // COUNT y SELECT comparten los mismos JOIN (incl. sol/iq) para filtros por etapa/resultado.
   const fromCommon = `
@@ -432,6 +498,7 @@ async function listInbox(opts) {
     ${JOIN_ORDER}
     ${JOIN_ORDER_LATEST}
     ${JOIN_QUOTE_ACTIVE}
+    ${quoteWinJoin}
     ${JOIN_ML_QUESTION_ANSWERED}
     ${JOIN_LAST_MESSAGE}
     WHERE 1=1
@@ -481,7 +548,11 @@ async function listInbox(opts) {
           ORDER BY ex2.created_at DESC LIMIT 1
         ) AS top_exception_reason
       ${fromCommon}
-      ORDER BY cc.last_message_at DESC NULLS LAST, cc.id DESC
+      ORDER BY ${
+        pipelineDefault
+          ? `CASE WHEN (${PENDING_REPLY_EXPR}) THEN 0 ELSE 1 END, cc.last_message_at DESC NULLS LAST, cc.id DESC`
+          : `cc.last_message_at DESC NULLS LAST, cc.id DESC`
+      }
       LIMIT $${limPos}
     `;
 
@@ -664,6 +735,11 @@ async function getInboxCounts(opts = {}) {
       ? String(opts.result).trim()
       : null;
 
+  const pipelineDefault =
+    opts.pipelineDefault === true ||
+    opts.pipelineDefault === 1 ||
+    String(opts.pipelineDefault || "") === "1";
+
   const hideAnsweredIdleMl = !srcParts || srcParts.length === 0;
   const { where, params } = buildFilters(
     null,
@@ -672,8 +748,11 @@ async function getInboxCounts(opts = {}) {
     null,
     stageList,
     result,
-    hideAnsweredIdleMl
+    hideAnsweredIdleMl,
+    pipelineDefault
   );
+
+  const quoteWinJoin = pipelineDefault ? JOIN_QUOTE_WINDOW_START : "";
 
   const fromCommon = `
     FROM crm_chats cc
@@ -681,6 +760,7 @@ async function getInboxCounts(opts = {}) {
     ${JOIN_ORDER}
     ${JOIN_ORDER_LATEST}
     ${JOIN_QUOTE_ACTIVE}
+    ${quoteWinJoin}
     ${JOIN_ML_QUESTION_ANSWERED}
     ${JOIN_LAST_MESSAGE}
     WHERE 1=1
@@ -792,10 +872,44 @@ async function resetAllChatsUnread() {
   }
 }
 
+/**
+ * Ocultar o volver a mostrar un chat en la vista por defecto con `pipeline_default=1`.
+ * @param {number} chatId
+ * @param {boolean} hidden
+ */
+async function setSalesChatSalesDefaultHidden(chatId, hidden) {
+  const id = Number(chatId);
+  if (!Number.isFinite(id) || id <= 0) {
+    const e = new Error("invalid_chat_id");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  try {
+    const r = await pool.query(
+      `UPDATE crm_chats
+       SET sales_default_hidden_at = CASE WHEN $2::boolean THEN NOW() ELSE NULL END,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING id`,
+      [id, Boolean(hidden)]
+    );
+    if (!r.rowCount) {
+      const e = new Error("not_found");
+      e.code = "NOT_FOUND";
+      throw e;
+    }
+    return { ok: true, chat_id: id, hidden: Boolean(hidden) };
+  } catch (err) {
+    if (err.code === "BAD_REQUEST" || err.code === "NOT_FOUND") throw err;
+    throw mapSchemaError(err);
+  }
+}
+
 module.exports = {
   listInbox,
   getInboxCounts,
   resetAllChatsUnread,
+  setSalesChatSalesDefaultHidden,
   FILTERS,
   SRCS,
   CHAT_STAGE_VALUES,

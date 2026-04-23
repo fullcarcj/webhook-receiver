@@ -8,6 +8,7 @@
 const pino = require("pino");
 const { pool } = require("../../db");
 const { processOneMessage, isEnabled, setImmediateTrigger } = require("../services/aiResponder");
+const { isTipoMConsoleAndEnvEnabled } = require("../services/aiConsoleSwitches");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder_worker" });
 
@@ -40,6 +41,7 @@ async function cleanStuckProcessing() {
 
 async function responderCycle() {
   if (!isEnabled()) return;
+  if (!(await isTipoMConsoleAndEnvEnabled())) return;
   if (isRunning) return;
   isRunning = true;
 

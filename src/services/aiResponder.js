@@ -14,6 +14,7 @@ const { callChatBasic } = require("./aiGateway");
 const { emit } = require("./sseService");
 const { MESSAGE_TYPE_M } = require("../../ml-message-types");
 const handoffGuard = require("../middleware/handoffGuard");
+const { isTipoMConsoleAndEnvEnabled } = require("./aiConsoleSwitches");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder" });
 
@@ -280,6 +281,7 @@ async function generateResponse({ messageId, customerId, chatId, inputText, rece
  */
 async function maybeQueueInboundText(client, crmMessageId) {
   if (!isEnabled() || !crmMessageId) return;
+  if (!(await isTipoMConsoleAndEnvEnabled())) return;
   try {
     const r = await client.query(
       `UPDATE crm_messages

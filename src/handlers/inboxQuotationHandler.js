@@ -11,6 +11,10 @@
  * Status en BD (verificación 2026-04-16 contra DATABASE_URL local):
  *   SELECT DISTINCT status FROM inventario_presupuesto → sin filas (tabla vacía o status NULL).
  *   Valores usados por esta API para filas nuevas: 'draft' (borrador) y 'sent' (enviado por WA).
+ *
+ * Detalle / edición de ítems (evita colisión con GET …/quotations/:chatId):
+ *   GET    /api/inbox/quotations/presupuesto/:id
+ *   PATCH  /api/inbox/quotations/presupuesto/:id/items
  */
 
 const pino = require("pino");
@@ -1061,6 +1065,245 @@ async function handleInboxQuotationRequest(req, res, url) {
       writeJson(res, 201, {
         presupuesto: { ...header, reference },
         items: det.rows,
+      });
+      return true;
+    }
+
+    // GET /api/inbox/quotations/presupuesto/:id — cabecera + líneas (detalle panel bandeja)
+    const presupDetailMatch = pathname.match(/^\/api\/inbox\/quotations\/presupuesto\/(\d+)$/);
+    if (presupDetailMatch && req.method === "GET") {
+      const pid = Number(presupDetailMatch[1]);
+      if (!Number.isFinite(pid) || pid <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "id de presupuesto inválido" });
+        return true;
+      }
+      const headRes = await pool.query(
+        `SELECT ip.id, ip.fecha_creacion, ip.fecha_vencimiento, ip.total, ip.status,
+           ip.cliente_id, ip.chat_id, ip.channel_id, ip.created_by, ip.observaciones,
+           ${sqlReferenceExpr("ip")} AS reference
+         FROM inventario_presupuesto ip
+         WHERE ip.id = $1`,
+        [pid]
+      );
+      if (!headRes.rows.length) {
+        writeJson(res, 404, { error: "not_found", message: "Cotización no encontrada" });
+        return true;
+      }
+      const detRes = await pool.query(
+        `SELECT d.id,
+           d.producto_id,
+           d.cantidad,
+           d.precio_unitario,
+           d.subtotal,
+           p.sku,
+           p.name,
+           p.description,
+           COALESCE(p.stock_qty, 0)::int AS stock_qty
+         FROM inventario_detallepresupuesto d
+         JOIN products p ON p.id = d.producto_id
+         WHERE d.presupuesto_id = $1
+         ORDER BY d.id ASC`,
+        [pid]
+      );
+      writeJson(res, 200, {
+        ok: true,
+        presupuesto: headRes.rows[0],
+        lines: detRes.rows,
+      });
+      return true;
+    }
+
+    // PATCH /api/inbox/quotations/presupuesto/:id/items — reemplazar líneas + total
+    const presupPatchItemsMatch = pathname.match(/^\/api\/inbox\/quotations\/presupuesto\/(\d+)\/items$/);
+    if (presupPatchItemsMatch && req.method === "PATCH") {
+      const pid = Number(presupPatchItemsMatch[1]);
+      if (!Number.isFinite(pid) || pid <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "id de presupuesto inválido" });
+        return true;
+      }
+      let bodyPatch;
+      try {
+        bodyPatch = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const chatIdBody =
+        bodyPatch.chat_id != null && bodyPatch.chat_id !== "" ? Number(bodyPatch.chat_id) : null;
+      const itemsIn = Array.isArray(bodyPatch.items) ? bodyPatch.items : [];
+      if (!itemsIn.length) {
+        writeJson(res, 400, { error: "bad_request", message: "items no puede estar vacío" });
+        return true;
+      }
+
+      if (await isQuotationPaymentLocked(pid)) {
+        writeJson(res, 409, {
+          error:   "payment_already_closed",
+          message: "El pago está cerrado; no se puede editar la cotización.",
+        });
+        return true;
+      }
+
+      const { rows: curRows } = await pool.query(
+        `SELECT id, chat_id, status, total::text AS total
+         FROM inventario_presupuesto WHERE id = $1`,
+        [pid]
+      );
+      if (!curRows.length) {
+        writeJson(res, 404, { error: "not_found", message: "Cotización no encontrada" });
+        return true;
+      }
+      const cur = curRows[0];
+      const st = String(cur.status || "").toLowerCase();
+      if (st === "converted" || st === "expired") {
+        writeJson(res, 409, {
+          error:   "invalid_status",
+          message: "Esta cotización no admite edición de ítems.",
+        });
+        return true;
+      }
+      if (cur.chat_id != null && Number(cur.chat_id) > 0) {
+        if (!Number.isFinite(chatIdBody) || chatIdBody <= 0 || Number(cur.chat_id) !== chatIdBody) {
+          writeJson(res, 403, {
+            error:   "forbidden",
+            message: "chat_id no coincide con la cotización.",
+          });
+          return true;
+        }
+      }
+
+      const companyIdRate =
+        bodyPatch.company_id != null && String(bodyPatch.company_id).trim() !== ""
+          ? Number(bodyPatch.company_id)
+          : 1;
+      const cidRate = Number.isFinite(companyIdRate) && companyIdRate > 0 ? companyIdRate : 1;
+      let rateRowQuote = null;
+      try {
+        rateRowQuote = await getTodayRate(cidRate);
+      } catch (_e) {
+        rateRowQuote = null;
+      }
+
+      const lines = [];
+      const productIds = [];
+      for (const it of itemsIn) {
+        const prId = it.producto_id != null ? Number(it.producto_id) : NaN;
+        const cantidad = it.cantidad != null ? Number(it.cantidad) : NaN;
+        if (!Number.isFinite(prId) || prId <= 0) {
+          writeJson(res, 400, { error: "bad_request", message: "producto_id inválido en items" });
+          return true;
+        }
+        if (!Number.isFinite(cantidad) || cantidad <= 0) {
+          writeJson(res, 400, { error: "bad_request", message: "cantidad inválida en items" });
+          return true;
+        }
+        const resolved = resolveQuotationLineUnitUsd(it, rateRowQuote);
+        if (resolved.error) {
+          writeJson(res, 400, {
+            error:   "bad_request",
+            message: resolved.error,
+            detail:  resolved.detail || null,
+          });
+          return true;
+        }
+        const pu = resolved.pu;
+        const subtotal = Math.round(cantidad * pu * 100) / 100;
+        productIds.push(prId);
+        lines.push({ producto_id: prId, cantidad, precio_unitario: pu, subtotal });
+      }
+
+      const uniq = [...new Set(productIds)];
+      const chk = await pool.query(
+        `SELECT id, COALESCE(stock_qty, 0)::numeric AS stock_qty
+         FROM products
+         WHERE id = ANY($1::bigint[]) AND is_active = true`,
+        [uniq]
+      );
+      if (chk.rows.length !== uniq.length) {
+        writeJson(res, 400, {
+          error:   "bad_request",
+          message: "Uno o más productos no existen o no están activos.",
+        });
+        return true;
+      }
+      const stockById = new Map(chk.rows.map((r) => [Number(r.id), Number(r.stock_qty)]));
+      for (const L of lines) {
+        const sq = stockById.get(L.producto_id) ?? 0;
+        if (L.cantidad > sq) {
+          writeJson(res, 400, {
+            error:   "bad_request",
+            message: `Cantidad (${L.cantidad}) supera stock_qty (${sq}) para producto_id ${L.producto_id}.`,
+          });
+          return true;
+        }
+      }
+
+      const previousTotal = Number(cur.total);
+      const newTotal = lines.reduce((acc, L) => acc + L.subtotal, 0);
+      const uidLog = user.userId != null ? Number(user.userId) : null;
+      const itemsSnapshot = lines.map((L) => ({ ...L }));
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(`DELETE FROM inventario_detallepresupuesto WHERE presupuesto_id = $1`, [pid]);
+        for (const L of lines) {
+          await client.query(
+            `INSERT INTO inventario_detallepresupuesto (
+               cantidad, precio_unitario, subtotal, producto_id, presupuesto_id
+             ) VALUES ($1, $2, $3, $4, $5)`,
+            [L.cantidad, L.precio_unitario, L.subtotal, L.producto_id, pid]
+          );
+        }
+        await client.query(
+          `UPDATE inventario_presupuesto SET total = $2, updated_at = NOW() WHERE id = $1`,
+          [pid, newTotal]
+        );
+        try {
+          await client.query(
+            `INSERT INTO quotation_edit_log (
+               presupuesto_id, user_id, previous_total, new_total, items_snapshot
+             ) VALUES ($1, $2, $3::numeric, $4::numeric, $5::jsonb)`,
+            [
+              pid,
+              Number.isFinite(uidLog) && uidLog > 0 ? uidLog : null,
+              String(previousTotal),
+              String(newTotal),
+              JSON.stringify(itemsSnapshot),
+            ]
+          );
+        } catch (logErr) {
+          if (logErr && logErr.code !== "42P01") throw logErr;
+        }
+        await client.query("COMMIT");
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+
+      const det = await pool.query(
+        `SELECT d.id, d.cantidad, d.precio_unitario, d.subtotal, d.producto_id,
+           p.sku, p.name, p.description,
+           COALESCE(p.stock_qty, 0)::int AS stock_qty
+         FROM inventario_detallepresupuesto d
+         JOIN products p ON p.id = d.producto_id
+         WHERE d.presupuesto_id = $1
+         ORDER BY d.id ASC`,
+        [pid]
+      );
+      const headAfter = await pool.query(
+        `SELECT ip.id, ip.fecha_creacion, ip.fecha_vencimiento, ip.total, ip.status,
+           ip.cliente_id, ip.chat_id, ip.channel_id, ip.created_by, ip.observaciones,
+           ${sqlReferenceExpr("ip")} AS reference
+         FROM inventario_presupuesto ip WHERE ip.id = $1`,
+        [pid]
+      );
+      writeJson(res, 200, {
+        ok: true,
+        presupuesto: headAfter.rows[0],
+        lines: det.rows,
       });
       return true;
     }

@@ -3,8 +3,24 @@
 const { pool } = require("../../db");
 
 /**
+ * Orígenes tratados como WhatsApp para la resolución por teléfono del remitente.
+ * Hilos ML explícitos quedan fuera: allí la identidad sigue por `ml_buyer_id` u otras reglas.
+ */
+function isWhatsappChatSource(sourceType) {
+  const s = sourceType == null ? "" : String(sourceType).trim().toLowerCase();
+  if (s === "ml_message" || s === "ml_question") return false;
+  return s === "" || s === "wa_inbound" || s === "wa_ml_linked";
+}
+
+/**
  * Post-commit: sugiere candidatos de identidad sin bloquear la TX del webhook.
  * Usa `pool` (no el client de la transacción de mensajes).
+ *
+ * **WhatsApp, chat sin `customer_id`:** el número del remitente (ya pasado por
+ * `normalizePhone` en el procesador) se compara solo en dígitos con `customers.phone`;
+ * si no hay coincidencias, se consulta `customers.phone_2` con el mismo criterio.
+ * Así se respeta la prioridad comercial “teléfono principal primero, secundario después”,
+ * sin mezclar ambos en un único `OR` indiferenciado.
  *
  * @param {number|string} chatId
  * @param {string|null|undefined} phone — preferir salida de normalizePhone (E.164)
@@ -34,21 +50,33 @@ async function resolveIdentity(chatId, phone, messageText) {
 
   const digits = phone ? String(phone).replace(/\D/g, "") : "";
 
-  if (!hasCustomer && digits) {
-    const { rows: phoneRows } = await pool.query(
-      `SELECT id, full_name, phone, crm_status, total_orders, total_spent_usd
+  if (!hasCustomer && digits && isWhatsappChatSource(chat.source_type)) {
+    const baseSelect = `SELECT id, full_name, phone, crm_status, total_orders, total_spent_usd
        FROM customers
-       WHERE is_active = true
-         AND (
-           REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = $1
-           OR REGEXP_REPLACE(COALESCE(phone_2, ''), '\\D', '', 'g') = $1
-           OR REGEXP_REPLACE(COALESCE(alternative_phone, ''), '\\D', '', 'g') = $1
-         )
+       WHERE is_active = true`;
+
+    const { rows: byPrimary } = await pool.query(
+      `${baseSelect}
+         AND NULLIF(TRIM(COALESCE(phone, '')), '') <> ''
+         AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = $1
        ORDER BY total_orders DESC NULLS LAST
        LIMIT 3`,
       [digits]
     );
-    candidates.phoneMatches = phoneRows;
+
+    if (byPrimary.length > 0) {
+      candidates.phoneMatches = byPrimary;
+    } else {
+      const { rows: bySecondary } = await pool.query(
+        `${baseSelect}
+           AND NULLIF(TRIM(COALESCE(phone_2, '')), '') <> ''
+           AND REGEXP_REPLACE(COALESCE(phone_2, ''), '\\D', '', 'g') = $1
+         ORDER BY total_orders DESC NULLS LAST
+         LIMIT 3`,
+        [digits]
+      );
+      candidates.phoneMatches = bySecondary;
+    }
   }
 
   if (chat.ml_buyer_id != null) {

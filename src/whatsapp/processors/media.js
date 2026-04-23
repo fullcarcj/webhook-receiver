@@ -14,6 +14,7 @@ const { transcribeWithGroq } = require("../media/groqTranscribe");
 const { saveInboundMedia } = require("../media/mediaSaver");
 const { pool } = require("../../../db");
 const { updateWasenderWebhookMediaStatus } = require("../../../db");
+const { getSwitches, isTipoMConsoleAndEnvEnabled } = require("../../services/aiConsoleSwitches");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "media_processor" });
 
@@ -86,7 +87,13 @@ async function handle(normalized) {
     // 5. Transcribir si aplica (audio/video)
     let transcription = null;
     let transcriptionError = null;
-    if (config.transcribable) {
+    let switchesForMedia = { transcription_groq: true, receipt_gemini_vision: true };
+    try {
+      switchesForMedia = await getSwitches();
+    } catch (_e) {
+      /* defaults */
+    }
+    if (config.transcribable && switchesForMedia.transcription_groq !== false) {
       const tr = await transcribeWithGroq({
         buffer:    fileBuffer,
         mimetype:  meta.mimetype,
@@ -94,6 +101,8 @@ async function handle(normalized) {
       });
       transcription = tr.text;
       transcriptionError = tr.error;
+    } else if (config.transcribable && switchesForMedia.transcription_groq === false) {
+      transcriptionError = "transcripción desactivada en consola IA";
     }
 
     // 6. Buscar chat existente (opcional — no bloquea el flujo)
@@ -123,7 +132,8 @@ async function handle(normalized) {
         transcriptionError,
       });
       const crmMsgId = saveResult && saveResult.id;
-      if (crmMsgId && transcription && String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1") {
+      const tipoMQueue = crmMsgId && transcription && (await isTipoMConsoleAndEnvEnabled());
+      if (tipoMQueue) {
         try {
           await pool.query(
             `UPDATE crm_messages SET transcription = $1 WHERE id = $2`,
@@ -167,6 +177,15 @@ async function handle(normalized) {
           }, "media: prefiltro comprobante");
 
           if (!prefilter.isReceipt) return;
+
+          let swReceipt = { receipt_gemini_vision: true };
+          try {
+            swReceipt = await getSwitches();
+          } catch (_e) {}
+          if (swReceipt.receipt_gemini_vision === false) {
+            log.info({ messageId: normalized.messageId }, "media: OCR comprobante desactivado en consola IA — skip");
+            return;
+          }
 
           // Dedup por firebase_url: Wasender reintenta el webhook varias veces
           const { rows: dupCheck } = await pool.query(
@@ -255,7 +274,7 @@ async function handle(normalized) {
           );
 
           if (
-            String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1" &&
+            (await isTipoMConsoleAndEnvEnabled()) &&
             normalized.messageId &&
             extraction.status === "ok" &&
             extraction.data &&

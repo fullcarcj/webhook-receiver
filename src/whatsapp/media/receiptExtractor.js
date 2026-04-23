@@ -8,19 +8,26 @@
 const pino = require("pino");
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "receipt_extractor" });
 
-const SYSTEM_PROMPT = `Eres un extractor de datos de comprobantes bancarios venezolanos.
-Extrae EXACTAMENTE estos campos:
-- reference_number: número de referencia/operación/recibo (solo dígitos)
-- amount_bs: monto en bolívares como decimal con PUNTO (no coma)
-  IMPORTANTE Venezuela usa punto=miles coma=decimales: "5.007,80" → 5007.80
-- tx_date: fecha ISO YYYY-MM-DD
-- bank_name: banco emisor
-- payment_type: "PAGO_MOVIL" o "TRANSFERENCIA"
-- confidence: 0.00 a 1.00
+const SYSTEM_PROMPT = `Eres un extractor de datos de comprobantes bancarios venezolanos (capturas de app: Banesco, Provincial, Mercantil, etc.).
 
-Responde SOLO con JSON válido sin texto adicional:
-{"reference_number":"000011941","amount_bs":5007.80,"tx_date":"2026-03-20","bank_name":"BBVA Provincial","payment_type":"PAGO_MOVIL","confidence":0.97}
-Si no puedes extraer un campo usa null.`;
+Lee la IMAGEN y localiza las etiquetas en español, por ejemplo:
+- "NÚMERO DE REFERENCIA", "REFERENCIA", "Nº DE OPERACIÓN", "NÚMERO DE OPERACIÓN"
+- "MONTO DE LA OPERACIÓN", "MONTO", "IMPORTE" (suele aparecer como Bs. X.XXX,XX con punto miles y coma decimal)
+- "FECHA" (puede incluir hora: 23/04/2026 12:49PM — usa solo la parte fecha para tx_date)
+- "BANCO EMISOR", "BANCO RECEPTOR", "BANCO"
+- Si hay "NÚMERO CELULAR DE ORIGEN/DESTINO" o "PAGO MÓVIL" / pago entre celulares → payment_type "PAGO_MOVIL"; transferencias a cuenta → "TRANSFERENCIA"
+
+Extrae EXACTAMENTE estos campos (inglés en las claves):
+- reference_number: solo dígitos del número de referencia u operación (sin espacios ni guiones)
+- amount_bs: número decimal en formato JSON (punto decimal). Ejemplo en pantalla "Bs. 11.522,78" → 11522.78
+- tx_date: string "YYYY-MM-DD"
+- bank_name: nombre del banco emisor (o el más visible si hay emisor y receptor iguales)
+- payment_type: exactamente "PAGO_MOVIL" o "TRANSFERENCIA"
+- confidence: número 0.00 a 1.00
+
+Responde ÚNICAMENTE un objeto JSON válido en una sola línea o varias, sin markdown ni explicación:
+{"reference_number":"061133249694","amount_bs":11522.78,"tx_date":"2026-04-23","bank_name":"Banesco","payment_type":"PAGO_MOVIL","confidence":0.95}
+Si no ves un campo con certeza, usa null para ese campo.`;
 
 /**
  * @typedef {{
@@ -84,7 +91,16 @@ function _canonicalizeReceiptParsed(parsed) {
     p.reference_number = digits.length >= 6 ? digits : String(refRaw).trim();
   }
 
-  const amtRaw = _firstNonEmpty(p.amount_bs, p.monto, p.monto_bs, p.importe, p.monto_bolivares, p.monto_operacion);
+  const amtRaw = _firstNonEmpty(
+    p.amount_bs,
+    p.monto,
+    p.monto_bs,
+    p.importe,
+    p.monto_bolivares,
+    p.monto_operacion,
+    p.monto_de_la_operacion,
+    p.monto_operacion_bs
+  );
   if (amtRaw != null) p.amount_bs = amtRaw;
 
   const dateRaw = _firstNonEmpty(p.tx_date, p.fecha, p.fecha_operacion, p.fecha_tx, p.fecha_de_operacion);
@@ -114,13 +130,31 @@ function _parseReceiptDateToIso(s) {
   if (!str) return null;
   const iso = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-  const ve = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+  /* "23/04/2026 12:49PM" / "23/04/2026, 12:49" — \b tras año o separador antes de hora */
+  const ve = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\b|[\s,])/);
   if (ve) {
     const dd = ve[1].padStart(2, "0");
     const mm = ve[2].padStart(2, "0");
     return `${ve[3]}-${mm}-${dd}`;
   }
   return null;
+}
+
+/**
+ * Intenta recuperar JSON del texto del modelo (markdown, texto alrededor, comas finales).
+ * @param {string} raw
+ * @returns {string|null}
+ */
+function _extractJsonObjectString(raw) {
+  const t = String(raw || "").trim();
+  if (!t) return null;
+  const start = t.indexOf("{");
+  const end = t.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+  let slice = t.slice(start, end + 1);
+  /* quitar coma antes de } o ] que rompe JSON.parse */
+  slice = slice.replace(/,\s*([}\]])/g, "$1");
+  return slice;
 }
 
 function _hasExtractedCore(parsed) {
@@ -224,11 +258,29 @@ async function extractReceiptData(firebaseUrl) {
     if (m && m[1]) jsonText = m[1].trim();
 
     let parsed;
-    try {
-      parsed = JSON.parse(jsonText);
-    } catch (pe) {
-      log.error({ err: pe.message }, "receipt_extractor: JSON inválido en respuesta del modelo");
-      return fail("json_parse", pe.message, rawStr);
+    const tryParse = (txt) => {
+      try {
+        return JSON.parse(txt);
+      } catch {
+        return null;
+      }
+    };
+    parsed = tryParse(jsonText);
+    if (parsed == null) {
+      const extracted = _extractJsonObjectString(jsonText);
+      if (extracted) parsed = tryParse(extracted);
+    }
+    if (parsed == null) {
+      const asArr = tryParse(jsonText);
+      if (Array.isArray(asArr) && asArr[0] && typeof asArr[0] === "object") parsed = asArr[0];
+    }
+    if (parsed == null) {
+      const extracted = _extractJsonObjectString(rawStr);
+      if (extracted) parsed = tryParse(extracted);
+    }
+    if (parsed == null) {
+      log.error({ snippet: _snippet(jsonText, 400) }, "receipt_extractor: JSON inválido en respuesta del modelo");
+      return fail("json_parse", "No se pudo parsear JSON del modelo", rawStr);
     }
 
     if (!parsed || typeof parsed !== "object") {

@@ -167,6 +167,29 @@ async function runReceiptTest(req, res) {
     }
 
     // ── Etapa 2: Extracción con Gemini Vision via AI Gateway ─────────────────
+    let receiptOcrOn = true;
+    try {
+      const { getSwitches } = require("../services/aiConsoleSwitches");
+      const sw = await getSwitches();
+      receiptOcrOn = sw.receipt_gemini_vision !== false;
+    } catch (_e) {
+      receiptOcrOn = true;
+    }
+    if (!receiptOcrOn) {
+      writeJson(res, 200, {
+        ok: true,
+        dry_run: dryRun,
+        attempt_id: null,
+        extracted: null,
+        reconciliation: { status: null, matched_order_id: null, match_level: null },
+        url: imageUrl,
+        stages: { ...stages, extraction: { ran: false, reason: "console_receipt_ocr_off" } },
+        summary: "ocr_disabled_by_console",
+        elapsed_ms: Date.now() - t0,
+      });
+      return true;
+    }
+
     const {
       extractReceiptData,
       paymentAttemptFieldsFromExtraction,

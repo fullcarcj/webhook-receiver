@@ -10,6 +10,7 @@ const {
   listInbox,
   getInboxCounts,
   resetAllChatsUnread,
+  setSalesChatSalesDefaultHidden,
   FILTERS,
   SRCS,
   CHAT_STAGE_VALUES,
@@ -120,11 +121,16 @@ async function handleInboxApiRequest(req, res, url) {
         return true;
       }
 
+      const pipelineRaw = url.searchParams.get("pipeline_default");
+      const pipelineDefault =
+        pipelineRaw === "1" || String(pipelineRaw || "").toLowerCase() === "true";
+
       const data = await getInboxCounts({
         src: vsrc.value,
         search: search || null,
         stage: vstage.value,
         result: result || null,
+        pipelineDefault,
       });
       writeJson(res, 200, data);
       return true;
@@ -177,6 +183,10 @@ async function handleInboxApiRequest(req, res, url) {
         return true;
       }
 
+      const pipelineRawList = url.searchParams.get("pipeline_default");
+      const pipelineDefaultList =
+        pipelineRawList === "1" || String(pipelineRawList || "").toLowerCase() === "true";
+
       const data = await listInbox({
         filter: filter || null,
         src: vsrc.value,
@@ -185,6 +195,7 @@ async function handleInboxApiRequest(req, res, url) {
         limit,
         stage: vstage.value,
         result: result || null,
+        pipelineDefault: pipelineDefaultList,
       });
       writeJson(res, 200, data);
       return true;
@@ -214,6 +225,50 @@ async function handleInboxApiRequest(req, res, url) {
         writeJson(res, 200, { ok: true, chat_id: chatId });
       } catch (e) {
         logger.error({ err: e, chatId }, "inbox_mark_attended");
+        writeJson(res, 500, {
+          error: "internal_error",
+          message:
+            process.env.NODE_ENV !== "production" && e && e.message
+              ? String(e.message)
+              : "Error al actualizar",
+        });
+      }
+      return true;
+    }
+
+    /** PATCH /api/inbox/chats/:id/sales-default-visibility — body: { "hidden": true|false } */
+    const salesVisPath = (pathname || "").replace(/\/+$/, "") || pathname;
+    const salesVisM = salesVisPath.match(/^\/api\/inbox\/chats\/(\d+)\/sales-default-visibility$/);
+    if (req.method === "PATCH" && salesVisM) {
+      const chatId = Number(salesVisM[1]);
+      if (!Number.isFinite(chatId) || chatId <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "chat_id inválido" });
+        return true;
+      }
+      let body;
+      try {
+        body = await parseJsonBodyInbox(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      if (body.hidden !== true && body.hidden !== false) {
+        writeJson(res, 400, {
+          error: "bad_request",
+          message: 'body.hidden debe ser boolean (true = ocultar del default ventas, false = mostrar)',
+        });
+        return true;
+      }
+      try {
+        const out = await setSalesChatSalesDefaultHidden(chatId, body.hidden);
+        writeJson(res, 200, out);
+      } catch (e) {
+        const code = e && e.code ? String(e.code) : "";
+        if (code === "NOT_FOUND") {
+          writeJson(res, 404, { error: "not_found", message: "Chat no encontrado" });
+          return true;
+        }
+        logger.error({ err: e, chatId }, "inbox_sales_default_visibility");
         writeJson(res, 500, {
           error: "internal_error",
           message:

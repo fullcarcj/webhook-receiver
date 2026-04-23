@@ -15,6 +15,20 @@ const {
   rowToCustomerApi,
   mapSchemaError,
 } = require("../services/crmIdentityService");
+const { normalizePhone } = require("../utils/phoneNormalizer");
+
+/** Cumple `chk_phone_format` en `customers.phone`: solo dígitos, 7–15 (misma regla que crmService). */
+function normalizePhoneForCustomerColumn(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const viaNorm = normalizePhone(s);
+  if (viaNorm) return viaNorm;
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.length < 7 || digits.length > 15) return "__INVALID__";
+  return digits;
+}
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -53,6 +67,8 @@ const postCustomerSchema = z.object({
   full_name: z.string().min(2),
   document_id: z.string().optional(),
   email: z.string().email().optional(),
+  /** Teléfono principal (se normaliza a E.164 cuando aplica). */
+  phone: z.string().optional(),
   status: z.enum(["draft", "active", "blocked"]).default("draft"),
 });
 
@@ -193,11 +209,25 @@ async function handleCustomersApiRequest(req, res, url) {
         return true;
       }
       const d = parsed.data;
+      const phoneRaw = d.phone != null ? String(d.phone).trim() : "";
+      let phoneNorm = null;
+      if (phoneRaw) {
+        const n = normalizePhoneForCustomerColumn(phoneRaw);
+        if (n === "__INVALID__") {
+          const e = new Error(
+            "Teléfono inválido: use entre 7 y 15 dígitos (se acepta formato local con 0 o internacional; se guardan solo números, sin +)."
+          );
+          e.code = "BAD_REQUEST";
+          throw e;
+        }
+        phoneNorm = n;
+      }
       const row = await CustomerModel.create({
         fullName: d.full_name,
         documentId: d.document_id,
         email: d.email,
         status: d.status,
+        phone: phoneNorm,
       });
       writeJson(res, 201, rowToCustomerApi(row));
       return true;

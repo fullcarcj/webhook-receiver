@@ -57,11 +57,19 @@ async function ensureWaChatFromCustomerPhone(pool, opts) {
   }
 
   const { rows: existing } = await pool.query(
-    `SELECT id, source_type
-       FROM crm_chats
-      WHERE phone = $1
-        AND COALESCE(source_type, 'wa_inbound') IN ('wa_inbound', 'wa_ml_linked')
-      ORDER BY id DESC
+    `SELECT c.id, c.source_type
+       FROM crm_chats c
+       LEFT JOIN customers cu ON cu.id = c.customer_id
+      WHERE COALESCE(c.source_type, 'wa_inbound') IN ('wa_inbound', 'wa_ml_linked')
+        AND (
+          regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') = $1
+          OR (
+            cu.phone IS NOT NULL
+            AND btrim(cu.phone) <> ''
+            AND regexp_replace(COALESCE(cu.phone, ''), '[^0-9]', '', 'g') = $1
+          )
+        )
+      ORDER BY c.last_message_at DESC NULLS LAST, c.id DESC
       LIMIT 1`,
     [phone]
   );
@@ -133,12 +141,24 @@ async function findWaChatIdByPhone(pool, phoneRaw) {
     e.code = "BAD_REQUEST";
     throw e;
   }
+  /**
+   * Coincidencia por dígitos (crm_chats.phone a veces vacío pero customer.phone coincide)
+   * y tolera formatos con espacios/guiones en BD.
+   */
   const { rows } = await pool.query(
-    `SELECT id
-       FROM crm_chats
-      WHERE phone = $1
-        AND COALESCE(source_type, 'wa_inbound') IN ('wa_inbound', 'wa_ml_linked')
-      ORDER BY id DESC
+    `SELECT c.id
+       FROM crm_chats c
+       LEFT JOIN customers cu ON cu.id = c.customer_id
+      WHERE COALESCE(c.source_type, 'wa_inbound') IN ('wa_inbound', 'wa_ml_linked')
+        AND (
+          regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') = $1
+          OR (
+            cu.phone IS NOT NULL
+            AND btrim(cu.phone) <> ''
+            AND regexp_replace(COALESCE(cu.phone, ''), '[^0-9]', '', 'g') = $1
+          )
+        )
+      ORDER BY c.last_message_at DESC NULLS LAST, c.id DESC
       LIMIT 1`,
     [phone]
   );

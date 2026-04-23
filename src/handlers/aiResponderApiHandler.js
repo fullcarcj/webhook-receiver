@@ -161,6 +161,26 @@ async function getStats() {
     processing: Number(tm.processing) || 0,
     pending: Number(tm.pending) || 0,
   };
+
+  let quota_alerts = null;
+  try {
+    const { getQuotaAlertsSnapshot } = require("../services/aiQuotaAlertsService");
+    quota_alerts = await getQuotaAlertsSnapshot(pool, { windowDays: 7 });
+  } catch (e) {
+    quota_alerts = {
+      active: false,
+      unavailable: true,
+      window_days: 7,
+      total_usage_log_hits: 0,
+      total_payment_attempt_hits: 0,
+      by_provider: [],
+      recent_errors: [],
+      provider_row_hints: [],
+      headline: `Diagnóstico de cuota no disponible: ${String(e.message || e)}`,
+      action_hint: null,
+    };
+  }
+
   // total_pending_count = COUNT(*) WHERE ai_reply_status = 'needs_human_review'. Incluye TODOS los
   // mensajes pendientes de revisión (no solo hoy). Fuente de verdad para el badge del drawer (6B FE).
   // today_messages.needs_review es distinto: solo cuenta mensajes con created_at >= CURRENT_DATE.
@@ -188,6 +208,55 @@ async function getStats() {
     /** Worker puede ciclar (env + GROQ); el monitor ya no asume "caído" solo por falta de last_cycle_at. */
     worker_running: aiResponderEnabled && groqKeyOk,
     last_cycle_at: lastCycleIso,
+    quota_alerts,
+  };
+}
+
+/**
+ * GET /api/ai-responder/settings — interruptores de consola IA + flags de entorno (solo lectura donde aplique).
+ */
+async function getAiResponderSettings() {
+  const { getSwitches } = require("../services/aiConsoleSwitches");
+  const { getQuotaAlertsSnapshot } = require("../services/aiQuotaAlertsService");
+  const sw = await getSwitches();
+  const groqKeyOk = !!process.env.GROQ_API_KEY;
+  const envOn = String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
+  const suspended = aiResponderIsSuspended();
+  const tipo_m_effective = Boolean(sw.tipo_m_enabled && envOn && !suspended && groqKeyOk);
+  let quota_alerts = null;
+  try {
+    quota_alerts = await getQuotaAlertsSnapshot(pool, { windowDays: 7 });
+  } catch (e) {
+    quota_alerts = {
+      active: false,
+      unavailable: true,
+      window_days: 7,
+      total_usage_log_hits: 0,
+      total_payment_attempt_hits: 0,
+      by_provider: [],
+      recent_errors: [],
+      provider_row_hints: [],
+      headline: `Diagnóstico de cuota no disponible: ${String(e.message || e)}`,
+      action_hint: null,
+    };
+  }
+  return {
+    ok: true,
+    schema_ready: sw.schema_ready !== false,
+    schema_error: sw.schema_error != null ? String(sw.schema_error) : null,
+    switches: {
+      tipo_m: {
+        value: sw.tipo_m_enabled,
+        env_ai_responder_enabled: envOn,
+        suspended,
+        groq_key_ok: groqKeyOk,
+        effective: tipo_m_effective,
+      },
+      transcription_groq: { value: sw.transcription_groq, effective: sw.transcription_groq },
+      wa_name_groq: { value: sw.wa_name_groq, effective: sw.wa_name_groq },
+      receipt_gemini_vision: { value: sw.receipt_gemini_vision, effective: sw.receipt_gemini_vision },
+    },
+    quota_alerts,
   };
 }
 
@@ -958,6 +1027,44 @@ async function approve(mid) {
     return true;
   }
 
+  if (req.method === "GET" && path === "/api/ai-responder/settings") {
+    try {
+      const body = await getAiResponderSettings();
+      writeJson(res, 200, body);
+    } catch (e) {
+      writeJson(res, 500, { ok: false, error: e.message });
+    }
+    return true;
+  }
+
+  if (req.method === "PATCH" && path === "/api/ai-responder/settings") {
+    let body = {};
+    try {
+      body = await parseJsonBody(req);
+    } catch (e) {
+      writeJson(res, 400, { ok: false, error: "json_invalid" });
+      return true;
+    }
+    try {
+      const { updateSwitches } = require("../services/aiConsoleSwitches");
+      const partial = {};
+      if (body.tipo_m_enabled !== undefined) partial.tipo_m_enabled = body.tipo_m_enabled;
+      if (body.transcription_groq !== undefined) partial.transcription_groq = body.transcription_groq;
+      if (body.wa_name_groq !== undefined) partial.wa_name_groq = body.wa_name_groq;
+      if (body.receipt_gemini_vision !== undefined) partial.receipt_gemini_vision = body.receipt_gemini_vision;
+      const updated = await updateSwitches(partial);
+      const snapshot = await getAiResponderSettings();
+      writeJson(res, 200, { ok: true, updated, ...snapshot });
+    } catch (e) {
+      if (e && e.code === "AI_CONSOLE_SCHEMA") {
+        writeJson(res, 503, { ok: false, error: "schema_unavailable", detail: e.message });
+      } else {
+        writeJson(res, 500, { ok: false, error: e.message });
+      }
+    }
+    return true;
+  }
+
   if (req.method === "GET" && path === "/api/ai-responder/ops-logs") {
     try {
       const body = await getOpsLogs(url);
@@ -1076,4 +1183,4 @@ async function approve(mid) {
   return false;
 }
 
-module.exports = { handleAiResponderRequest, getStats, getOpsLogs };
+module.exports = { handleAiResponderRequest, getStats, getOpsLogs, getAiResponderSettings };

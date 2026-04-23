@@ -303,6 +303,29 @@ async function isValidFullName(input) {
   }
 
   // PASO 5 — Validación semántica con IA (2-4 palabras)
+  let allowNameGroq = true;
+  try {
+    const { getSwitches } = require("../services/aiConsoleSwitches");
+    const sw = await getSwitches();
+    allowNameGroq = sw.wa_name_groq !== false;
+  } catch (_e) {
+    allowNameGroq = true;
+  }
+  if (!allowNameGroq) {
+    await _logSkippedAI("console_wa_name_groq_off");
+    const allowFallback = String(process.env.WA_NAME_ALLOW_STATIC_FALLBACK || "")
+      .trim()
+      .toLowerCase();
+    if (allowFallback === "1" || allowFallback === "true" || allowFallback === "yes" || allowFallback === "on") {
+      if (isLikelyChatNotName(clean)) return false;
+      const fallback = sanitizeWaPersonName(clean) !== null;
+      log.warn({ input: clean, fallback }, "nombre sin Groq (consola): fallback estático");
+      return fallback;
+    }
+    log.warn({ input: clean }, "validación nombre: Groq desactivado en consola — rechazo estricto");
+    return false;
+  }
+
   const aiResult = await _validateWithAI(clean);
   if (aiResult === null) {
     const allowFallback = String(process.env.WA_NAME_ALLOW_STATIC_FALLBACK || "")

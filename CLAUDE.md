@@ -9,7 +9,9 @@ Receptor HTTP de webhooks de Mercado Libre (órdenes, mensajes, preguntas, ítem
 - **Runtime principal:** `node server.js` (HTTP).
 - **Estilo del repo:** CommonJS (`require/module.exports`) + rutas en servidor HTTP nativo (sin Express).
 - **Base de datos:** solo **PostgreSQL** en producción (`db.js` → `db-postgres.js`). Existe código SQLite histórico (`db-sqlite.js`) pero **no** se usa en runtime si `DATABASE_URL` apunta a Postgres.
+- **Catálogo / productos en BD:** la fuente de verdad es la tabla **`products`**. **`PRODUCTO`** (y derivados legados) es **legacy**; código y migraciones nuevas deben usar `products`, no extender el modelo viejo salvo migración explícita o compatibilidad puntual.
 - **Carga de entorno:** `load-env-local.js` lee `oauth-env.json` si existe (solo claves no ya definidas en `process.env`). **`oauth-env.json` está en `.gitignore`** — no versionar secretos.
+- **Frontend asociado (fuera de este repo, máquina local):** `C:\Users\Javier\frontend` — cliente que consume las APIs de este servidor. **No** está dentro del árbol git de `webhook-receiver`; abrir o adjuntar esa carpeta en el IDE cuando el trabajo sea solo UI o contrato front/back.
 
 ## Inventario HTTP (endpoints)
 
@@ -222,6 +224,8 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 
 | Tema | Archivos |
 |------|----------|
+| Frontend (repo aparte) | Ruta local `C:\Users\Javier\frontend` — no versionado en este repo; alinear con `endpoints-cubiertos-hasta-hoy.md` y handlers bajo `/api/*` |
+| Catálogo productos (BD) | Canónico: tabla **`products`**. **`PRODUCTO`**: legacy |
 | Rutas HTTP y webhooks | `server.js`; inventario resumido `endpoints-cubiertos-hasta-hoy.md` |
 | API ML (publicaciones, órdenes, sku-map, `api-log`, permisos CRM) | `src/handlers/mlApiHandler.js` (montaje en `server.js` bajo `/api/ml/`); cola: `src/utils/mlQueue.js` |
 | API automatizaciones (logs/config mensajes) | `src/handlers/automationsApiHandler.js` — `/api/automations/*` |
@@ -246,4 +250,4 @@ Agrupadas por tema; la fuente de verdad detallada está en comentarios de `load-
 
 ---
 
-*Última revisión: 2026-04-17 (v5) — **`/api/automations/*`** (JWT + `settings`), menú ERP (`/api/menu` con `icon`/`apiPath`), **`mlQueue`**, **`bankAuth`** (Banesco `fiscal:read`), inventario actualizado en `endpoints-cubiertos-hasta-hoy.md`. — Histórico v4 (2026-04-11): módulos fiscales en BD; rutas fiscales con `ensureAdmin`; WMS/reservas/lotes; Users+Roles+JWT (`/api/auth/*`, `/api/users/*`, `npm run db:users`).*
+*Última revisión: 2026-04-23 (v7) — catálogo: **`products`** canónico, **`PRODUCTO`** legacy; además ruta **frontend** (`C:\Users\Javier\frontend`). — v5 (2026-04-17): **`/api/automations/*`** (JWT + `settings`), menú ERP (`/api/menu` con `icon`/`apiPath`), **`mlQueue`**, **`bankAuth`** (Banesco `fiscal:read`), inventario actualizado en `endpoints-cubiertos-hasta-hoy.md`. — Histórico v4 (2026-04-11): módulos fiscales en BD; rutas fiscales con `ensureAdmin`; WMS/reservas/lotes; Users+Roles+JWT (`/api/auth/*`, `/api/users/*`, `npm run db:users`).*

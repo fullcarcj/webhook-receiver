@@ -1480,6 +1480,9 @@ async function handleInboxQuotationRequest(req, res, url) {
         );
         attempts = r.rows;
       } catch (e) {
+        // Esquema antiguo: sin extracted_amount_usd y/o sin linked_bank_statement_id.
+        // No repetir columnas que sigan ausentes (p. ej. linked_bank_statement_id — migración
+        // sql/20260422_payment_attempts_linked_bank_statement.sql).
         if (e && e.code === "42703") {
           const r = await pool.query(
             `SELECT
@@ -1499,7 +1502,6 @@ async function handleInboxQuotationRequest(req, res, url) {
                pa.reconciliation_status,
                pa.reconciled_order_id,
                pa.reconciled_quotation_id,
-               pa.linked_bank_statement_id,
                pa.created_at
              FROM payment_attempts pa
              WHERE ${where}
@@ -1508,7 +1510,11 @@ async function handleInboxQuotationRequest(req, res, url) {
              LIMIT 50`,
             params
           );
-          attempts = r.rows.map((row) => ({ ...row, extracted_amount_usd: null }));
+          attempts = r.rows.map((row) => ({
+            ...row,
+            extracted_amount_usd: null,
+            linked_bank_statement_id: null,
+          }));
         } else {
           throw e;
         }

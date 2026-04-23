@@ -326,7 +326,9 @@ function buildFilters(filter, srcParts, search, cursorIso, stageList, result, hi
   let p = 1;
 
   if (filter === "unread") {
-    conds.push(`cc.unread_count > 0`);
+    // P1/A2: “Sin atender” = último mensaje del hilo es inbound (pendiente respuesta vendedor),
+    // alineado a `customer_waiting_reply` en listInbox — no el acumulado `unread_count`.
+    conds.push(`(last_msg.direction = 'inbound')`);
   } else if (filter === "payment_pending") {
     conds.push(`so.payment_status = 'pending'::payment_status_enum`);
   } else if (filter === "quote") {
@@ -676,7 +678,7 @@ async function getInboxCounts(opts = {}) {
   const sql = `
     SELECT
       COUNT(DISTINCT cc.id) AS total,
-      COUNT(DISTINCT cc.id) FILTER (WHERE cc.unread_count > 0) AS unread,
+      COUNT(DISTINCT cc.id) FILTER (WHERE (last_msg.direction = 'inbound')) AS unread,
       COUNT(DISTINCT cc.id) FILTER (
         WHERE so.payment_status = 'pending'::payment_status_enum
       ) AS payment_pending,

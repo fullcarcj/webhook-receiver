@@ -118,4 +118,43 @@ async function ensureWaChatFromCustomerPhone(pool, opts) {
   return { chat_id: chatId, greeting_sent: greetingSent, had_recent_activity: hadRecentActivity };
 }
 
-module.exports = { ensureWaChatFromCustomerPhone, buildDefaultGreeting, isRecentWaActivity };
+/**
+ * Solo lectura: devuelve el `crm_chats.id` de un hilo WA existente para el teléfono normalizado.
+ * No crea chat ni envía mensajes (para «Ir a Chat» sin efectos secundarios).
+ *
+ * @param {import("pg").Pool} pool
+ * @param {string} phoneRaw
+ * @returns {Promise<{ chat_id: number }>}
+ */
+async function findWaChatIdByPhone(pool, phoneRaw) {
+  const phone = normalizePhone(phoneRaw);
+  if (!phone) {
+    const e = new Error("Teléfono inválido o vacío");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const { rows } = await pool.query(
+    `SELECT id
+       FROM crm_chats
+      WHERE phone = $1
+        AND COALESCE(source_type, 'wa_inbound') IN ('wa_inbound', 'wa_ml_linked')
+      ORDER BY id DESC
+      LIMIT 1`,
+    [phone]
+  );
+  if (!rows.length) {
+    const e = new Error(
+      "No hay un chat de WhatsApp en la bandeja para este número. Debe existir un hilo previo o usar la opción de retomar contacto."
+    );
+    e.code = "NOT_FOUND";
+    throw e;
+  }
+  return { chat_id: Number(rows[0].id) };
+}
+
+module.exports = {
+  ensureWaChatFromCustomerPhone,
+  findWaChatIdByPhone,
+  buildDefaultGreeting,
+  isRecentWaActivity,
+};

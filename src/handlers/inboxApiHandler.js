@@ -18,7 +18,10 @@ const {
 const { getTodayRate } = require("../services/currencyService");
 const exceptionsService = require("../services/exceptionsService");
 const { resolveMlOrderReferenceBs } = require("../utils/chatMlOrderReference");
-const { ensureWaChatFromCustomerPhone } = require("../services/inboxWaContactService");
+const {
+  ensureWaChatFromCustomerPhone,
+  findWaChatIdByPhone,
+} = require("../services/inboxWaContactService");
 
 function validateSrcCompound(src) {
   if (src == null || src === "") return { ok: true, value: null };
@@ -242,6 +245,38 @@ async function handleInboxApiRequest(req, res, url) {
           return true;
         }
         logger.error({ err: e }, "wa-chat/from-customer-phone");
+        writeJson(res, 500, {
+          error: "error",
+          message: process.env.NODE_ENV !== "production" && e.message ? String(e.message) : "Internal server error",
+        });
+      }
+      return true;
+    }
+
+    /**
+     * GET /api/inbox/wa-chat/by-phone?phone=...
+     * Solo lectura: chat_id de un hilo WA existente (sin crear chat ni enviar saludo).
+     */
+    if (req.method === "GET" && normInboxPath === "/api/inbox/wa-chat/by-phone") {
+      const phoneRaw = url.searchParams.get("phone") ?? "";
+      if (!String(phoneRaw).trim()) {
+        writeJson(res, 400, { error: "bad_request", message: "phone es obligatorio" });
+        return true;
+      }
+      try {
+        const out = await findWaChatIdByPhone(pool, phoneRaw);
+        writeJson(res, 200, { ok: true, ...out });
+      } catch (e) {
+        const code = e && e.code ? String(e.code) : "";
+        if (code === "BAD_REQUEST") {
+          writeJson(res, 400, { error: "bad_request", message: e.message || "Solicitud inválida" });
+          return true;
+        }
+        if (code === "NOT_FOUND") {
+          writeJson(res, 404, { error: "not_found", message: e.message || "No encontrado" });
+          return true;
+        }
+        logger.error({ err: e }, "wa-chat/by-phone");
         writeJson(res, 500, {
           error: "error",
           message: process.env.NODE_ENV !== "production" && e.message ? String(e.message) : "Internal server error",

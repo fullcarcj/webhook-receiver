@@ -209,6 +209,7 @@ const EXCLUDE_ANSWERED_ML_QUESTION_IDLE_SQL = `NOT (
  */
 const CHAT_STAGE_EXPR = `
   CASE
+    WHEN cc.source_type = 'fbmp_edge'                                                   THEN 'contact'
     WHEN sol.status IN ('completed', 'cancelled')                                       THEN 'closed'
     WHEN sol.payment_status = 'approved' AND sol.fulfillment_type IS NOT NULL           THEN 'dispatch'
     WHEN sol.payment_status = 'pending'                                                 THEN 'payment'
@@ -237,28 +238,36 @@ const CHAT_STAGE_EXPR = `
  */
 const PIPELINE_DEFAULT_SQL = `
 (
-  ((${CHAT_STAGE_EXPR}))::text <> 'closed'
-  AND COALESCE(cc.is_operational, FALSE) = FALSE
+  COALESCE(cc.is_operational, FALSE) = FALSE
   AND (
-    ((${CHAT_STAGE_EXPR}))::text IN ('order', 'payment', 'dispatch')
-    OR (
-      ((${CHAT_STAGE_EXPR}))::text = 'contact'
-      AND cc.source_type IN ('wa_inbound', 'wa_ml_linked')
-      AND COALESCE(cc.last_inbound_at, cc.created_at) >= (NOW() - INTERVAL '24 hours')
-      AND cc.sales_default_hidden_at IS NULL
+    (
+      ((${CHAT_STAGE_EXPR}))::text <> 'closed'
+      AND (
+        ((${CHAT_STAGE_EXPR}))::text IN ('order', 'payment', 'dispatch')
+        OR (
+          ((${CHAT_STAGE_EXPR}))::text = 'contact'
+          AND cc.source_type IN ('wa_inbound', 'wa_ml_linked')
+          AND COALESCE(cc.last_inbound_at, cc.created_at) >= (NOW() - INTERVAL '24 hours')
+          AND cc.sales_default_hidden_at IS NULL
+        )
+        OR (
+          ((${CHAT_STAGE_EXPR}))::text = 'contact'
+          AND cc.source_type NOT IN ('wa_inbound', 'wa_ml_linked')
+          AND cc.sales_default_hidden_at IS NULL
+        )
+        OR (
+          ((${CHAT_STAGE_EXPR}))::text = 'quote'
+          AND COALESCE(
+            qwin.quote_started_at,
+            cc.ml_question_answered_at,
+            cc.created_at
+          ) >= (NOW() - INTERVAL '48 hours')
+          AND cc.sales_default_hidden_at IS NULL
+        )
+      )
     )
     OR (
-      ((${CHAT_STAGE_EXPR}))::text = 'contact'
-      AND cc.source_type NOT IN ('wa_inbound', 'wa_ml_linked')
-      AND cc.sales_default_hidden_at IS NULL
-    )
-    OR (
-      ((${CHAT_STAGE_EXPR}))::text = 'quote'
-      AND COALESCE(
-        qwin.quote_started_at,
-        cc.ml_question_answered_at,
-        cc.created_at
-      ) >= (NOW() - INTERVAL '48 hours')
+      cc.source_type = 'fbmp_edge'
       AND cc.sales_default_hidden_at IS NULL
     )
   )

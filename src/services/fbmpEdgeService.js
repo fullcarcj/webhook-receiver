@@ -153,11 +153,13 @@ async function ingestMessages({ threadId, chatId, messages }) {
         [rawId, crmMsgId]
       );
 
-      // Actualizar crm_chat con último mensaje
+      // Actualizar crm_chat con último mensaje (+ last_inbound_at para filtros WA/pipeline alineados)
       await client.query(
         `UPDATE crm_chats
          SET last_message_at   = NOW(),
              last_message_text = $2,
+             last_inbound_at   = CASE WHEN $3::text = 'inbound' THEN NOW() ELSE last_inbound_at END,
+             last_outbound_at  = CASE WHEN $3::text = 'outbound' THEN NOW() ELSE last_outbound_at END,
              unread_count      = CASE WHEN $3::text = 'inbound' THEN unread_count + 1 ELSE unread_count END,
              updated_at        = NOW()
          WHERE id = $1`,

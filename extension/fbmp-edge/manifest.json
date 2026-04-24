@@ -15,8 +15,10 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.facebook.com/messages/*",
-        "https://www.facebook.com/marketplace/inbox/*"
+        "https://www.facebook.com/*",
+        "https://web.facebook.com/*",
+        "https://messenger.com/*",
+        "https://www.messenger.com/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"

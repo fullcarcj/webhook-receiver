@@ -1,9 +1,8 @@
 /**
  * fbmp_edge — content script
  *
- * Se inyecta en:
- *   https://www.facebook.com/messages/*
- *   https://www.facebook.com/marketplace/inbox/*
+ * Se inyecta en facebook.com / messenger.com (manifest amplio).
+ * Solo hace scrape cuando hay thread_id (URL o mini ventana con enlace al hilo).
  *
  * Responsabilidades:
  *   1. Observar el DOM con MutationObserver (throttle 300 ms)
@@ -38,10 +37,35 @@ chrome.storage.onChanged.addListener((changes) => {
   if (changes.secret)     config.secret     = changes.secret.newValue || "";
 });
 
-// ─── Extraer thread_external_id de la URL actual ─────────────────────────────
+// ─── thread_external_id: URL o enlace dentro de ventana flotante ────────────
+function getThreadExternalIdFromUrl() {
+  const p = location.pathname || "";
+  let m = p.match(/\/(?:messages|marketplace\/inbox)\/t\/([^/?\s#]+)/);
+  if (m) return m[1];
+  m = p.match(/^\/t\/([^/?\s#]+)/);
+  if (m && /messenger\.com/i.test(location.hostname)) return m[1];
+  m = p.match(/\/e2ee\/t\/([^/?\s#]+)/);
+  if (m && /messenger\.com/i.test(location.hostname)) return m[1];
+  return null;
+}
+
+function getThreadExternalIdFromDom() {
+  const dialogs = document.querySelectorAll('[role="dialog"], [role="complementary"]');
+  for (const d of dialogs) {
+    const links = d.querySelectorAll('a[href*="/messages/t/"], a[href*="messenger.com/t/"]');
+    for (const a of links) {
+      const href = a.href || "";
+      let m = href.match(/\/messages\/t\/([^/?&#]+)/);
+      if (m) return m[1];
+      m = href.match(/messenger\.com\/t\/([^/?&#]+)/);
+      if (m) return m[1];
+    }
+  }
+  return null;
+}
+
 function getThreadExternalId() {
-  const m = location.pathname.match(/\/(?:messages|marketplace\/inbox)\/t\/([^/?\s]+)/);
-  return m ? m[1] : null;
+  return getThreadExternalIdFromUrl() || getThreadExternalIdFromDom();
 }
 
 // ─── Extraer nombre del participante ─────────────────────────────────────────
@@ -63,17 +87,19 @@ function getParticipantName() {
  * "Tú" o el nombre del participante (heurística; ajustar al idioma).
  */
 function extractMessages() {
-  const participantName = getParticipantName();
+  const tid = getThreadExternalId();
+  if (!tid) return [];
+
   const results = [];
 
-  // Contenedor principal de mensajes
-  const feed = document.querySelector('[role="main"] [role="feed"]')
+  const feed = document.querySelector('[role="main"] [role="grid"]')
+    || document.querySelector('[role="main"] [role="feed"]')
     || document.querySelector('[role="main"] [role="log"]')
+    || document.querySelector('[role="dialog"] [role="grid"]')
     || document.querySelector('[role="main"]');
 
   if (!feed) return results;
 
-  // Nodos individuales de mensaje
   const rows = feed.querySelectorAll('[role="row"], [data-scope="messages_table"] [role="row"]');
   const candidates = rows.length > 0
     ? Array.from(rows)
@@ -81,10 +107,9 @@ function extractMessages() {
 
   for (const node of candidates) {
     const text = node.textContent?.trim();
-    if (!text || text.length < 1) continue;
+    if (!text || text.length < 2 || text.length > 3500) continue;
+    if (text.includes("Activar Windows")) continue;
 
-    // Detectar dirección: outbound si el nodo está alineado a la derecha
-    // o si el aria-label contiene el patrón "Tú" / "You"
     const label = (node.getAttribute("aria-label") || "").toLowerCase();
     const isOutbound = label.includes("tú") || label.includes("you")
       || node.closest('[aria-label*="Tú"]') !== null
@@ -92,13 +117,12 @@ function extractMessages() {
 
     const direction = isOutbound ? "outbound" : "inbound";
 
-    // Timestamp: buscar aria-label en ancestros con patrón de hora
     const timeEl = node.querySelector("[aria-label]");
     const timeStr = timeEl?.getAttribute("aria-label") || "";
     const occurred_at = timeStr.match(/\d{1,2}:\d{2}/) ? timeStr : null;
 
     const dedupe_key = btoa(unescape(encodeURIComponent(
-      `${getThreadExternalId()}|${direction}|${text.slice(0, 80)}|${occurred_at || ""}`
+      `${tid}|${direction}|${text.slice(0, 80)}|${occurred_at || ""}`
     ))).slice(0, 64);
 
     if (lastMessageSet.has(dedupe_key)) continue;
@@ -152,6 +176,7 @@ function scheduleFlush() {
   setTimeout(async () => {
     pendingFlush = false;
     const currentThread = getThreadExternalId();
+    if (!currentThread) return;
     if (currentThread !== lastThreadId) {
       lastMessageSet.clear();
       lastThreadId = currentThread;
@@ -164,8 +189,7 @@ function scheduleFlush() {
 const observer = new MutationObserver(scheduleFlush);
 
 function startObserver() {
-  const target = document.querySelector('[role="main"]') || document.body;
-  observer.observe(target, { childList: true, subtree: true });
+  observer.observe(document.body, { childList: true, subtree: true });
 }
 
 if (document.readyState === "loading") {
@@ -185,6 +209,11 @@ setInterval(() => {
     startObserver();
   }
 }, 1000);
+
+// DOM ya cargado sin mutaciones nuevas (p. ej. abrir hilo): re-scrape periódico
+setInterval(() => {
+  if (getThreadExternalId()) scheduleFlush();
+}, 4000);
 
 // ─── Outbound: recibir mensaje del background y simular escritura humana ──────
 chrome.runtime.onMessage.addListener((msg) => {

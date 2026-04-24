@@ -31,6 +31,7 @@ const {
   enqueueOutbox,
   getStats,
 } = require("../services/fbmpEdgeService");
+const { invalidateInboxCountsCache } = require("../services/inboxService");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "fbmp_edge_handler" });
 
@@ -228,6 +229,8 @@ async function handleFbmpEdgeApiRequest(req, res, url) {
         duplicates: result.duplicates,
         errors:     result.errors,
       }, "fbmp_edge: ingest OK");
+
+      if (Number(result.inserted) > 0) invalidateInboxCountsCache();
 
       writeJson(res, 200, {
         ok:         true,

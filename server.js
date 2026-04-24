@@ -241,6 +241,7 @@ const { handleInboxMlOrderRequest } = require("./src/handlers/inboxMlOrderHandle
 const { handleFacebookWebhookRequest } = require("./src/handlers/facebookWebhookHandler");
 const { handleInboxFbRequest } = require("./src/handlers/inboxFbHandler");
 const { handleFacebookPageApiRequest } = require("./src/handlers/facebookPageApiHandler");
+const { handleFbmpEdgeApiRequest } = require("./src/handlers/fbmpEdgeApiHandler");
 const { handleInboxQuotationRequest } = require("./src/handlers/inboxQuotationHandler");
 const { handleWhitelistRequest } = require("./src/handlers/inboxWhitelistHandler");
 const { handleMenuApiRequest } = require("./src/handlers/menuApiHandler");
@@ -3530,6 +3531,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleInboxMlOrderRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleFbmpEdgeApiRequest(req, res, url)) {
     return;
   }
 

@@ -5,7 +5,7 @@ const { mapSchemaError } = require("./crmIdentityService");
 const exceptionsService = require("./exceptionsService");
 
 const FILTERS = new Set(["unread", "payment_pending", "quote", "dispatch"]);
-const SRCS = new Set(["wa", "ml", "ml_question", "ml_message", "wa_ml_linked", "fb_page"]);
+const SRCS = new Set(["wa", "ml", "ml_question", "ml_message", "wa_ml_linked", "fb_page", "fbmp_edge"]);
 
 /** Filtro de resultado comercial (última orden por chat, alias `sol`). */
 const RESULTS = new Set(["no_conversion", "converted", "in_progress"]);
@@ -360,6 +360,8 @@ function pushSrcOrConds(conds, srcParts) {
       branches.push(`cc.source_type = 'wa_ml_linked'`);
     } else if (src === "fb_page") {
       branches.push(`cc.source_type = 'fb_page'`);
+    } else if (src === "fbmp_edge") {
+      branches.push(`cc.source_type = 'fbmp_edge'`);
     }
   }
   if (!branches.length) return;

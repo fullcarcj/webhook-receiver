@@ -70,6 +70,7 @@ const MENU_SECTIONS = [
       { id: "bandeja.wa",        label: "WhatsApp",                 path: "/bandeja?src=wa",            apiPath: "GET /api/inbox?src=wa",            minRole: "OPERADOR_DIGITAL" },
       { id: "bandeja.ml",        label: "MercadoLibre",             path: "/bandeja?src=ml",            apiPath: "GET /api/inbox?src=ml",            minRole: "OPERADOR_DIGITAL" },
       { id: "bandeja.fb",        label: "Facebook Messenger",        path: "/bandeja?src=fb_page",       apiPath: "GET /api/inbox?src=fb_page",       minRole: "OPERADOR_DIGITAL" },
+      { id: "bandeja.fbmp_edge", label: "FB Marketplace (personal)", path: "/fbmp-edge",          apiPath: "GET /api/fbmp-edge/threads", icon: "brand-facebook", minRole: "OPERADOR_DIGITAL" },
       { id: "bandeja.redes",     label: "Redes Sociales",           path: "/bandeja?src=social_media",  apiPath: "GET /api/inbox?src=social_media",  minRole: "OPERADOR_DIGITAL", future: true },
       { id: "bandeja.ecommerce", label: "E-commerce",               path: "/bandeja?src=ecommerce",     apiPath: "GET /api/inbox?src=ecommerce",     minRole: "OPERADOR_DIGITAL", future: true },
       { id: "bandeja.sin_leer",  label: "Sin atender",              path: "/bandeja?filter=unread",     apiPath: "GET /api/inbox?filter=unread",     minRole: "OPERADOR_DIGITAL" },

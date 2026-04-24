@@ -238,6 +238,8 @@ const { handleInboxApiRequest } = require("./src/handlers/inboxApiHandler");
 const { handleInboxIdentityRequest } = require("./src/handlers/inboxIdentityHandler");
 const { handleInboxMlQuestionRequest } = require("./src/handlers/inboxMlQuestionHandler");
 const { handleInboxMlOrderRequest } = require("./src/handlers/inboxMlOrderHandler");
+const { handleFacebookWebhookRequest } = require("./src/handlers/facebookWebhookHandler");
+const { handleInboxFbRequest } = require("./src/handlers/inboxFbHandler");
 const { handleInboxQuotationRequest } = require("./src/handlers/inboxQuotationHandler");
 const { handleWhitelistRequest } = require("./src/handlers/inboxWhitelistHandler");
 const { handleMenuApiRequest } = require("./src/handlers/menuApiHandler");
@@ -3527,6 +3529,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (await handleInboxMlOrderRequest(req, res, url)) {
+    return;
+  }
+
+  if (await handleInboxFbRequest(req, res, url)) {
     return;
   }
 
@@ -7400,6 +7406,11 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: true, received: true }));
     return;
+  }
+
+  /** Webhook Facebook Messenger (Pages API) — GET verificación + POST mensajes entrantes. */
+  if (url.pathname === "/webhook/facebook") {
+    if (await handleFacebookWebhookRequest(req, res, url)) return;
   }
 
   /** Webhooks Wasender API (alias de ruta; mismo handler que POST /webhook cuando detecta Wasender). */

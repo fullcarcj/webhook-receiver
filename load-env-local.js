@@ -53,6 +53,7 @@
  * Playwright: en producción (p. ej. Render) definir PLAYWRIGHT_BROWSERS_PATH=0 para instalar Chromium dentro de node_modules y que el binario viaje en el deploy; si no, suele quedar en ~/.cache y falta en runtime. Sin canal, Playwright usa Chromium del paquete. Chrome/Edge del sistema: BANESCO_PLAYWRIGHT_CHANNEL=chrome o =msedge; si no está instalado en el host, banescoService hace fallback al Chromium embebido.
  * Headless / diálogos: BANESCO_CHROMIUM_DISABLE_SITE_ISOLATION=1 añade --disable-features=IsolateOrigins,site-per-process (solo si hace falta; opt-in).
  * Botón descarga en Exportar: por defecto #ctl00_cp_btnOk; override con BANESCO_EXPORT_BTN_SELECTOR (CSS).
+ * Facebook Messenger (Pages API): FB_PAGE_ACCESS_TOKEN (Page Access Token long-lived), FB_APP_SECRET (firma HMAC X-Hub-Signature-256), FB_WEBHOOK_VERIFY_TOKEN (token libre configurado en Meta Developers), FB_PAGE_ID (ID Fan Page). Opcional: FB_GRAPH_API_VERSION (default "v21.0"). Webhook: GET+POST /webhook/facebook. Migración: npm run db:facebook. Reply API: POST /api/inbox/:chatId/fb/reply {text, answered_by}.
  */
 const fs = require("fs");
 const path = require("path");

@@ -133,13 +133,11 @@ function extractMessages() {
   return results;
 }
 
-// ─── Enviar batch al backend ──────────────────────────────────────────────────
-async function flushMessages(messages) {
-  if (!config.backendUrl || !config.secret) return;
-  if (!messages.length) return;
-
-  const threadExternalId = getThreadExternalId();
-  if (!threadExternalId) return;
+// ─── Ingest genérico (hilo activo o fila de la lista lateral) ────────────────
+async function postIngest(threadExternalId, participantName, messages) {
+  if (!config.backendUrl || !config.secret) return false;
+  if (!messages.length) return false;
+  if (!threadExternalId) return false;
 
   try {
     const res = await fetch(`${config.backendUrl}/api/fbmp-edge/ingest`, {
@@ -150,7 +148,7 @@ async function flushMessages(messages) {
       },
       body: JSON.stringify({
         thread_external_id: threadExternalId,
-        participant_name:   getParticipantName(),
+        participant_name:   participantName || null,
         messages:           messages.slice(0, MAX_BATCH),
       }),
     });
@@ -161,11 +159,90 @@ async function flushMessages(messages) {
         const arr = [...lastMessageSet];
         lastMessageSet = new Set(arr.slice(arr.length - 300));
       }
-    } else {
-      console.warn("[fbmp_edge] ingest:", res.status, await res.text().catch(() => ""));
+      return true;
     }
+    console.warn("[fbmp_edge] ingest:", res.status, await res.text().catch(() => ""));
   } catch (err) {
     console.warn("[fbmp_edge] ingest error:", err.message);
+  }
+  return false;
+}
+
+async function flushMessages(messages) {
+  const threadExternalId = getThreadExternalId();
+  if (!threadExternalId) return;
+  await postIngest(threadExternalId, getParticipantName(), messages);
+}
+
+function simpleHash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h) + s.charCodeAt(i) | 0;
+  return String(h);
+}
+
+function storageGet(key) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([key], (o) => resolve(o[key]));
+  });
+}
+
+function storageSet(key, val) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [key]: val }, resolve);
+  });
+}
+
+/**
+ * Hilos en la columna izquierda (lista) aunque el centro sea otro chat.
+ * Envía un ingest con el texto de la fila (preview) cuando cambia respecto al último envío.
+ */
+async function scrapeSidebarThreads() {
+  if (!config.backendUrl || !config.secret) return;
+  const href = (location.pathname || "") + (location.href || "");
+  if (!/\/messages|marketplace/i.test(href)) return;
+
+  const main = document.querySelector("[role=\"main\"]");
+  const anchors = document.querySelectorAll(
+    "a[href*=\"/messages/t/\"], a[href*=\"/marketplace/inbox/t/\"]"
+  );
+  const seen = new Set();
+
+  for (const a of anchors) {
+    const raw = a.getAttribute("href") || a.href || "";
+    let m = raw.match(/\/messages\/t\/([^/?&#]+)/);
+    if (!m) m = raw.match(/\/marketplace\/inbox\/t\/([^/?&#]+)/);
+    if (!m) continue;
+    const tid = m[1];
+    if (seen.has(tid)) continue;
+    seen.add(tid);
+
+    if (main) {
+      const mr = main.getBoundingClientRect();
+      if (mr.width > 400) {
+        const ar = a.getBoundingClientRect();
+        const rel = (ar.left + ar.width / 2 - mr.left) / mr.width;
+        if (rel > 0.45) continue;
+      }
+    }
+
+    const row = a.closest("[role=\"row\"]") || a.closest("li") || a.parentElement;
+    if (!row) continue;
+    let preview = String(row.innerText || "")
+      .trim()
+      .replace(/\s+/g, " ");
+    if (preview.length < 3 || preview.length > 1500) continue;
+    if (preview.includes("Activar Windows")) continue;
+
+    const fingerprint = simpleHash(preview);
+    const sk = `fbmp_sb_${tid}`;
+    const prev = await storageGet(sk);
+    if (prev === fingerprint) continue;
+
+    const nameGuess = preview.split("·")[0].trim().slice(0, 120) || null;
+    const dedupe_key = `sb_${tid}_${fingerprint}`;
+    const body = preview.slice(0, 2000);
+    const ok = await postIngest(tid, nameGuess, [{ direction: "inbound", body, dedupe_key }]);
+    if (ok) await storageSet(sk, fingerprint);
   }
 }
 
@@ -214,6 +291,11 @@ setInterval(() => {
 setInterval(() => {
   if (getThreadExternalId()) scheduleFlush();
 }, 4000);
+
+// Lista lateral: otros hilos (p. ej. Yelitza) aunque el centro sea Cesar
+setInterval(() => {
+  scrapeSidebarThreads().catch(() => {});
+}, 7000);
 
 // ─── Outbound: recibir mensaje del background y simular escritura humana ──────
 chrome.runtime.onMessage.addListener((msg) => {

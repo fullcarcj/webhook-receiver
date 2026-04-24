@@ -710,16 +710,39 @@ async function fetchInboxFacets() {
   return buildInboxFacetsPayload(rows[0] || {});
 }
 
+// ─── Caché TTL para getInboxCounts ───────────────────────────────────────────
+// Reduce carga sobre el plan free de Render: 6 queries paralelas con LATERAL
+// JOINs son costosas; los badges no necesitan precisión al milisegundo.
+const _countsCache = new Map();
+const COUNTS_CACHE_TTL_MS = 8_000; // 8 s
+
+function _getCachedCounts(key) {
+  const e = _countsCache.get(key);
+  if (e && Date.now() < e.exp) return e.data;
+  _countsCache.delete(key);
+  return null;
+}
+function _setCachedCounts(key, data) {
+  _countsCache.set(key, { data, exp: Date.now() + COUNTS_CACHE_TTL_MS });
+}
+// Invalidar manualmente si se necesita frescura inmediata (p. ej. tras leer un chat).
+function invalidateInboxCountsCache() {
+  _countsCache.clear();
+}
+
 /**
  * Totales de bandeja alineados a `listInbox` (mismos JOIN + WHERE base sin `filter` ni cursor).
  * Opcional `src`, `stage`, `result`, `search` — mismos query params que `GET /api/inbox`.
  * Así el badge "Sin leer" coincide con la lista cuando hay filtro de etapa/origen/etc.
+ *
+ * Resultado cacheado 8 s en memoria para reducir carga DB (queries muy pesadas con LATERAL JOINs).
  *
  * @param {object} [opts]
  * @param {string|null} [opts.src] compuesto validado (p. ej. `wa,ml`) o null
  * @param {string|null} [opts.stage] compuesto validado o null
  * @param {string|null} [opts.result] o null
  * @param {string|null} [opts.search] o null
+ * @param {boolean}     [opts.noCache] si true, salta el caché (fuerza refetch)
  */
 async function getInboxCounts(opts = {}) {
   const srcParts =
@@ -744,6 +767,22 @@ async function getInboxCounts(opts = {}) {
     opts.pipelineDefault === 1 ||
     String(opts.pipelineDefault || "") === "1";
 
+  // Caché TTL: evita 6 queries pesadas en cada polling del frontend.
+  // noCache=true lo salta (fuerza frescura cuando el usuario interactúa).
+  if (!opts.noCache) {
+    const cacheKey = `${String(srcParts?.join(",") ?? "")}|${String(search ?? "")}|${String(stageList?.join(",") ?? "")}|${String(result ?? "")}|${pipelineDefault ? "1" : "0"}`;
+    const hit = _getCachedCounts(cacheKey);
+    if (hit) return hit;
+
+    const _origResult = await _runInboxCounts({ srcParts, search, stageList, result, pipelineDefault });
+    _setCachedCounts(cacheKey, _origResult);
+    return _origResult;
+  }
+
+  return _runInboxCounts({ srcParts, search, stageList, result, pipelineDefault });
+}
+
+async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDefault }) {
   const hideAnsweredIdleMl = !srcParts || srcParts.length === 0;
   const { where, params } = buildFilters(
     null,
@@ -934,6 +973,7 @@ async function setSalesChatSalesDefaultHidden(chatId, hidden) {
 module.exports = {
   listInbox,
   getInboxCounts,
+  invalidateInboxCountsCache,
   getCustomerWaitingReplyForChat,
   resetAllChatsUnread,
   setSalesChatSalesDefaultHidden,

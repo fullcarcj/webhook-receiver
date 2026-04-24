@@ -109,45 +109,66 @@ function logActionCount(logByAction, action) {
   return Number.isFinite(n) ? n : 0;
 }
 
+// ─── Caché TTL para getStats ──────────────────────────────────────────────────
+let _statsCacheData = null;
+let _statsCacheExp  = 0;
+const STATS_CACHE_TTL_MS = 5_000; // 5 s
+
 async function getStats() {
   /* today_messages.needs_review cuenta solo needs_human_review; legacy_archived queda fuera
      (backlog archivado pre–Sprint 6B · ver archive-legacy-ai-queue.js). */
-  const today = await pool.query(`
-    SELECT
-      COUNT(*) FILTER (WHERE ai_reply_status = 'ai_replied') AS auto_sent,
-      COUNT(*) FILTER (WHERE ai_reply_status = 'needs_human_review') AS needs_review,
-      COUNT(*) FILTER (WHERE ai_reply_status = 'needs_human_review' AND COALESCE(TRIM(ai_reply_text), '') <> '') AS needs_review_post_wa_fail,
-      COUNT(*) FILTER (WHERE ai_reply_status = 'needs_human_review' AND COALESCE(TRIM(ai_reply_text), '') = '') AS needs_review_pre_send,
-      COUNT(*) FILTER (WHERE ai_reply_status = 'processing') AS processing,
-      COUNT(*) FILTER (WHERE ai_reply_status IN ('pending_ai_reply','pending_receipt_confirm')) AS pending,
-      COUNT(*) FILTER (WHERE ai_reply_status = 'skipped') AS skipped
-    FROM crm_messages
-    WHERE created_at >= CURRENT_DATE
-      AND ai_reply_status IS NOT NULL
-  `);
-  const logc = await pool.query(`
-    SELECT action_taken, COUNT(*)::int AS n
-    FROM ai_response_log
-    WHERE created_at >= CURRENT_DATE
-    GROUP BY action_taken
-  `);
+
+  // Caché TTL: evita 5 queries secuenciales en cada polling del frontend.
+  if (_statsCacheData && Date.now() < _statsCacheExp) return _statsCacheData;
+
+  // Combinar en Promise.all: en vez de 5 awaits secuenciales, un solo viaje paralelo.
+  const [todayRes, logcRes, combinedRes, lastActRes] = await Promise.all([
+    pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE ai_reply_status = 'ai_replied') AS auto_sent,
+        COUNT(*) FILTER (WHERE ai_reply_status = 'needs_human_review') AS needs_review,
+        COUNT(*) FILTER (WHERE ai_reply_status = 'needs_human_review' AND COALESCE(TRIM(ai_reply_text), '') <> '') AS needs_review_post_wa_fail,
+        COUNT(*) FILTER (WHERE ai_reply_status = 'needs_human_review' AND COALESCE(TRIM(ai_reply_text), '') = '') AS needs_review_pre_send,
+        COUNT(*) FILTER (WHERE ai_reply_status = 'processing') AS processing,
+        COUNT(*) FILTER (WHERE ai_reply_status IN ('pending_ai_reply','pending_receipt_confirm')) AS pending,
+        COUNT(*) FILTER (WHERE ai_reply_status = 'skipped') AS skipped
+      FROM crm_messages
+      WHERE created_at >= CURRENT_DATE
+        AND ai_reply_status IS NOT NULL
+    `),
+    pool.query(`
+      SELECT action_taken, COUNT(*)::int AS n
+      FROM ai_response_log
+      WHERE created_at >= CURRENT_DATE
+      GROUP BY action_taken
+    `),
+    // 3 counts globales en una sola query (era 3 awaits secuenciales)
+    pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE ai_reply_status = 'legacy_archived')::int AS legacy_archived,
+        COUNT(*) FILTER (WHERE ai_reply_status = 'needs_human_review')::int AS total_pending,
+        COUNT(*) FILTER (WHERE ai_reply_status IN ('pending_ai_reply','pending_receipt_confirm'))::int AS pending_queue
+      FROM crm_messages
+      WHERE ai_reply_status IS NOT NULL
+    `),
+    pool.query(`
+      SELECT GREATEST(
+        (SELECT MAX(created_at) FROM ai_response_log),
+        (SELECT MAX(ai_processed_at) FROM crm_messages WHERE ai_processed_at IS NOT NULL)
+      ) AS t
+    `),
+  ]);
+
+  const today     = todayRes;
+  const logc      = logcRes;
+  const combined  = combinedRes.rows[0] || {};
+  const lastAct   = lastActRes;
   const groqKeyOk = !!process.env.GROQ_API_KEY;
-  const legacyArchived = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM crm_messages WHERE ai_reply_status = 'legacy_archived'`
-  );
-  const totalPending = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM crm_messages WHERE ai_reply_status = 'needs_human_review'`
-  );
-  const pendingQueue = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM crm_messages
-     WHERE ai_reply_status IN ('pending_ai_reply', 'pending_receipt_confirm')`
-  );
-  const lastAct = await pool.query(`
-    SELECT GREATEST(
-      (SELECT MAX(created_at) FROM ai_response_log),
-      (SELECT MAX(ai_processed_at) FROM crm_messages WHERE ai_processed_at IS NOT NULL)
-    ) AS t
-  `);
+
+  // Mantener compatibilidad con el resto del código que usaba estas variables:
+  const legacyArchived = { rows: [{ n: combined.legacy_archived ?? 0 }] };
+  const totalPending   = { rows: [{ n: combined.total_pending   ?? 0 }] };
+  const pendingQueue   = { rows: [{ n: combined.pending_queue   ?? 0 }] };
   const tm = today.rows[0] || {};
   const aiResponderEnvOn = String(process.env.AI_RESPONDER_ENABLED || "").trim() === "1";
   const aiResponderSuspended = aiResponderIsSuspended();
@@ -184,7 +205,7 @@ async function getStats() {
   // total_pending_count = COUNT(*) WHERE ai_reply_status = 'needs_human_review'. Incluye TODOS los
   // mensajes pendientes de revisión (no solo hoy). Fuente de verdad para el badge del drawer (6B FE).
   // today_messages.needs_review es distinto: solo cuenta mensajes con created_at >= CURRENT_DATE.
-  return {
+  const result = {
     ok: true,
     ai_responder_enabled: aiResponderEnabled,
     /** true si AI_RESPONDER_ENABLED=1 en env aunque isSuspended() apague el efecto. */
@@ -210,6 +231,10 @@ async function getStats() {
     last_cycle_at: lastCycleIso,
     quota_alerts,
   };
+
+  _statsCacheData = result;
+  _statsCacheExp  = Date.now() + STATS_CACHE_TTL_MS;
+  return result;
 }
 
 /**

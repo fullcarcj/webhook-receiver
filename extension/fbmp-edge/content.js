@@ -180,6 +180,21 @@ function simpleHash(s) {
   return String(h);
 }
 
+/**
+ * Texto estable para comparar “último mensaje” del preview de la fila lateral:
+ * quita marcas de tiempo relativas que Meta actualiza cada minuto (evita
+ * considerar “nuevo” el mismo mensaje solo porque pasó de “1 min” a “2 min”).
+ */
+function normalizeSidebarPreviewForFingerprint(preview) {
+  let s = String(preview || "")
+    .trim()
+    .replace(/\s+/g, " ");
+  s = s.replace(/\s*·\s*hace\s+\d+\s*(min|minutos?|seg|segundos?|h|horas?|d|d[ií]as?)\b/gi, "");
+  s = s.replace(/\s*·\s*\d+\s*(m|min|mins?|minuto|minutos?|s|seg|secs?|h|hrs?|d|d[ií]as?)\b/gi, "");
+  s = s.replace(/\s*·\s*(just now|now|ahora|today|hoy|ayer)\b/gi, "");
+  return s.trim();
+}
+
 function storageGet(key) {
   return new Promise((resolve) => {
     chrome.storage.local.get([key], (o) => resolve(o[key]));
@@ -194,9 +209,9 @@ function storageSet(key, val) {
 
 /**
  * Hilos en la columna izquierda (lista) aunque el centro sea otro chat.
- * Envía un ingest con el texto de la fila (preview) cuando cambia respecto al último envío.
- * Orden: de arriba hacia abajo (el primero de la lista = actividad reciente; no usar el punto
- * verde del avatar como señal — suele ser “en línea”, no “no leído”).
+ * Envía un ingest cuando el preview de la fila cambia respecto al último guardado por hilo
+ * (chrome.storage `fbmp_sb_<tid>`): es la comparación “último visto vs lo que muestra la lista”.
+ * El primero de la lista se procesa primero (orden Y); no usar el punto verde como señal.
  */
 async function scrapeSidebarThreads() {
   if (!config.backendUrl || !config.secret) return;
@@ -246,7 +261,7 @@ async function scrapeSidebarThreads() {
     if (preview.length < 3 || preview.length > 1500) continue;
     if (preview.includes("Activar Windows")) continue;
 
-    const fingerprint = simpleHash(preview);
+    const fingerprint = simpleHash(normalizeSidebarPreviewForFingerprint(preview));
     const sk = `fbmp_sb_${tid}`;
     const prev = await storageGet(sk);
     if (prev === fingerprint) continue;

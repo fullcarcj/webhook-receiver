@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "fbmp_edge — Marketplace Bridge",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Puente privado entre Facebook Marketplace Personal y el ERP (inbound scraper + outbound relay).",
   "permissions": [
     "storage",

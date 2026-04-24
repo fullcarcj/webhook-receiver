@@ -250,11 +250,22 @@ async function getChatContext(chatId) {
       inboxService.getCustomerWaitingReplyForChat(id),
     ]);
 
+    // Ventana de mensajería estándar Facebook (24 h desde último inbound).
+    // fb_window_expires_at: ISO timestamp o null; el frontend lo usa para bloquear el input.
+    let fb_window_expires_at = null;
+    if (chat.source_type === "fb_page" && chat.last_inbound_at) {
+      const t = new Date(chat.last_inbound_at);
+      if (!Number.isNaN(t.getTime())) {
+        fb_window_expires_at = new Date(t.getTime() + 24 * 60 * 60 * 1000).toISOString();
+      }
+    }
+
     const chatOut = {
       ...(resolvedCustomerId != null
         ? { ...chat, customer_id: resolvedCustomerId }
         : { ...chat }),
       customer_waiting_reply: customer_waiting_reply === true,
+      fb_window_expires_at,
     };
     const quoteStatus = quoteIq.rows?.[0]?.quote_status ?? null;
 

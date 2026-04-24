@@ -21,6 +21,31 @@ const GRAPH_VERSION = process.env.FB_GRAPH_API_VERSION || "v21.0";
 const BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
 /**
+ * GET de la Graph API.
+ * @param {string} path — p. ej. "/me?fields=id,name"
+ * @returns {Promise<{ ok: boolean, status: number, data: object }>}
+ */
+function graphGet(path) {
+  const token = process.env.FB_PAGE_ACCESS_TOKEN || "";
+  const sep = path.includes("?") ? "&" : "?";
+  const url = `${BASE}${path}${sep}access_token=${encodeURIComponent(token)}`;
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, { method: "GET" }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        let data = {};
+        try { data = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch (_) {}
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, data });
+      });
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+/**
  * POST JSON a la Graph API.
  * @param {string} path — p. ej. "/me/messages"
  * @param {object} body
@@ -99,4 +124,4 @@ function verifyWebhookSignature(rawBody, signatureHeader) {
   }
 }
 
-module.exports = { sendTextMessage, verifyWebhookSignature, graphPost };
+module.exports = { sendTextMessage, verifyWebhookSignature, graphPost, graphGet };

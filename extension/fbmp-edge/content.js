@@ -195,6 +195,8 @@ function storageSet(key, val) {
 /**
  * Hilos en la columna izquierda (lista) aunque el centro sea otro chat.
  * Envía un ingest con el texto de la fila (preview) cuando cambia respecto al último envío.
+ * Orden: de arriba hacia abajo (el primero de la lista = actividad reciente; no usar el punto
+ * verde del avatar como señal — suele ser “en línea”, no “no leído”).
  */
 async function scrapeSidebarThreads() {
   if (!config.backendUrl || !config.secret) return;
@@ -205,7 +207,9 @@ async function scrapeSidebarThreads() {
   const anchors = document.querySelectorAll(
     "a[href*=\"/messages/t/\"], a[href*=\"/marketplace/inbox/t/\"]"
   );
-  const seen = new Set();
+
+  /** @type {{ a: Element, tid: string, top: number }[]} */
+  const candidates = [];
 
   for (const a of anchors) {
     const raw = a.getAttribute("href") || a.href || "";
@@ -213,8 +217,6 @@ async function scrapeSidebarThreads() {
     if (!m) m = raw.match(/\/marketplace\/inbox\/t\/([^/?&#]+)/);
     if (!m) continue;
     const tid = m[1];
-    if (seen.has(tid)) continue;
-    seen.add(tid);
 
     if (main) {
       const mr = main.getBoundingClientRect();
@@ -224,6 +226,17 @@ async function scrapeSidebarThreads() {
         if (rel > 0.45) continue;
       }
     }
+
+    const ar = a.getBoundingClientRect();
+    candidates.push({ a, tid, top: ar.top + ar.height / 2 });
+  }
+
+  candidates.sort((x, y) => x.top - y.top);
+
+  const seen = new Set();
+  for (const { a, tid } of candidates) {
+    if (seen.has(tid)) continue;
+    seen.add(tid);
 
     const row = a.closest("[role=\"row\"]") || a.closest("li") || a.parentElement;
     if (!row) continue;

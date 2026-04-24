@@ -213,8 +213,9 @@ async function sendWasenderTextMessage(opts) {
   }
 
   const throttle = getThrottle();
+  const isCritical = String(opts.messageType || "").toUpperCase() === "CRITICAL";
   if (pool && throttle) {
-    const cap = await throttle.checkWaSendCap(to, pool, { skipThrottle: !!opts.skipThrottle });
+    const cap = await throttle.checkWaSendCap(to, pool, { skipThrottle: isCritical || !!opts.skipThrottle });
     if (!cap.allowed) {
       console.warn(`[waThrottle] BLOQUEADO ${to} — ${cap.count}/${cap.cap} mensajes hoy`);
       return { ok: false, status: 0, json: null, bodyText: "", throttled: true, throttle_count: cap.count, throttle_cap: cap.cap };
@@ -268,8 +269,9 @@ async function sendWasenderImageMessage(opts) {
   }
 
   const throttle = getThrottle();
+  const isCriticalImg = String(opts.messageType || "").toUpperCase() === "CRITICAL";
   if (pool && throttle) {
-    const cap = await throttle.checkWaSendCap(to, pool, { skipThrottle: !!opts.skipThrottle });
+    const cap = await throttle.checkWaSendCap(to, pool, { skipThrottle: isCriticalImg || !!opts.skipThrottle });
     if (!cap.allowed) {
       console.warn(`[waThrottle] BLOQUEADO imagen ${to} — ${cap.count}/${cap.cap} mensajes hoy`);
       return { ok: false, status: 0, json: null, bodyText: "", throttled: true };
@@ -338,8 +340,9 @@ async function sendWasenderLocationMessage(opts) {
   }
 
   const throttle = getThrottle();
+  const isCriticalLoc = String(opts.messageType || "").toUpperCase() === "CRITICAL";
   if (pool && throttle) {
-    const cap = await throttle.checkWaSendCap(to, pool, { skipThrottle: !!opts.skipThrottle });
+    const cap = await throttle.checkWaSendCap(to, pool, { skipThrottle: isCriticalLoc || !!opts.skipThrottle });
     if (!cap.allowed) {
       console.warn(`[waThrottle] BLOQUEADO location ${to} — ${cap.count}/${cap.cap} mensajes hoy`);
       return { ok: false, status: 0, json: null, bodyText: "", throttled: true };

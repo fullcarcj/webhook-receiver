@@ -8,7 +8,9 @@
     "alarms"
   ],
   "host_permissions": [
-    "https://www.facebook.com/*"
+    "https://www.facebook.com/*",
+    "https://*/*",
+    "http://localhost/*"
   ],
   "content_scripts": [
     {

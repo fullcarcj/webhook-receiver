@@ -110,16 +110,22 @@ function logActionCount(logByAction, action) {
 }
 
 // ─── Caché TTL para getStats ──────────────────────────────────────────────────
-let _statsCacheData = null;
-let _statsCacheExp  = 0;
-const STATS_CACHE_TTL_MS = 5_000; // 5 s
+let _statsCacheData  = null;
+let _statsCacheTs    = 0;
+const STATS_CACHE_MAX_AGE_MS = 5 * 60_000; // 5 min — fallback de seguridad
+
+/** Invalida el caché de stats. Llamar tras approve/reject/override/processOneMessage. */
+function invalidateAiStatsCache() {
+  _statsCacheData = null;
+  _statsCacheTs   = 0;
+}
 
 async function getStats() {
   /* today_messages.needs_review cuenta solo needs_human_review; legacy_archived queda fuera
      (backlog archivado pre–Sprint 6B · ver archive-legacy-ai-queue.js). */
 
   // Caché TTL: evita 5 queries secuenciales en cada polling del frontend.
-  if (_statsCacheData && Date.now() < _statsCacheExp) return _statsCacheData;
+  if (_statsCacheData && Date.now() - _statsCacheTs < STATS_CACHE_MAX_AGE_MS) return _statsCacheData;
 
   // Combinar en Promise.all: en vez de 5 awaits secuenciales, un solo viaje paralelo.
   const [todayRes, logcRes, combinedRes, lastActRes] = await Promise.all([
@@ -233,7 +239,7 @@ async function getStats() {
   };
 
   _statsCacheData = result;
-  _statsCacheExp  = Date.now() + STATS_CACHE_TTL_MS;
+  _statsCacheTs   = Date.now();
   return result;
 }
 
@@ -543,6 +549,7 @@ async function handleReject(req, res, id, body) {
     client.release();
   }
 
+  invalidateAiStatsCache();
   writeJson(res, 200, { ok: true, id: Number(id), status: "human_rejected" });
 }
 
@@ -683,6 +690,7 @@ async function handleApprove(req, res, id) {
     action_taken: "approved_by_human",
     error_message: null,
   });
+  invalidateAiStatsCache();
   writeJson(res, 200, { ok: true, id: Number(id) });
 }
 
@@ -777,6 +785,7 @@ async function handleOverride(req, res, id, body) {
   } finally {
     client.release();
   }
+  invalidateAiStatsCache();
   writeJson(res, 200, { ok: true, id: Number(id) });
 }
 
@@ -1208,4 +1217,4 @@ async function approve(mid) {
   return false;
 }
 
-module.exports = { handleAiResponderRequest, getStats, getOpsLogs, getAiResponderSettings };
+module.exports = { handleAiResponderRequest, getStats, getOpsLogs, getAiResponderSettings, invalidateAiStatsCache };

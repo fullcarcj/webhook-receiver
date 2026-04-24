@@ -9,6 +9,7 @@ const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
   listInbox,
   getInboxCounts,
+  invalidateInboxCountsCache,
   resetAllChatsUnread,
   setSalesChatSalesDefaultHidden,
   FILTERS,
@@ -159,6 +160,7 @@ async function handleInboxApiRequest(req, res, url) {
     const normInboxRoot = String(pathname || "").replace(/\/+$/, "") || pathname;
     if (req.method === "POST" && normInboxRoot === "/api/inbox/reset-unread") {
       const out = await resetAllChatsUnread();
+      invalidateInboxCountsCache();
       writeJson(res, 200, { ok: true, chats_reset: out.chats_reset });
       return true;
     }

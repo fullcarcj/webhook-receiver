@@ -49,6 +49,7 @@ const {
   deleteCrmChatState,
 } = require("../../services/crmChatStates");
 const { maybeQueueInboundText } = require("../../services/aiResponder");
+const { invalidateInboxCountsCache } = require("../../services/inboxService");
 const { applyInboundOmnichannelHook } = require("../../services/omnichannelInboundHook");
 const { getWhitelistMode } = require("../../handlers/inboxWhitelistHandler");
 
@@ -253,6 +254,8 @@ async function saveMessageAndUpdateChat(client, { chatId, customerId, normalized
       `UPDATE crm_chats SET unread_count = unread_count + 1, updated_at = NOW() WHERE id = $1`,
       [chatId]
     );
+    // Nuevo mensaje en BD → los contadores de bandeja cambiaron
+    invalidateInboxCountsCache();
     const t = String(normalized.type || "text").toLowerCase();
     if (isInboundMessagesReceived(eventType) && t === "text") {
       await maybeQueueInboundText(client, ins.rows[0].id);

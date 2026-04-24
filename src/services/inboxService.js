@@ -713,19 +713,29 @@ async function fetchInboxFacets() {
 // ─── Caché TTL para getInboxCounts ───────────────────────────────────────────
 // Reduce carga sobre el plan free de Render: 6 queries paralelas con LATERAL
 // JOINs son costosas; los badges no necesitan precisión al milisegundo.
+// Caché de duración indefinida: los datos son válidos hasta que ocurra un evento
+// de escritura (nuevo mensaje, marcar leído, orden actualizada, etc.).
+// _setCachedCounts no recibe TTL; _invalidate borra todo.
+// Fallback de seguridad: 5 min (evita datos eternamente viejos si falla algún hook).
 const _countsCache = new Map();
-const COUNTS_CACHE_TTL_MS = 8_000; // 8 s
+const COUNTS_CACHE_MAX_AGE_MS = 5 * 60_000; // 5 min — solo como red de seguridad
 
 function _getCachedCounts(key) {
   const e = _countsCache.get(key);
-  if (e && Date.now() < e.exp) return e.data;
+  if (e && Date.now() - e.ts < COUNTS_CACHE_MAX_AGE_MS) return e.data;
   _countsCache.delete(key);
   return null;
 }
 function _setCachedCounts(key, data) {
-  _countsCache.set(key, { data, exp: Date.now() + COUNTS_CACHE_TTL_MS });
+  _countsCache.set(key, { data, ts: Date.now() });
 }
-// Invalidar manualmente si se necesita frescura inmediata (p. ej. tras leer un chat).
+/**
+ * Invalida el caché de counts. Llamar tras cualquier escritura que cambie los totales:
+ *   - nuevo mensaje inbound/outbound
+ *   - marcar chats como leídos
+ *   - actualización de orden / reconciliación
+ *   - nuevo hilo ML/WA
+ */
 function invalidateInboxCountsCache() {
   _countsCache.clear();
 }

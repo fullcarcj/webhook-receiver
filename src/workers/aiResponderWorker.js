@@ -9,6 +9,8 @@ const pino = require("pino");
 const { pool } = require("../../db");
 const { processOneMessage, isEnabled, setImmediateTrigger } = require("../services/aiResponder");
 const { isTipoMConsoleAndEnvEnabled } = require("../services/aiConsoleSwitches");
+const { invalidateAiStatsCache } = require("../handlers/aiResponderApiHandler");
+const { invalidateInboxCountsCache } = require("../services/inboxService");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "ai_responder_worker" });
 
@@ -87,6 +89,10 @@ async function responderCycle() {
           [`Error: ${String(err.message || err).slice(0, 500)}`, message.id]
         )
         .catch(() => {});
+    } finally {
+      // El estado de un mensaje cambió: invalidar ambos cachés
+      invalidateAiStatsCache();
+      invalidateInboxCountsCache();
     }
   } catch (e) {
     if (e && e.code === "42703") {

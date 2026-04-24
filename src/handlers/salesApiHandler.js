@@ -381,6 +381,18 @@ async function handleSalesApiRequest(req, res, url) {
           mlUserId: d.ml_user_id,
           orderId: d.order_id,
         });
+        if (!data.idempotent) {
+          try {
+            sseBroker.broadcast("new_sale", {
+              sales_order_id: data.id,
+              ml_user_id: d.ml_user_id,
+              order_id: d.order_id,
+              source: "sales_import_ml",
+            });
+          } catch (_e) {
+            /* no crítico */
+          }
+        }
         writeJson(res, data.idempotent ? 200 : 201, {
           data,
           meta: { timestamp: new Date().toISOString() },

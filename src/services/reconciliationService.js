@@ -99,8 +99,7 @@ function buildPaymentConfirmedWaMessage(order, match) {
 }
 
 async function resolveWaNotifyPhone(order, chatId) {
-  // Prioridad 1: teléfono del chat (conversación activa) — evita enviar al cliente
-  // de la orden cuando el comprobante llegó por un número diferente.
+  // Prioridad 1: teléfono del chat explícito (conversación activa).
   if (chatId != null && Number.isFinite(Number(chatId)) && Number(chatId) > 0) {
     const { rows } = await pool.query(`SELECT phone FROM crm_chats WHERE id = $1 LIMIT 1`, [
       Number(chatId),
@@ -109,7 +108,28 @@ async function resolveWaNotifyPhone(order, chatId) {
       return String(rows[0].phone);
     }
   }
-  // Prioridad 2: teléfono del cliente de la orden
+
+  // Prioridad 2: cuando el match fue por extracto bancario (chatId null) y la orden tiene
+  // customer_id, buscar si hay un payment_attempt reciente del mismo cliente con chat_id →
+  // ese chat es quien envió el comprobante y espera la confirmación.
+  if ((chatId == null) && order.customer_id != null) {
+    const { rows: paRows } = await pool.query(
+      `SELECT cc.phone
+       FROM payment_attempts pa
+       JOIN crm_chats cc ON cc.id = pa.chat_id
+       WHERE pa.customer_id = $1
+         AND pa.chat_id IS NOT NULL
+         AND cc.phone IS NOT NULL
+       ORDER BY pa.created_at DESC
+       LIMIT 1`,
+      [order.customer_id]
+    );
+    if (paRows[0]?.phone && String(paRows[0].phone).replace(/\D/g, "").length >= 10) {
+      return String(paRows[0].phone);
+    }
+  }
+
+  // Prioridad 3: teléfono del cliente registrado en la orden.
   let phone = order.customer_phone;
   if (phone && String(phone).replace(/\D/g, "").length >= 10) return String(phone);
   if (order.customer_id != null) {
@@ -595,14 +615,28 @@ async function applyMatch(order, match, chatId = null) {
       const toPhone = await resolveWaNotifyPhone(order, chatId);
       if (toPhone) {
         const text = buildPaymentConfirmedWaMessage(order, match);
-        await sendWasenderTextMessage({
+        const waResult = await sendWasenderTextMessage({
           apiKey,
           apiBaseUrl,
           to:   `+${String(toPhone).replace(/\D/g, "")}`,
           text,
           messageType: "CRITICAL",
           customerId: order.customer_id != null ? Number(order.customer_id) : undefined,
-        }).catch((e) => log.error({ err: e.message }, "reconciliation: WA notify post-match falló"));
+        }).catch((e) => {
+          log.error({ err: e.message, orderId: order.id }, "reconciliation: WA notify post-match falló");
+          return null;
+        });
+        if (waResult && !waResult.ok) {
+          log.warn({
+            orderId:    order.id,
+            to:         toPhone,
+            chatId,
+            httpStatus: waResult.status,
+            throttled:  waResult.throttled,
+            quiet:      waResult.quiet_hours,
+            blocked:    waResult.reason,
+          }, "reconciliation: WA notify no entregado");
+        }
       } else {
         log.warn({ orderId: order.id, chatId }, "reconciliation: WA notify omitido (sin teléfono)");
       }

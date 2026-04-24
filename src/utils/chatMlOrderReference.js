@@ -35,6 +35,40 @@ async function resolveLinkedMlOrderId(pool, chatId) {
 }
 
 /**
+ * Si `crm_chats.ml_order_id` guardó el PK de `sales_orders` (vínculo bandeja),
+ * devuelve `external_order_id` (id orden en ML) para consultar `ml_orders.order_id`.
+ * Si no aplica, devuelve el mismo string recibido.
+ *
+ * @param {import("pg").Pool} pool
+ * @param {string|number|null|undefined} linkedRaw
+ * @returns {Promise<string>}
+ */
+async function resolveExternalMlOrderIdFromSalesLink(pool, linkedRaw) {
+  const s0 = linkedRaw == null ? "" : String(linkedRaw).trim();
+  if (!s0) return s0;
+  const n = Number(s0);
+  if (!Number.isFinite(n) || n <= 0 || String(n) !== s0) return s0;
+  try {
+    const { rows } = await pool.query(
+      `SELECT external_order_id::text AS eid
+       FROM sales_orders
+       WHERE id = $1::bigint
+         AND external_order_id IS NOT NULL
+         AND btrim(external_order_id::text) <> ''
+       LIMIT 1`,
+      [n]
+    );
+    if (rows.length && rows[0].eid) {
+      const eid = String(rows[0].eid).trim();
+      return eid || s0;
+    }
+  } catch (_e) {
+    /* tabla o columna ausente en entornos viejos */
+  }
+  return s0;
+}
+
+/**
  * Total en Bs. de referencia para conciliación (sin cotización ERP).
  * Orden: ml_orders (VES/USD×tasa) → sales_orders.total_amount_bs → order_total_amount×tasa snapshot o activeRate.
  *
@@ -47,11 +81,24 @@ async function resolveMlOrderReferenceBs(pool, chatId, activeRate) {
   const oid = await resolveLinkedMlOrderId(pool, chatId);
   if (!oid) return { referenceBs: NaN, meta: null, ml_order_id: null };
 
-  const { rows: moR } = await pool.query(
+  let mlKey = String(oid).trim();
+  let { rows: moR } = await pool.query(
     `SELECT total_amount::numeric AS total_amount, currency_id::text AS currency_id
        FROM ml_orders WHERE order_id::text = $1 LIMIT 1`,
-    [oid]
+    [mlKey]
   );
+  if (!moR.length) {
+    const alt = await resolveExternalMlOrderIdFromSalesLink(pool, mlKey);
+    if (alt !== mlKey) {
+      mlKey = alt;
+      const again = await pool.query(
+        `SELECT total_amount::numeric AS total_amount, currency_id::text AS currency_id
+           FROM ml_orders WHERE order_id::text = $1 LIMIT 1`,
+        [mlKey]
+      );
+      moR = again.rows;
+    }
+  }
   if (moR.length) {
     const mo = moR[0];
     const cur = String(mo.currency_id || "").toUpperCase();
@@ -62,11 +109,11 @@ async function resolveMlOrderReferenceBs(pool, chatId, activeRate) {
           referenceBs: ta,
           meta: {
             type: "ml_order",
-            ml_order_id: oid,
+            ml_order_id: mlKey,
             currency_id: cur,
             source: "ml_orders",
           },
-          ml_order_id: oid,
+          ml_order_id: mlKey,
         };
       }
       if ((cur === "USD" || cur === "US$") && Number.isFinite(activeRate) && activeRate > 0) {
@@ -74,11 +121,11 @@ async function resolveMlOrderReferenceBs(pool, chatId, activeRate) {
           referenceBs: ta * activeRate,
           meta: {
             type: "ml_order",
-            ml_order_id: oid,
+            ml_order_id: mlKey,
             currency_id: cur,
             source: "ml_orders",
           },
-          ml_order_id: oid,
+          ml_order_id: mlKey,
         };
       }
     }
@@ -135,5 +182,6 @@ async function resolveMlOrderReferenceBs(pool, chatId, activeRate) {
 
 module.exports = {
   resolveLinkedMlOrderId,
+  resolveExternalMlOrderIdFromSalesLink,
   resolveMlOrderReferenceBs,
 };

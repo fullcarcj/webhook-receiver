@@ -485,6 +485,63 @@ async function mercadoLibrePostJsonForUser(mlUserId, resourcePath, bodyObj) {
   };
 }
 
+/**
+ * Sube un adjunto para mensajería post-venta ML (`POST /messages/attachments`).
+ * Requiere `site_id` (MLA, MLV, …). Respuesta típica: `{ id: "…" }` o `{ filename: "…" }`.
+ * @param {number} mlUserId
+ * @param {{ buffer: Buffer, filename: string, contentType: string, siteId: string }} fileOpts
+ * @returns {Promise<{ ok: boolean, status: number, attachmentId: string|null, data: unknown, rawText: string }>}
+ */
+async function mercadoLibrePostMessageAttachmentForUser(mlUserId, fileOpts) {
+  const token = await getAccessTokenForMlUser(mlUserId);
+  const base = process.env.ML_API_BASE || "https://api.mercadolibre.com";
+  const siteId = String(fileOpts.siteId || "MLV")
+    .trim()
+    .toUpperCase();
+  const filename = String(fileOpts.filename || "adjunto").trim() || "adjunto";
+  const contentType = String(fileOpts.contentType || "application/octet-stream").trim();
+  const buffer = fileOpts.buffer;
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+    return { ok: false, status: 0, attachmentId: null, data: null, rawText: "empty_buffer" };
+  }
+
+  const qs = new URLSearchParams({ tag: "post_sale", site_id: siteId });
+  const path = `/messages/attachments?${qs.toString()}`;
+  const url = `${base}${path.startsWith("/") ? path : `/${path}`}`;
+
+  const BlobCtor = typeof Blob !== "undefined" ? Blob : require("buffer").Blob;
+  const fd = new FormData();
+  const blob = new BlobCtor([buffer], { type: contentType });
+  fd.append("file", blob, filename);
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: fd,
+  });
+  const text = await res.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+  let attachmentId = null;
+  if (data && typeof data === "object") {
+    if (data.id != null) attachmentId = String(data.id);
+    else if (data.filename != null) attachmentId = String(data.filename);
+  }
+  return {
+    ok: res.ok,
+    status: res.status,
+    attachmentId,
+    data,
+    rawText: text,
+  };
+}
+
 readTokenFile();
 if (process.env.OAUTH_REFRESH_TOKEN || process.env.ML_REFRESH_TOKEN) {
   cache.refresh_token =
@@ -581,6 +638,7 @@ module.exports = {
   mercadoLibreGetForUser,
   mercadoLibreFetchForUser,
   mercadoLibrePostJsonForUser,
+  mercadoLibrePostMessageAttachmentForUser,
   normalizeMlResourcePath,
   exchangeAuthorizationCode,
   getTokenStatus,

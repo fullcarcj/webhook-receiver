@@ -48,6 +48,24 @@ const { syncAnsweredMlQuestionToCrm } = require("./src/services/mlInboxBridge");
 /** Intervalo por defecto del poll de reintentos (1 min). */
 const DEFAULT_IA_AUTO_POLL_MS = 60_000;
 
+/**
+ * Preguntas creadas vía `POST /api/inbox/ml-question/artificial`: no deben disparar POST /answers automático.
+ * @param {object} row — fila `ml_questions_pending` o equivalente
+ * @returns {boolean}
+ */
+function isPendingRowArtificialSilent(row) {
+  if (!row) return false;
+  if (row.notification_id === "artificial") return true;
+  const raw = row.ia_auto_route_detail;
+  if (raw == null || String(raw).trim() === "") return false;
+  try {
+    const o = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Boolean(o && o.route === "artificial_silent");
+  } catch (_e) {
+    return String(raw).includes("artificial_silent");
+  }
+}
+
 /** Por defecto: ventana de 30 min desde la creación de la pregunta en ML para aplicar respuesta automática. */
 const DEFAULT_IA_AUTO_PENDING_MAX_AGE_MS = 30 * 60 * 1000;
 
@@ -505,6 +523,10 @@ async function tryQuestionIaAutoAnswer(args) {
   const parsed = args.parsed;
   if (!Number.isFinite(mlUid) || mlUid <= 0 || !pendingRow || !parsed) return { ok: false, skip: "bad_args" };
 
+  if (isPendingRowArtificialSilent(pendingRow)) {
+    return { ok: true, skip: "artificial_silent", ia_outcome: "artificial_silent" };
+  }
+
   const evalAt =
     args.evalAt instanceof Date && !Number.isNaN(args.evalAt.getTime()) ? args.evalAt : new Date();
   const win = getQuestionsIaAutoWindowEvaluation(evalAt);
@@ -738,6 +760,10 @@ async function retryPendingQuestionsIaAuto(opts) {
   const results = [];
   for (const row of rows) {
     const qid = row.ml_question_id;
+    if (isPendingRowArtificialSilent(row)) {
+      results.push({ ml_question_id: qid, skip: "artificial_silent" });
+      continue;
+    }
     if (!isQuestionUnansweredStatus(row.ml_status)) {
       results.push({ ml_question_id: qid, skip: "not_unanswered" });
       continue;

@@ -877,6 +877,28 @@ async function resetAllChatsUnread() {
  * @param {number} chatId
  * @param {boolean} hidden
  */
+/**
+ * Misma lógica que `customer_waiting_reply` en `listInbox` (último mensaje inbound + `marked_attended_at`).
+ * @param {number|string} chatId
+ * @returns {Promise<boolean>}
+ */
+async function getCustomerWaitingReplyForChat(chatId) {
+  const id = Number(chatId);
+  if (!Number.isFinite(id) || id <= 0) return false;
+  try {
+    const { rows } = await pool.query(
+      `SELECT (${PENDING_REPLY_EXPR}) AS customer_waiting_reply
+       FROM crm_chats cc
+       ${JOIN_LAST_MESSAGE}
+       WHERE cc.id = $1`,
+      [id]
+    );
+    return rows[0]?.customer_waiting_reply === true;
+  } catch (_e) {
+    return false;
+  }
+}
+
 async function setSalesChatSalesDefaultHidden(chatId, hidden) {
   const id = Number(chatId);
   if (!Number.isFinite(id) || id <= 0) {
@@ -908,6 +930,7 @@ async function setSalesChatSalesDefaultHidden(chatId, hidden) {
 module.exports = {
   listInbox,
   getInboxCounts,
+  getCustomerWaitingReplyForChat,
   resetAllChatsUnread,
   setSalesChatSalesDefaultHidden,
   FILTERS,

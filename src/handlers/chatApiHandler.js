@@ -13,7 +13,7 @@ const {
   getWaStatus,
   DEFAULT_MESSAGES_PAGE_LIMIT,
 } = require("../services/chatService");
-const { sendChatMessage } = require("../services/chatMessageService");
+const { sendChatMessage, sendChatMessageWithMedia } = require("../services/chatMessageService");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -48,10 +48,10 @@ function writeJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-async function parseJsonBody(req) {
+async function parseJsonBody(req, maxBytes = 256 * 1024) {
   const chunks = [];
   let total = 0;
-  const max = 256 * 1024;
+  const max = Math.max(1024, Math.min(20 * 1024 * 1024, Number(maxBytes) || 256 * 1024));
   for await (const c of req) {
     total += c.length;
     if (total > max) throw new Error("body_too_large");
@@ -112,22 +112,60 @@ async function handleChatApiRequest(req, res, url) {
     if (msgMatch && req.method === "POST") {
       let body;
       try {
-        body = await parseJsonBody(req);
-      } catch (_e) {
+        body = await parseJsonBody(req, 14 * 1024 * 1024);
+      } catch (e) {
+        if (e && e.message === "body_too_large") {
+          writeJson(res, 413, { error: "body_too_large", message: "Cuerpo demasiado grande" });
+          return true;
+        }
         writeJson(res, 400, { error: "invalid_json" });
         return true;
       }
       const text = body && body.text != null ? String(body.text) : "";
-      if (!text.trim()) {
-        writeJson(res, 400, { error: "bad_request", message: "text requerido" });
+      const textTrim = text.trim();
+      const attB64 = body && body.attachment_base64 != null ? String(body.attachment_base64).trim() : "";
+      const attMime = body && body.attachment_mime_type != null ? String(body.attachment_mime_type).trim() : "";
+      const attName =
+        body && body.attachment_file_name != null && String(body.attachment_file_name).trim() !== ""
+          ? String(body.attachment_file_name).trim().slice(0, 220)
+          : "adjunto";
+
+      let attBuf = null;
+      if (attB64) {
+        try {
+          attBuf = Buffer.from(attB64, "base64");
+        } catch (_e) {
+          writeJson(res, 400, { error: "bad_request", message: "attachment_base64 inválido" });
+          return true;
+        }
+        if (!attBuf.length || attBuf.length > 12 * 1024 * 1024) {
+          writeJson(res, 400, { error: "bad_request", message: "Adjunto vacío o demasiado grande (máx. 12 MB)" });
+          return true;
+        }
+      }
+
+      if (!textTrim && !attBuf) {
+        writeJson(res, 400, { error: "bad_request", message: "text o adjunto requerido" });
         return true;
       }
+
       const sentBy =
         body && body.sent_by != null && String(body.sent_by).trim() !== ""
           ? String(body.sent_by).trim()
           : String(user.userId != null ? user.userId : "");
       try {
-        const out = await sendChatMessage(msgMatch[1], text, sentBy);
+        const out = attBuf
+          ? await sendChatMessageWithMedia(
+              msgMatch[1],
+              textTrim,
+              sentBy,
+              {
+                buffer: attBuf,
+                mimeType: attMime.split(";")[0].trim() || "application/octet-stream",
+                fileName: attName,
+              }
+            )
+          : await sendChatMessage(msgMatch[1], text, sentBy);
         writeJson(res, 200, out);
       } catch (e) {
         if (e && e.code === "BAD_REQUEST") {

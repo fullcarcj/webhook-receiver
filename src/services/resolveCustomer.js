@@ -35,6 +35,8 @@ const identitySchema = z.object({
       id_type: z.string().optional(),
       id_number: z.string().optional(),
       ml_buyer_id: z.union([z.string(), z.number()]).optional(),
+      /** Solo ML: permite sobrescribir `full_name` aunque ya hubiera nickname u otro texto corto. */
+      ml_replace_full_name: z.boolean().optional(),
       company_id: z.coerce.number().int().positive().optional(),
     })
     .optional()
@@ -120,11 +122,18 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
   const name = resolved && String(resolved).trim() ? String(resolved).trim() : null;
   const email = data.email ? String(data.email).toLowerCase().trim() : null;
   const hasP2 = await customersHasPhone2Column(db);
+  const forceMlFullName =
+    source === "mercadolibre" &&
+    data.ml_replace_full_name === true &&
+    name != null &&
+    String(name).trim() !== "";
 
   if (hasP2) {
     await db.query(
       `UPDATE customers SET
          full_name = CASE
+           WHEN $8::boolean IS TRUE AND $2::text IS NOT NULL AND TRIM($2::text) <> ''
+             THEN TRIM($2::text)
            WHEN $2::text IS NOT NULL AND full_name LIKE 'WA-%' AND $2::text NOT LIKE 'WA-%'
              THEN $2::text
            WHEN $2::text IS NOT NULL AND TRIM(full_name) = 'Cliente WhatsApp' AND NOT ($2::text LIKE 'WA-%')
@@ -150,12 +159,15 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
         email,
         data.id_type ?? null,
         data.id_number ?? null,
+        forceMlFullName,
       ]
     );
   } else {
     await db.query(
       `UPDATE customers SET
          full_name = CASE
+           WHEN $7::boolean IS TRUE AND $2::text IS NOT NULL AND TRIM($2::text) <> ''
+             THEN TRIM($2::text)
            WHEN $2::text IS NOT NULL AND full_name LIKE 'WA-%' AND $2::text NOT LIKE 'WA-%'
              THEN $2::text
            WHEN $2::text IS NOT NULL AND TRIM(full_name) = 'Cliente WhatsApp' AND NOT ($2::text LIKE 'WA-%')
@@ -172,7 +184,15 @@ async function enrichCustomer(db, customerId, data, normalizedPhone, normalizedP
          id_number = COALESCE(NULLIF(TRIM(id_number), ''), $6::text),
          updated_at = NOW()
        WHERE id = $1`,
-      [customerId, name, normalizedPhone, email, data.id_type ?? null, data.id_number ?? null]
+      [
+        customerId,
+        name,
+        normalizedPhone,
+        email,
+        data.id_type ?? null,
+        data.id_number ?? null,
+        forceMlFullName,
+      ]
     );
   }
 }

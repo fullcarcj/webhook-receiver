@@ -3,7 +3,7 @@
 const crypto = require("crypto");
 const pino = require("pino");
 const { pool } = require("../../db");
-const { mercadoLibrePostJsonForUser } = require("../../oauth-token");
+const { mercadoLibrePostJsonForUser, mercadoLibrePostMessageAttachmentForUser } = require("../../oauth-token");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const {
@@ -62,10 +62,10 @@ function writeJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-async function parseJsonBodyInbox(req) {
+async function parseJsonBodyInbox(req, maxBytes = 512 * 1024) {
   const chunks = [];
   let total = 0;
-  const max = 512 * 1024;
+  const max = Math.max(1024, Math.min(20 * 1024 * 1024, Number(maxBytes) || 512 * 1024));
   for await (const c of req) {
     total += c.length;
     if (total > max) throw new Error("body_too_large");
@@ -74,6 +74,26 @@ async function parseJsonBodyInbox(req) {
   const txt = Buffer.concat(chunks).toString("utf8");
   if (!txt.trim()) return {};
   return JSON.parse(txt);
+}
+
+const ML_REPLY_ATTACHMENT_MIMES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "application/pdf",
+  "text/plain",
+]);
+
+function mlSiteIdFromOrderRawJson(rawJson) {
+  const env = process.env.ML_MESSAGES_SITE_ID || process.env.ML_DEFAULT_SITE_ID;
+  if (env != null && String(env).trim() !== "") return String(env).trim().toUpperCase();
+  try {
+    const o = typeof rawJson === "string" ? JSON.parse(rawJson) : rawJson;
+    if (o && o.site_id != null && String(o.site_id).trim() !== "") return String(o.site_id).trim().toUpperCase();
+  } catch (_e) {
+    /* ignore */
+  }
+  return "MLV";
 }
 
 /**
@@ -727,20 +747,59 @@ async function handleInboxApiRequest(req, res, url) {
 
       let body;
       try {
-        body = await parseJsonBodyInbox(req);
-      } catch (_e) {
+        body = await parseJsonBodyInbox(req, 14 * 1024 * 1024);
+      } catch (e) {
+        if (e && e.message === "body_too_large") {
+          writeJson(res, 413, { code: "BODY_TOO_LARGE", message: "El cuerpo supera el tamaño máximo permitido" });
+          return true;
+        }
         writeJson(res, 400, { error: "invalid_json" });
         return true;
       }
 
+      const attB64 = body && body.attachment_base64 != null ? String(body.attachment_base64).trim() : "";
+      const attMimeRaw = body && body.attachment_mime_type != null ? String(body.attachment_mime_type).trim() : "";
+      const attMime = attMimeRaw.split(";")[0].trim().toLowerCase();
+      const attName =
+        body && body.attachment_file_name != null && String(body.attachment_file_name).trim() !== ""
+          ? String(body.attachment_file_name).trim().slice(0, 220)
+          : "adjunto";
+
+      let attBuffer = null;
+      if (attB64) {
+        try {
+          attBuffer = Buffer.from(attB64, "base64");
+        } catch (_e) {
+          writeJson(res, 400, { code: "BAD_ATTACHMENT", message: "attachment_base64 inválido" });
+          return true;
+        }
+        if (!attBuffer.length || attBuffer.length > 12 * 1024 * 1024) {
+          writeJson(res, 400, {
+            code: "BAD_ATTACHMENT",
+            message: "Adjunto vacío o demasiado grande (máx. 12 MB)",
+          });
+          return true;
+        }
+        if (!ML_REPLY_ATTACHMENT_MIMES.has(attMime)) {
+          writeJson(res, 400, {
+            code: "BAD_ATTACHMENT",
+            message: "Tipo de archivo no permitido en ML (use JPG, PNG, PDF o TXT)",
+          });
+          return true;
+        }
+      }
+
       const rawText = body && body.text != null ? String(body.text) : "";
-      const text = rawText.trim();
-      if (!text) {
+      let text = rawText.trim();
+      if (!text && !attBuffer) {
         writeJson(res, 400, {
           code: "MISSING_TEXT",
-          message: "El texto de respuesta es requerido",
+          message: "Indicá un mensaje o un adjunto",
         });
         return true;
+      }
+      if (!text && attBuffer) {
+        text = `📎 ${attName}`.slice(0, 350);
       }
       if (text.length > 350) {
         writeJson(res, 400, {
@@ -832,12 +891,42 @@ async function handleInboxApiRequest(req, res, url) {
       });
       const path = `/messages/packs/${mlOrderId}/sellers/${mlUserResolved}?${q.toString()}`;
 
-      const mlRes = await mercadoLibrePostJsonForUser(mlUserResolved, path, {
+      let mlAttachmentIds = [];
+      if (attBuffer) {
+        const { rows: ordSiteRows } = await pool.query(
+          `SELECT raw_json FROM ml_orders WHERE order_id = $1 ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT 1`,
+          [mlOrderId]
+        );
+        const siteId = mlSiteIdFromOrderRawJson(ordSiteRows[0] && ordSiteRows[0].raw_json);
+        const upAtt = await mercadoLibrePostMessageAttachmentForUser(mlUserResolved, {
+          buffer: attBuffer,
+          filename: attName,
+          contentType: attMime,
+          siteId,
+        });
+        if (!upAtt.ok || !upAtt.attachmentId) {
+          console.error("[inbox/ml-reply] attachment upload failed", upAtt);
+          writeJson(res, 502, {
+            code: "ML_ATTACHMENT_FAILED",
+            message: "Mercado Libre rechazó la subida del adjunto",
+            ml_status: upAtt.status,
+          });
+          return true;
+        }
+        mlAttachmentIds = [upAtt.attachmentId];
+      }
+
+      const mlPayload = {
         from: { user_id: mlUserResolved },
         to: { user_id: mlBuyerId },
         option_id: "OTHER",
         text,
-      });
+      };
+      if (mlAttachmentIds.length) {
+        mlPayload.attachments = mlAttachmentIds;
+      }
+
+      const mlRes = await mercadoLibrePostJsonForUser(mlUserResolved, path, mlPayload);
 
       const okHttp = mlRes.ok && (mlRes.status === 200 || mlRes.status === 201);
       if (!okHttp) {
@@ -853,16 +942,22 @@ async function handleInboxApiRequest(req, res, url) {
       const extId = `ml_reply_${chatId}_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`;
       const sentBy = answeredBy || "agent";
 
+      const contentOut = {
+        text,
+        ...(mlAttachmentIds.length ? { ml_attachments: mlAttachmentIds, attachment_file_name: attName } : {}),
+      };
+      const msgType = mlAttachmentIds.length && attMime.startsWith("image/") ? "image" : "text";
+
       await pool.query(
         `INSERT INTO crm_messages (
            chat_id, external_message_id, direction, type, content,
            sent_by, is_read, created_at
          ) VALUES (
-           $1, $2, 'outbound', 'text', $3::jsonb,
+           $1, $2, 'outbound', $5, $3::jsonb,
            $4, true, NOW()
          )
          ON CONFLICT (external_message_id) DO NOTHING`,
-        [chatId, extId, JSON.stringify({ text }), sentBy]
+        [chatId, extId, JSON.stringify(contentOut), sentBy, msgType]
       );
 
       await pool.query(
@@ -871,7 +966,7 @@ async function handleInboxApiRequest(req, res, url) {
            last_message_at = NOW(),
            updated_at = NOW()
          WHERE id = $2`,
-        [text, chatId]
+        [text.slice(0, 5000), chatId]
       );
 
       writeJson(res, 200, {
@@ -879,6 +974,7 @@ async function handleInboxApiRequest(req, res, url) {
         chat_id: chatId,
         ml_order_id: mlOrderId,
         text,
+        attachments: mlAttachmentIds.length ? mlAttachmentIds : undefined,
       });
       return true;
     }

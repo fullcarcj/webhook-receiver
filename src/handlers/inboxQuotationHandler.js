@@ -3,6 +3,8 @@
 /**
  * Cotizaciones inbox → inventario_presupuesto / inventario_detallepresupuesto.
  *
+ * POST /api/inbox/:chatId/quotations/from-ml-order — borrador CH-3 desde orden ML vinculada (tasas con getTodayRate).
+ *
  * POST /api/inbox/quotations — ítems:
  *   - `precio_unitario` (USD) cuando la UI cotiza en dólares.
  *   - `precio_unitario_bs` (Bs por unidad) cuando la UI cotiza en bolívares; se convierte a USD con `binance_rate` de getTodayRate(company_id).
@@ -24,6 +26,11 @@ const quotationPaymentSettlementService = require("../services/quotationPaymentS
 const { pool } = require("../../db");
 const { sendChatMessage } = require("../services/chatMessageService");
 const { getTodayRate } = require("../services/currencyService");
+const {
+  resolveLinkedMlOrderId,
+  resolveExternalMlOrderIdFromSalesLink,
+} = require("../utils/chatMlOrderReference");
+const { parseOrderItems, resolveProductSku } = require("./inboxMlOrderHandler");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -137,6 +144,94 @@ function sqlReferenceExpr(alias = "p") {
     WHEN ${alias}.channel_id = 3 THEN 'COT-ML-' || ${alias}.id::text
     ELSE 'COT-' || ${alias}.id::text
   END)`;
+}
+
+/**
+ * INSERT inventario_presupuesto + líneas dentro de una transacción abierta en `client`.
+ * @param {import("pg").PoolClient} client
+ * @param {object} params
+ */
+async function insertPresupuestoDraft(client, params) {
+  const {
+    fechaVencimiento,
+    total,
+    observaciones,
+    clienteId,
+    createdBy,
+    chatId,
+    channelId,
+    lines,
+  } = params;
+  const ins = await client.query(
+    `INSERT INTO inventario_presupuesto (
+       fecha_creacion,
+       fecha_vencimiento,
+       total,
+       observaciones,
+       status,
+       cliente_id,
+       vendedor_id,
+       venta_id,
+       chat_id,
+       channel_id,
+       created_by,
+       updated_at
+     ) VALUES (
+       NOW(),
+       COALESCE($1::date, (CURRENT_TIMESTAMP + interval '48 hours')::date),
+       $2,
+       $3,
+       $4,
+       $5,
+       $6,
+       NULL,
+       $7,
+       $8,
+       $9,
+       NOW()
+     )
+     RETURNING id`,
+    [
+      fechaVencimiento,
+      total,
+      observaciones,
+      STATUS_DRAFT,
+      clienteId,
+      createdBy,
+      Number.isFinite(chatId) && chatId > 0 ? chatId : null,
+      Number.isFinite(channelId) && channelId > 0 ? channelId : null,
+      createdBy,
+    ]
+  );
+  const presupuestoId = ins.rows[0].id;
+  for (const L of lines) {
+    await client.query(
+      `INSERT INTO inventario_detallepresupuesto (
+         cantidad, precio_unitario, subtotal, producto_id, presupuesto_id
+       ) VALUES ($1, $2, $3, $4, $5)`,
+      [L.cantidad, L.precio_unitario, L.subtotal, L.producto_id, presupuestoId]
+    );
+  }
+  return presupuestoId;
+}
+
+async function resolveActiveProductoIdFromMlSkuRow(prodSkuRow) {
+  if (!prodSkuRow || !prodSkuRow.product_sku) return null;
+  if (prodSkuRow.product_id != null) {
+    const pid = Number(prodSkuRow.product_id);
+    if (Number.isFinite(pid) && pid > 0) {
+      const { rows } = await pool.query(
+        `SELECT id FROM products WHERE id = $1 AND is_active = true LIMIT 1`,
+        [pid]
+      );
+      if (rows.length) return Number(rows[0].id);
+    }
+  }
+  const { rows } = await pool.query(
+    `SELECT id FROM products WHERE sku = $1 AND is_active = true LIMIT 1`,
+    [prodSkuRow.product_sku]
+  );
+  return rows[0]?.id != null ? Number(rows[0].id) : null;
 }
 
 /**
@@ -549,6 +644,8 @@ function formatSendMessage(row, reference, items, rateRow = null) {
  */
 async function handleInboxQuotationRequest(req, res, url) {
   const pathname = normalizePath(url.pathname || "");
+  const isFromMlOrderPost =
+    req.method === "POST" && /^\/api\/inbox\/\d+\/quotations\/from-ml-order$/.test(pathname);
   const isQuotations = pathname.startsWith("/api/inbox/quotations");
   const isPaymentAttemptsGet = req.method === "GET" && pathname === "/api/inbox/payment-attempts";
   const isPaymentAttemptsLink =
@@ -560,7 +657,14 @@ async function handleInboxQuotationRequest(req, res, url) {
   const isAllocationsGet =
     req.method === "GET" &&
     /^\/api\/inbox\/quotations\/\d+\/allocations$/.test(pathname);
-  if (!isQuotations && !isPaymentAttemptsGet && !isPaymentAttemptsLink && !isPaymentAllocApproveUsd && !isAllocationsGet) {
+  if (
+    !isQuotations &&
+    !isPaymentAttemptsGet &&
+    !isPaymentAttemptsLink &&
+    !isPaymentAllocApproveUsd &&
+    !isAllocationsGet &&
+    !isFromMlOrderPost
+  ) {
     return false;
   }
 
@@ -793,6 +897,277 @@ async function handleInboxQuotationRequest(req, res, url) {
   const isDev = process.env.NODE_ENV !== "production";
 
   try {
+    const fromMlMatch = pathname.match(/^\/api\/inbox\/(\d+)\/quotations\/from-ml-order$/);
+    if (fromMlMatch && req.method === "POST") {
+      const chatIdNum = Number(fromMlMatch[1]);
+      if (!Number.isFinite(chatIdNum) || chatIdNum <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "chat_id inválido" });
+        return true;
+      }
+      let bodyFromMl = {};
+      try {
+        bodyFromMl = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const companyIdRateFm =
+        bodyFromMl.company_id != null && String(bodyFromMl.company_id).trim() !== ""
+          ? Number(bodyFromMl.company_id)
+          : 1;
+      const cidRateFm =
+        Number.isFinite(companyIdRateFm) && companyIdRateFm > 0 ? companyIdRateFm : 1;
+
+      const { rows: chatRowsFm } = await pool.query(
+        `SELECT id, customer_id FROM crm_chats WHERE id = $1 LIMIT 1`,
+        [chatIdNum]
+      );
+      if (!chatRowsFm.length) {
+        writeJson(res, 404, { error: "not_found", message: "Chat no encontrado" });
+        return true;
+      }
+      const clienteIdFm =
+        chatRowsFm[0].customer_id != null ? Number(chatRowsFm[0].customer_id) : NaN;
+      if (!Number.isFinite(clienteIdFm) || clienteIdFm <= 0) {
+        writeJson(res, 400, {
+          error:   "no_customer",
+          message: "Vinculá un cliente al chat antes de generar la cotización.",
+        });
+        return true;
+      }
+
+      const mlOrderIdFm = await resolveLinkedMlOrderId(pool, chatIdNum);
+      if (mlOrderIdFm == null) {
+        writeJson(res, 400, {
+          error:   "no_ml_order",
+          message: "No hay orden de Mercado Libre vinculada a este chat.",
+        });
+        return true;
+      }
+
+      let lookupKeyFm = String(mlOrderIdFm).trim();
+      let { rows: orderRowsFm } = await pool.query(
+        `SELECT order_id, raw_json FROM ml_orders WHERE order_id = $1 LIMIT 1`,
+        [lookupKeyFm]
+      );
+      if (!orderRowsFm.length) {
+        const altFm = await resolveExternalMlOrderIdFromSalesLink(pool, lookupKeyFm);
+        if (altFm !== lookupKeyFm) {
+          lookupKeyFm = altFm;
+          const againFm = await pool.query(
+            `SELECT order_id, raw_json FROM ml_orders WHERE order_id = $1 LIMIT 1`,
+            [lookupKeyFm]
+          );
+          orderRowsFm = againFm.rows;
+        }
+      }
+      if (!orderRowsFm.length || orderRowsFm[0].raw_json == null) {
+        writeJson(res, 409, {
+          error:   "order_not_synced",
+          message:
+            "La orden ML no está sincronizada en el servidor (sin detalle). Sincronizá órdenes e intentá de nuevo.",
+        });
+        return true;
+      }
+
+      let rateRowFm = null;
+      try {
+        rateRowFm = await getTodayRate(cidRateFm);
+      } catch (_e) {
+        rateRowFm = null;
+      }
+
+      const warnPctFm = (() => {
+        const n = Number(process.env.ML_QUOTE_FROM_ML_PRICE_WARN_PCT);
+        return Number.isFinite(n) && n >= 0 && n <= 50 ? n : 2;
+      })();
+
+      const rawItemsFm = parseOrderItems(orderRowsFm[0].raw_json);
+      if (!rawItemsFm.length) {
+        writeJson(res, 422, {
+          error:   "no_items",
+          message: "La orden no tiene ítems en el JSON sincronizado.",
+        });
+        return true;
+      }
+
+      const warningsFm = [];
+      const skippedFm = [];
+      const linesFm = [];
+
+      for (const it of rawItemsFm) {
+        const prodSkuRow = await resolveProductSku(
+          it.ml_item_id,
+          it.variation_id,
+          it.seller_sku
+        );
+        if (!prodSkuRow || !prodSkuRow.product_sku) {
+          skippedFm.push({
+            ml_item_id: it.ml_item_id,
+            seller_sku: it.seller_sku,
+            reason:       "product_not_mapped",
+          });
+          continue;
+        }
+        const productIdFm = await resolveActiveProductoIdFromMlSkuRow(prodSkuRow);
+        if (!productIdFm) {
+          skippedFm.push({
+            ml_item_id: it.ml_item_id,
+            seller_sku: it.seller_sku,
+            reason:       "product_inactive_or_missing",
+          });
+          continue;
+        }
+
+        const qtyRaw = it.quantity != null ? Number(it.quantity) : NaN;
+        const cantidadFm = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+        const curFm = it.currency_id ? String(it.currency_id).toUpperCase() : "";
+
+        let itemForUsdFm = {};
+        if (curFm === "VES") {
+          const up = it.unit_price != null ? Number(it.unit_price) : NaN;
+          if (!Number.isFinite(up) || up < 0) {
+            skippedFm.push({ ml_item_id: it.ml_item_id, reason: "invalid_unit_price" });
+            continue;
+          }
+          itemForUsdFm = { precio_unitario_bs: up };
+          const binFm = rateRowFm ? Number(rateRowFm.binance_rate) : NaN;
+          const catalogUsdFm =
+            prodSkuRow.price_usd != null ? Number(prodSkuRow.price_usd) : NaN;
+          if (Number.isFinite(binFm) && binFm > 0 && Number.isFinite(catalogUsdFm) && catalogUsdFm > 0) {
+            const expectedBsFm = Math.round(catalogUsdFm * binFm * 100) / 100;
+            const mlBsFm = up;
+            if (expectedBsFm > 0 && Number.isFinite(mlBsFm)) {
+              const diffPctFm = (Math.abs(mlBsFm - expectedBsFm) / expectedBsFm) * 100;
+              if (diffPctFm > warnPctFm) {
+                warningsFm.push({
+                  code:                     "ml_price_vs_catalog_bs",
+                  ml_item_id:               it.ml_item_id,
+                  seller_sku:               it.seller_sku,
+                  ml_unit_price_bs:         mlBsFm,
+                  expected_from_catalog_bs: expectedBsFm,
+                  diff_pct:                 Math.round(diffPctFm * 100) / 100,
+                  binance_rate:             binFm,
+                });
+              }
+            }
+          }
+        } else if (curFm === "USD" || curFm === "") {
+          itemForUsdFm = { precio_unitario: Number(it.unit_price) };
+        } else {
+          warningsFm.push({
+            code:        "currency_assumed_usd",
+            ml_item_id:  it.ml_item_id,
+            currency_id: curFm,
+          });
+          itemForUsdFm = { precio_unitario: Number(it.unit_price) };
+        }
+
+        const resolvedFm = resolveQuotationLineUnitUsd(itemForUsdFm, rateRowFm);
+        if (resolvedFm.error) {
+          skippedFm.push({
+            ml_item_id: it.ml_item_id,
+            reason:     resolvedFm.error,
+            detail:     resolvedFm.detail || null,
+          });
+          continue;
+        }
+        const puFm = resolvedFm.pu;
+        const subtotalFm = Math.round(cantidadFm * puFm * 100) / 100;
+        linesFm.push({
+          producto_id:      productIdFm,
+          cantidad:         cantidadFm,
+          precio_unitario:  puFm,
+          subtotal:         subtotalFm,
+        });
+      }
+
+      if (!linesFm.length) {
+        writeJson(res, 422, {
+          error:    "no_line_items",
+          message:  "No se pudo armar ninguna línea: mapeá los productos o revisá precios/tasas.",
+          skipped:  skippedFm,
+          warnings: warningsFm,
+        });
+        return true;
+      }
+
+      const uniqFm = [...new Set(linesFm.map((L) => L.producto_id))];
+      const chkFm = await pool.query(
+        `SELECT id FROM products
+         WHERE id = ANY($1::bigint[]) AND is_active = true`,
+        [uniqFm]
+      );
+      if (chkFm.rows.length !== uniqFm.length) {
+        writeJson(res, 400, {
+          error:   "bad_request",
+          message: "Uno o más productos no existen o no están activos.",
+        });
+        return true;
+      }
+
+      const totalFm = linesFm.reduce((acc, L) => acc + L.subtotal, 0);
+      const observacionesFm = `Generada desde orden ML ${mlOrderIdFm}.`;
+      const createdByBodyFm =
+        bodyFromMl.created_by != null && bodyFromMl.created_by !== ""
+          ? Number(bodyFromMl.created_by)
+          : null;
+      const uidFm = user.userId != null ? Number(user.userId) : NaN;
+      const createdByFm =
+        Number.isFinite(createdByBodyFm) && createdByBodyFm > 0
+          ? createdByBodyFm
+          : Number.isFinite(uidFm) && uidFm > 0
+            ? uidFm
+            : null;
+
+      const channelIdFm = 3;
+      let presupuestoIdFm;
+      const clientFm = await pool.connect();
+      try {
+        await clientFm.query("BEGIN");
+        presupuestoIdFm = await insertPresupuestoDraft(clientFm, {
+          fechaVencimiento: null,
+          total:            totalFm,
+          observaciones:    observacionesFm,
+          clienteId:        clienteIdFm,
+          createdBy:        createdByFm,
+          chatId:           chatIdNum,
+          channelId:        channelIdFm,
+          lines:            linesFm,
+        });
+        await clientFm.query("COMMIT");
+      } catch (e) {
+        await clientFm.query("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        clientFm.release();
+      }
+
+      const detFm = await pool.query(
+        `SELECT id, cantidad, precio_unitario, subtotal, producto_id
+         FROM inventario_detallepresupuesto
+         WHERE presupuesto_id = $1
+         ORDER BY id`,
+        [presupuestoIdFm]
+      );
+      const headResFm = await pool.query(
+        `SELECT id, fecha_creacion, fecha_vencimiento, total, status,
+           cliente_id, chat_id, channel_id, created_by, observaciones
+         FROM inventario_presupuesto WHERE id = $1`,
+        [presupuestoIdFm]
+      );
+      const headerFm = headResFm.rows[0];
+      const referenceFm = buildReference(headerFm.channel_id, presupuestoIdFm);
+      writeJson(res, 201, {
+        ok:          true,
+        presupuesto: { ...headerFm, reference: referenceFm },
+        items:       detFm.rows,
+        warnings:    warningsFm,
+        skipped:     skippedFm,
+      });
+      return true;
+    }
+
     const sendMatch = pathname.match(/^\/api\/inbox\/quotations\/(\d+)\/send$/);
     if (sendMatch && req.method === "POST") {
       const presupuestoId = Number(sendMatch[1]);
@@ -989,56 +1364,16 @@ async function handleInboxQuotationRequest(req, res, url) {
       let presupuestoId;
       try {
         await client.query("BEGIN");
-        const ins = await client.query(
-          `INSERT INTO inventario_presupuesto (
-             fecha_creacion,
-             fecha_vencimiento,
-             total,
-             observaciones,
-             status,
-             cliente_id,
-             vendedor_id,
-             venta_id,
-             chat_id,
-             channel_id,
-             created_by,
-             updated_at
-           ) VALUES (
-             NOW(),
-             COALESCE($1::date, (CURRENT_TIMESTAMP + interval '48 hours')::date),
-             $2,
-             $3,
-             $4,
-             $5,
-             $6,
-             NULL,
-             $7,
-             $8,
-             $9,
-             NOW()
-           )
-           RETURNING id`,
-          [
-            fechaVencimiento,
-            total,
-            observaciones,
-            STATUS_DRAFT,
-            clienteId,
-            createdBy,
-            Number.isFinite(chatId) && chatId > 0 ? chatId : null,
-            Number.isFinite(channelId) && channelId > 0 ? channelId : null,
-            createdBy,
-          ]
-        );
-        presupuestoId = ins.rows[0].id;
-        for (const L of lines) {
-          await client.query(
-            `INSERT INTO inventario_detallepresupuesto (
-               cantidad, precio_unitario, subtotal, producto_id, presupuesto_id
-             ) VALUES ($1, $2, $3, $4, $5)`,
-            [L.cantidad, L.precio_unitario, L.subtotal, L.producto_id, presupuestoId]
-          );
-        }
+        presupuestoId = await insertPresupuestoDraft(client, {
+          fechaVencimiento,
+          total,
+          observaciones,
+          clienteId,
+          createdBy,
+          chatId,
+          channelId,
+          lines,
+        });
         await client.query("COMMIT");
       } catch (e) {
         await client.query("ROLLBACK").catch(() => {});

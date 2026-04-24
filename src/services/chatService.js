@@ -2,6 +2,7 @@
 
 const { pool } = require("../../db");
 const { CustomerModel, rowToCustomerApi, mapSchemaError } = require("./crmIdentityService");
+const inboxService = require("./inboxService");
 
 /** Límite por defecto al listar mensajes (primera página / scroll); máximo 200 en handler. */
 const DEFAULT_MESSAGES_PAGE_LIMIT = 30;
@@ -232,12 +233,7 @@ async function getChatContext(chatId) {
       }
     }
 
-    const chatOut =
-      resolvedCustomerId != null
-        ? { ...chat, customer_id: resolvedCustomerId }
-        : { ...chat };
-
-    const [mlQuestionAnswered, quoteIq] = await Promise.all([
+    const [mlQuestionAnswered, quoteIq, customer_waiting_reply] = await Promise.all([
       chat.source_type === "ml_question" && chat.ml_question_id
         ? isMlQuestionAnswered(chat.ml_question_id)
         : Promise.resolve(false),
@@ -251,7 +247,15 @@ async function getChatContext(chatId) {
           [id]
         )
         .catch(() => ({ rows: [] })),
+      inboxService.getCustomerWaitingReplyForChat(id),
     ]);
+
+    const chatOut = {
+      ...(resolvedCustomerId != null
+        ? { ...chat, customer_id: resolvedCustomerId }
+        : { ...chat }),
+      customer_waiting_reply: customer_waiting_reply === true,
+    };
     const quoteStatus = quoteIq.rows?.[0]?.quote_status ?? null;
 
     const chat_stage = computeChatStage(chat, order, {

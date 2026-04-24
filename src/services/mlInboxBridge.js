@@ -23,9 +23,11 @@ function parseTs(v) {
 /**
  * @param {object} questionRow — fila alineada a ml_questions_pending (buildQuestionPendingRow)
  * @param {import('pg').PoolClient|null} [client]
+ * @param {{ silent?: boolean }} [ingestOpts] — `silent`: sin `applyInboundOmnichannelHook` (no SSE/sonido/reapertura) y sin subir `unread_count`
  * @returns {Promise<{ chatId: number|null, isNew: boolean }>}
  */
-async function upsertMlQuestionChat(questionRow, client) {
+async function upsertMlQuestionChat(questionRow, client, ingestOpts = {}) {
+  const silent = Boolean(ingestOpts && ingestOpts.silent);
   // Whitelist operativo: si el número del comprador está en la lista, ignorar
   if (questionRow && questionRow.buyer_phone) {
     const { isPhoneWhitelisted } = require("../handlers/inboxWhitelistHandler");
@@ -61,11 +63,17 @@ async function upsertMlQuestionChat(questionRow, client) {
       `UPDATE crm_chats SET
          last_message_text = $2,
          last_message_at = $3::timestamptz,
-         unread_count = crm_chats.unread_count + 1,
+         unread_count = CASE WHEN $5::boolean THEN crm_chats.unread_count ELSE crm_chats.unread_count + 1 END,
          ml_buyer_id = COALESCE($4::bigint, ml_buyer_id),
          updated_at = NOW()
        WHERE id = $1`,
-      [chatId, qtext, lastAt, Number.isFinite(buyerId) && buyerId > 0 ? buyerId : null]
+      [
+        chatId,
+        qtext,
+        lastAt,
+        Number.isFinite(buyerId) && buyerId > 0 ? buyerId : null,
+        silent,
+      ]
     );
   } else {
     isNew = true;
@@ -91,7 +99,7 @@ async function upsertMlQuestionChat(questionRow, client) {
          $3,
          $4,
          $5::timestamptz,
-         1,
+         CASE WHEN $6::boolean THEN 0 ELSE 1 END,
          'unknown',
          'text',
          NOW(),
@@ -104,6 +112,7 @@ async function upsertMlQuestionChat(questionRow, client) {
         Number.isFinite(buyerId) && buyerId > 0 ? buyerId : null,
         qtext,
         lastAt,
+        silent,
       ]
     );
     chatId = Number(ins.rows[0].id);
@@ -122,7 +131,7 @@ async function upsertMlQuestionChat(questionRow, client) {
   );
 
   // Bloque 1 · Motor omnicanal — inbound (omnichannelInboundHook)
-  if (insQ.rowCount > 0) {
+  if (insQ.rowCount > 0 && !silent) {
     await applyInboundOmnichannelHook(db, chatId, {
       sourceType: "ml_question",
       previewText: qtext,

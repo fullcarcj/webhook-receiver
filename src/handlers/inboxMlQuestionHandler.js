@@ -4,7 +4,8 @@ const crypto = require("crypto");
 const pino = require("pino");
 const { applyCrmApiCorsHeaders } = require("../middleware/crmApiCors");
 const { requireAdminOrPermission } = require("../utils/authMiddleware");
-const { pool, upsertMlListing } = require("../../db");
+const { pool, upsertMlListing, upsertMlQuestionPending } = require("../../db");
+const { upsertMlQuestionChat } = require("../services/mlInboxBridge");
 const { mercadoLibrePostJsonForUser, mercadoLibreFetchForUser } = require("../../oauth-token");
 const { listingRowFromMlItemApi } = require("../../ml-listing-map");
 
@@ -78,13 +79,16 @@ function computeResponseTimeSec(createdAtText) {
 /**
  * GET /api/inbox/:chatId/ml-question
  * POST /api/inbox/:chatId/ml-question/answer
+ * POST /api/inbox/ml-question/artificial — pregunta de prueba en BD + CRM sin SSE ni sonido (ingesta silenciosa)
  * @returns {Promise<boolean>}
  */
 async function handleInboxMlQuestionRequest(req, res, url) {
   const pathname = normalizePath(url.pathname || "");
+  const isArtificial = pathname === "/api/inbox/ml-question/artificial";
+
   const mGet = pathname.match(/^\/api\/inbox\/(\d+)\/ml-question$/);
   const mPost = pathname.match(/^\/api\/inbox\/(\d+)\/ml-question\/answer$/);
-  if (!mGet && !mPost) return false;
+  if (!isArtificial && !mGet && !mPost) return false;
 
   applyCrmApiCorsHeaders(req, res);
 
@@ -96,6 +100,106 @@ async function handleInboxMlQuestionRequest(req, res, url) {
 
   const user = await requireAdminOrPermission(req, res, "crm");
   if (!user) return true;
+
+  if (isArtificial) {
+    if (req.method !== "POST") {
+      writeJson(res, 405, { error: "method_not_allowed" });
+      return true;
+    }
+    let body;
+    try {
+      body = await parseJsonBody(req);
+    } catch (_e) {
+      writeJson(res, 400, { error: "invalid_json" });
+      return true;
+    }
+    const mlQuestionId = Number(body.ml_question_id);
+    const mlUserId = Number(body.ml_user_id);
+    if (!Number.isFinite(mlQuestionId) || mlQuestionId <= 0) {
+      writeJson(res, 400, { error: "bad_request", message: "ml_question_id entero positivo requerido" });
+      return true;
+    }
+    if (!Number.isFinite(mlUserId) || mlUserId <= 0) {
+      writeJson(res, 400, { error: "bad_request", message: "ml_user_id entero positivo requerido" });
+      return true;
+    }
+    const questionText =
+      body.question_text != null && String(body.question_text).trim() !== ""
+        ? String(body.question_text).trim()
+        : "Pregunta artificial (sin aviso en vivo).";
+    const itemId =
+      body.item_id != null && String(body.item_id).trim() !== ""
+        ? String(body.item_id).trim()
+        : null;
+    const buyerIdRaw = body.buyer_id;
+    const buyerId =
+      buyerIdRaw != null && String(buyerIdRaw).trim() !== "" && Number.isFinite(Number(buyerIdRaw))
+        ? Number(buyerIdRaw)
+        : null;
+    const dateCreated =
+      body.date_created != null && String(body.date_created).trim() !== ""
+        ? String(body.date_created).trim()
+        : new Date().toISOString();
+    const createdBy =
+      user.id != null
+        ? `user_id:${user.id}`
+        : user.username != null
+          ? String(user.username)
+          : user.email != null
+            ? String(user.email)
+            : "unknown";
+    const iaDetail = JSON.stringify({
+      route: "artificial_silent",
+      human:
+        "Ingreso vía POST /api/inbox/ml-question/artificial: sin broadcast SSE, unread_count sin incremento por ingesta, excluida de IA automática POST /answers.",
+      created_by: createdBy,
+      created_at_utc: new Date().toISOString(),
+    });
+    const pendingRow = {
+      ml_question_id: mlQuestionId,
+      ml_user_id: mlUserId,
+      item_id: itemId,
+      buyer_id: buyerId,
+      question_text: questionText,
+      ml_status: "UNANSWERED",
+      date_created: dateCreated,
+      raw_json: JSON.stringify({
+        id: mlQuestionId,
+        status: "UNANSWERED",
+        text: questionText,
+        artificial: true,
+        silent_ingest: true,
+      }),
+      notification_id: "artificial",
+      ia_auto_route_detail: iaDetail,
+    };
+    try {
+      await upsertMlQuestionPending(pendingRow);
+      const { chatId } = await upsertMlQuestionChat(pendingRow, null, { silent: true });
+      if (!chatId) {
+        writeJson(res, 422, {
+          error: "chat_not_created",
+          message: "No se creó chat (p. ej. whitelist de teléfono o datos inválidos).",
+        });
+        return true;
+      }
+      logger.info(
+        { ml_question_id: mlQuestionId, ml_user_id: mlUserId, chat_id: chatId, created_by: createdBy },
+        "inbox_ml_question: artificial silent creada"
+      );
+      writeJson(res, 201, {
+        ok: true,
+        ml_question_id: mlQuestionId,
+        chat_id: chatId,
+        silent: true,
+      });
+    } catch (e) {
+      const msg = e && e.message ? String(e.message) : String(e);
+      logger.error({ err: msg, mlQuestionId, mlUserId }, "inbox_ml_question: artificial falló");
+      writeJson(res, 500, { error: "server_error", message: msg.slice(0, 2000) });
+    }
+    return true;
+  }
 
   const chatId = Number((mGet || mPost)[1]);
 

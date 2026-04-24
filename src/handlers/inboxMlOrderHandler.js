@@ -15,6 +15,7 @@ const { requireAdminOrPermission } = require("../utils/authMiddleware");
 const { resolveMercadoLibreListingUrl } = require("../utils/mlItemPublicUrl");
 const {
   resolveLinkedMlOrderId,
+  resolveExternalMlOrderIdFromSalesLink,
   resolveMlOrderReferenceBs,
 } = require("../utils/chatMlOrderReference");
 const { getTodayRate } = require("../services/currencyService");
@@ -75,7 +76,7 @@ async function resolveProductSku(mlItemId, variationId, sellerSku) {
   if (mlItemId) {
     try {
       const { rows } = await pool.query(
-        `SELECT m.product_sku, p.name, p.description, p.category,
+        `SELECT m.product_sku, p.id AS product_id, p.name, p.description, p.category,
                 COALESCE(p.precio_usd, p.unit_price_usd) AS price_usd
          FROM ml_item_sku_map m
          JOIN products p ON p.sku = m.product_sku
@@ -96,7 +97,7 @@ async function resolveProductSku(mlItemId, variationId, sellerSku) {
   if (sellerSku) {
     try {
       const { rows } = await pool.query(
-        `SELECT sku AS product_sku, name, description, category,
+        `SELECT id AS product_id, sku AS product_sku, name, description, category,
                 COALESCE(precio_usd, unit_price_usd) AS price_usd
          FROM products
          WHERE sku_old = $1
@@ -111,7 +112,7 @@ async function resolveProductSku(mlItemId, variationId, sellerSku) {
     // 3. products.sku = seller_sku (fallback directo)
     try {
       const { rows } = await pool.query(
-        `SELECT sku AS product_sku, name, description, category,
+        `SELECT id AS product_id, sku AS product_sku, name, description, category,
                 COALESCE(precio_usd, unit_price_usd) AS price_usd
          FROM products
          WHERE sku = $1
@@ -210,14 +211,29 @@ async function handleInboxMlOrderRequest(req, res, url) {
       return true;
     }
 
-    // 2. Obtener raw_json de la orden
-    const { rows: orderRows } = await pool.query(
+    let lookupKey = String(mlOrderId).trim();
+    // 2. Obtener raw_json de la orden (ml_orders.order_id = id ML; el chat puede guardar sales_orders.id)
+    let { rows: orderRows } = await pool.query(
       `SELECT order_id, status, total_amount, currency_id, date_created, raw_json
        FROM ml_orders
        WHERE order_id = $1
        LIMIT 1`,
-      [String(mlOrderId)]
+      [lookupKey]
     );
+    if (!orderRows.length) {
+      const altKey = await resolveExternalMlOrderIdFromSalesLink(pool, lookupKey);
+      if (altKey !== lookupKey) {
+        lookupKey = altKey;
+        const again = await pool.query(
+          `SELECT order_id, status, total_amount, currency_id, date_created, raw_json
+           FROM ml_orders
+           WHERE order_id = $1
+           LIMIT 1`,
+          [lookupKey]
+        );
+        orderRows = again.rows;
+      }
+    }
     if (!orderRows.length) {
       const rateRow = await getTodayRate(1).catch(() => null);
       const activeRate =
@@ -288,7 +304,7 @@ async function handleInboxMlOrderRequest(req, res, url) {
     );
 
     writeJson(res, 200, {
-      ml_order_id:  mlOrderId,
+      ml_order_id:  mlOrder.order_id,
       order_status: mlOrder.status,
       total_amount: mlOrder.total_amount != null ? Number(mlOrder.total_amount) : null,
       currency_id:  mlOrder.currency_id,
@@ -303,4 +319,8 @@ async function handleInboxMlOrderRequest(req, res, url) {
   }
 }
 
-module.exports = { handleInboxMlOrderRequest };
+module.exports = {
+  handleInboxMlOrderRequest,
+  parseOrderItems,
+  resolveProductSku,
+};

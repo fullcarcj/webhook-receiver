@@ -1078,6 +1078,7 @@ async function listSalesOrders({
      AND so.external_order_id ~ '^[0-9]+-[0-9]+$'
      AND mo.ml_user_id = so.ml_user_id
      AND mo.order_id = split_part(so.external_order_id, '-', 2)::bigint
+    LEFT JOIN customers cust ON cust.id = vu.customer_id
     ${whereVu}`;
 
   const enrichedCte = `
@@ -1090,6 +1091,23 @@ async function listSalesOrders({
              ma.nickname AS ml_account_nickname,
              so.fulfillment_type::text AS fulfillment_type,
              so.conversation_id AS chat_id,
+             so.rate_type::text AS rate_type,
+             so.total_amount_bs,
+             so.exchange_rate_bs_per_usd,
+             COALESCE(
+               cust.full_name,
+               CASE WHEN mo.raw_json IS NOT NULL
+                 THEN NULLIF(TRIM(
+                   COALESCE(NULLIF(TRIM(mo.raw_json::json #>> '{buyer,first_name}'), ''), '') ||
+                   CASE WHEN NULLIF(TRIM(mo.raw_json::json #>> '{buyer,last_name}'), '') IS NOT NULL
+                        THEN ' ' || TRIM(mo.raw_json::json #>> '{buyer,last_name}')
+                        ELSE '' END
+                 ), '')
+                 ELSE NULL END,
+               CASE WHEN mo.raw_json IS NOT NULL
+                 THEN mo.raw_json::json #>> '{buyer,nickname}'
+                 ELSE NULL END
+             ) AS customer_name,
              (${lifecycleStageExpr}) AS lifecycle_stage,
              (${waitingBuyerExpr}) AS waiting_buyer_feedback,
              -- Preview de ítems (máx 3):
@@ -1100,7 +1118,11 @@ async function listSalesOrders({
                THEN (
                  SELECT json_agg(
                    json_build_object(
-                     'sku',       item_el #>> '{item,seller_custom_field}',
+                     'sku',       COALESCE(
+                                    NULLIF(item_el #>> '{item,seller_sku}', ''),
+                                    NULLIF(item_el #>> '{item,seller_custom_field}', ''),
+                                    item_el #>> '{item,id}'
+                                  ),
                      'name',      COALESCE(
                                     NULLIF(TRIM(item_el #>> '{item,title}'), ''),
                                     item_el #>> '{item,id}'
@@ -1221,6 +1243,10 @@ async function listSalesOrders({
               e.ml_account_nickname,
               e.fulfillment_type,
               e.chat_id,
+              e.rate_type,
+              e.total_amount_bs,
+              e.exchange_rate_bs_per_usd,
+              e.customer_name,
               e.lifecycle_stage,
               e.waiting_buyer_feedback,
               e.items_preview_json,
@@ -1295,6 +1321,19 @@ async function listSalesOrders({
           chat_id:
             o.chat_id != null && String(o.chat_id).trim() !== ""
               ? Number(o.chat_id)
+              : null,
+          rate_type: o.rate_type != null ? String(o.rate_type) : null,
+          total_amount_bs:
+            o.total_amount_bs != null && Number.isFinite(Number(o.total_amount_bs))
+              ? Number(o.total_amount_bs)
+              : null,
+          exchange_rate_bs_per_usd:
+            o.exchange_rate_bs_per_usd != null && Number.isFinite(Number(o.exchange_rate_bs_per_usd))
+              ? Number(o.exchange_rate_bs_per_usd)
+              : null,
+          customer_name:
+            o.customer_name != null && String(o.customer_name).trim() !== ""
+              ? String(o.customer_name).trim()
               : null,
           items_preview: Array.isArray(o.items_preview_json)
             ? o.items_preview_json

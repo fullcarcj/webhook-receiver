@@ -1463,6 +1463,93 @@ async function handleSalesApiRequest(req, res, url) {
     return true;
   }
 
+  // ─── GET /api/sales/bank-credits — créditos bancarios recientes para picker ──
+  if (req.method === "GET" && pathname === "/api/sales/bank-credits") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const url = new URL(req.url, `http://localhost`);
+    const limit = Math.min(Number(url.searchParams.get("limit") || 30), 100);
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const { rows } = await pool.query(
+      `SELECT bs.id, bs.tx_date, bs.reference_number, bs.description,
+              bs.amount, bs.payment_type, bs.reconciliation_status,
+              ba.account_number
+       FROM bank_statements bs
+       LEFT JOIN bank_accounts ba ON ba.id = bs.bank_account_id
+       WHERE bs.tx_type = 'CREDIT'
+       ORDER BY bs.tx_date DESC, bs.id DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+    writeJson(res, 200, { ok: true, rows });
+    return true;
+  }
+
+  // ─── POST /api/sales/orders/:id/reconcile — vinculación manual de pago ────────
+  const reconcileMatch = pathname.match(/^\/api\/sales\/orders\/(\d+)\/reconcile$/);
+  if (reconcileMatch && req.method === "POST") {
+    if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+    const orderId = Number(reconcileMatch[1]);
+    let body = {};
+    try { body = await parseJsonBody(req); } catch (_) {
+      writeJson(res, 400, { error: "invalid_json" }); return true;
+    }
+    const statementId = body.statement_id != null ? Number(body.statement_id) : NaN;
+    if (!Number.isFinite(statementId) || statementId <= 0) {
+      writeJson(res, 400, { error: "bad_request", message: "statement_id requerido" });
+      return true;
+    }
+
+    // Verificar que la orden existe y obtener total en Bs
+    const { rows: soRows } = await pool.query(
+      `SELECT so.id, so.status, so.total_amount_bs
+       FROM sales_orders so WHERE so.id = $1 LIMIT 1`,
+      [orderId]
+    );
+    if (!soRows.length) {
+      writeJson(res, 404, { error: "not_found", message: "Orden de venta no encontrada" });
+      return true;
+    }
+    const so = soRows[0];
+
+    // Verificar que el extracto bancario existe
+    const { rows: bsRows } = await pool.query(
+      `SELECT id, amount FROM bank_statements WHERE id = $1 LIMIT 1`,
+      [statementId]
+    );
+    if (!bsRows.length) {
+      writeJson(res, 404, { error: "not_found", message: "Extracto bancario no encontrado" });
+      return true;
+    }
+    const bs = bsRows[0];
+
+    const amtOrder = Number(so.total_amount_bs) || 0;
+    const amtSource = Number(bs.amount) || 0;
+    const amtDiff = Math.abs(amtOrder - amtSource);
+
+    // Insertar en reconciliation_log (manual, match_level=3)
+    await pool.query(
+      `INSERT INTO reconciliation_log
+         (order_id, bank_statement_id, source, match_level, confidence_score,
+          amount_order_bs, amount_source_bs, amount_diff_bs, tolerance_used_bs,
+          reference_matched, date_matched, resolved_by, status)
+       VALUES ($1, $2, 'bank_statement', 3, 100.0, $3, $4, $5, 0,
+               false, false, 'manual_ui', 'approved')`,
+      [orderId, statementId, amtOrder, amtSource, amtDiff]
+    );
+
+    // Actualizar status de la orden a 'paid' si está en estado previo al pago
+    const prevStatus = String(so.status || "").toLowerCase();
+    if (["pending", "pending_payment", "approved"].includes(prevStatus)) {
+      await pool.query(
+        `UPDATE sales_orders SET status = 'paid', updated_at = NOW() WHERE id = $1`,
+        [orderId]
+      );
+    }
+
+    writeJson(res, 200, { ok: true, message: "Pago vinculado correctamente", order_id: orderId, statement_id: statementId });
+    return true;
+  }
+
   writeJson(res, 404, { error: "not_found" });
   return true;
 }

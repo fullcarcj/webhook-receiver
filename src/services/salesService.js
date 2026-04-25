@@ -693,9 +693,11 @@ async function fetchSalesOrderOmnichannelDetail(oid, opts) {
               total_amount_bs, exchange_rate_bs_per_usd, payment_method,
               loyalty_points_earned,
               notes, sold_by, created_at, updated_at,
+              conversation_id,
               COALESCE(applies_stock, TRUE) AS applies_stock,
               COALESCE(records_cash, TRUE) AS records_cash,
               ml_user_id,
+              fulfillment_type::text AS fulfillment_type,
               rl.bank_statement_id AS reconciled_statement_id
               ${lifecycleCols}
        FROM sales_orders so
@@ -749,6 +751,10 @@ async function fetchSalesOrderOmnichannelDetail(oid, opts) {
       aprobado_por_user_id: hasLifecycle ? o.aprobado_por_user_id : null,
       es_pago_auto_banesco: hasLifecycle ? o.es_pago_auto_banesco : null,
       metodo_despacho: hasLifecycle ? o.metodo_despacho : null,
+      fulfillment_type:
+        o.fulfillment_type != null && String(o.fulfillment_type).trim() !== ""
+          ? String(o.fulfillment_type).trim()
+          : null,
       calificacion_ml: hasLifecycle ? o.calificacion_ml : null,
       rating_deadline_at: hasLifecycle ? o.rating_deadline_at : null,
       is_rating_alert: hasLifecycle ? o.is_rating_alert : null,
@@ -756,6 +762,10 @@ async function fetchSalesOrderOmnichannelDetail(oid, opts) {
       updated_at: o.updated_at,
       reconciled_statement_id:
         o.reconciled_statement_id != null ? Number(o.reconciled_statement_id) : null,
+      chat_id:
+        o.conversation_id != null && String(o.conversation_id).trim() !== ""
+          ? Number(o.conversation_id)
+          : null,
       items: irows.map((r) => {
         const sub = Number(r.line_total_usd);
         return {
@@ -858,6 +868,7 @@ async function getPosSaleUnifiedDetail(saleId, opts) {
       aprobado_por_user_id: null,
       es_pago_auto_banesco: null,
       metodo_despacho: null,
+      fulfillment_type: null,
       calificacion_ml: null,
       rating_deadline_at: null,
       is_rating_alert: null,
@@ -880,6 +891,65 @@ async function getPosSaleUnifiedDetail(saleId, opts) {
   } catch (e) {
     throw mapErr(e);
   }
+}
+
+/** Valores CHECK `sales_orders.fulfillment_type` (sql/20260422_omnichannel_extend.sql). */
+const SALES_ORDER_FULFILLMENT_TYPES = new Set([
+  "retiro_tienda",
+  "envio_propio",
+  "mercado_envios",
+  "entrega_vendedor",
+  "retiro_acordado",
+  "desde_bodega",
+]);
+
+/**
+ * Actualiza `fulfillment_type` en `sales_orders` (ventas omnicanal, no POS).
+ * @param {string} rawId `so-N` o `N`
+ * @param {string|null|undefined} fulfillmentType valor permitido o null para limpiar
+ */
+async function patchSalesOrderFulfillmentType(rawId, fulfillmentType) {
+  const s = rawId != null ? String(rawId).trim() : "";
+  if (/^pos-/i.test(s)) {
+    const e = new Error("No aplica a ventas POS (pos-*)");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  let oid = NaN;
+  if (/^so-\d+$/i.test(s)) oid = Number(s.slice(3));
+  else if (/^\d+$/.test(s)) oid = Number(s);
+  if (!Number.isFinite(oid) || oid <= 0) {
+    const e = new Error("id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  const rawFt =
+    fulfillmentType == null || String(fulfillmentType).trim() === ""
+      ? null
+      : String(fulfillmentType).trim();
+  if (rawFt != null && !SALES_ORDER_FULFILLMENT_TYPES.has(rawFt)) {
+    const e = new Error(
+      `fulfillment_type inválido: use ${Array.from(SALES_ORDER_FULFILLMENT_TYPES).join(", ")} o null`
+    );
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  const { rowCount } = await pool.query(
+    `UPDATE sales_orders
+     SET fulfillment_type = $1::text,
+         updated_at = NOW()
+     WHERE id = $2`,
+    [rawFt, oid]
+  );
+  if (!rowCount) {
+    const e = new Error("NOT_FOUND");
+    e.code = "NOT_FOUND";
+    throw e;
+  }
+
+  return getSalesOrderById(`so-${oid}`);
 }
 
 /**
@@ -1018,8 +1088,111 @@ async function listSalesOrders({
              vu.reconciled_statement_id,
              so.ml_user_id AS ml_user_id,
              ma.nickname AS ml_account_nickname,
+             so.fulfillment_type::text AS fulfillment_type,
+             so.conversation_id AS chat_id,
              (${lifecycleStageExpr}) AS lifecycle_stage,
-             (${waitingBuyerExpr}) AS waiting_buyer_feedback
+             (${waitingBuyerExpr}) AS waiting_buyer_feedback,
+             -- Preview de ítems (máx 3):
+             --   ML raw_json (inmediato desde webhook) > sales_order_items (ERP omnichannel) > sale_lines (POS)
+             CASE
+               -- ML: extraer ítems directamente del raw_json (misma técnica que linkable-orders)
+               WHEN vu.source_table = 'sales_orders' AND mo.raw_json IS NOT NULL
+               THEN (
+                 SELECT json_agg(
+                   json_build_object(
+                     'sku',       item_el #>> '{item,seller_custom_field}',
+                     'name',      COALESCE(
+                                    NULLIF(TRIM(item_el #>> '{item,title}'), ''),
+                                    item_el #>> '{item,id}'
+                                  ),
+                     'qty',       CASE
+                                    WHEN (item_el ->> 'quantity') ~ '^[0-9]+(\.[0-9]+)?$'
+                                    THEN (item_el ->> 'quantity')::numeric
+                                    ELSE 1
+                                  END,
+                     'unit_price_usd', NULL,
+                     'image_url', COALESCE(
+                                    NULLIF(TRIM(ml_th.thumbnail), ''),
+                                    NULLIF(item_el #>> '{item,thumbnail}', ''),
+                                    NULLIF(item_el #>> '{item,secure_thumbnail}', '')
+                                  )
+                   ) ORDER BY t.ord
+                 )
+                 FROM json_array_elements((mo.raw_json::json) -> 'order_items')
+                      WITH ORDINALITY AS t(item_el, ord)
+                 LEFT JOIN ml_listings ml_th
+                   ON ml_th.item_id = NULLIF(TRIM(t.item_el #>> '{item,id}'), '')
+                 WHERE t.ord <= 3
+               )
+               -- ERP omnicanal: sales_order_items (POS social, mostrador omnichannel)
+               WHEN vu.source_table = 'sales_orders'
+                AND EXISTS (SELECT 1 FROM sales_order_items WHERE sales_order_id = vu.source_id LIMIT 1)
+               THEN (
+                 SELECT json_agg(
+                   json_build_object(
+                     'sku', soi.sku, 'name', COALESCE(p.name, soi.sku),
+                     'qty', soi.quantity, 'unit_price_usd', soi.unit_price_usd,
+                     'image_url', mll.thumbnail
+                   ) ORDER BY soi.id
+                 )
+                 FROM (SELECT * FROM sales_order_items WHERE sales_order_id = vu.source_id ORDER BY id LIMIT 3) soi
+                 LEFT JOIN products p ON p.sku = soi.sku
+                 LEFT JOIN ml_publications mpub ON mpub.product_id = p.id
+                 LEFT JOIN ml_listings mll ON mll.item_id = mpub.ml_item_id
+               )
+               -- POS mostrador: sale_lines
+               WHEN vu.source_table = 'sales'
+               THEN (
+                 SELECT json_agg(
+                   json_build_object(
+                     'sku', sl.product_sku, 'name', COALESCE(p.name, sl.product_sku),
+                     'qty', sl.quantity, 'unit_price_usd', sl.unit_price_usd,
+                     'image_url', NULL
+                   ) ORDER BY sl.id
+                 )
+                 FROM (SELECT * FROM sale_lines WHERE sale_id = vu.source_id ORDER BY id LIMIT 3) sl
+                 LEFT JOIN products p ON p.sku = sl.product_sku
+               )
+               ELSE NULL
+             END AS items_preview_json,
+             -- Cotización activa vinculada (solo sales_orders)
+             CASE
+               WHEN vu.source_table = 'sales_orders'
+               THEN (
+                 SELECT json_build_object(
+                   'id', ip.id,
+                   'total', ip.total,
+                   'status', ip.status,
+                   'items_count', (
+                     SELECT COUNT(*)::int FROM inventario_detallepresupuesto WHERE presupuesto_id = ip.id
+                   ),
+                   'items_preview', (
+                     SELECT json_agg(
+                       json_build_object(
+                         'sku', COALESCE(p2.sku, ''),
+                         'name', COALESCE(p2.name, ''),
+                         'qty', idp.cantidad,
+                         'unit_price_usd', idp.precio_unitario,
+                         'image_url', mll2.thumbnail
+                       ) ORDER BY idp.id
+                     )
+                     FROM (
+                       SELECT * FROM inventario_detallepresupuesto
+                       WHERE presupuesto_id = ip.id ORDER BY id LIMIT 3
+                     ) idp
+                     LEFT JOIN products p2 ON p2.id = idp.producto_id
+                     LEFT JOIN ml_publications mpub2 ON mpub2.product_id = p2.id
+                     LEFT JOIN ml_listings mll2 ON mll2.item_id = mpub2.ml_item_id
+                   )
+                 )
+                 FROM inventario_presupuesto ip
+                 WHERE ip.sales_order_id = vu.source_id
+                   AND ip.status NOT IN ('converted', 'expired')
+                 ORDER BY ip.fecha_creacion DESC
+                 LIMIT 1
+               )
+               ELSE NULL
+             END AS quote_preview_json
       ${enrichedFrom}
     )`;
 
@@ -1046,8 +1219,12 @@ async function listSalesOrders({
               e.reconciled_statement_id,
               e.ml_user_id,
               e.ml_account_nickname,
+              e.fulfillment_type,
+              e.chat_id,
               e.lifecycle_stage,
-              e.waiting_buyer_feedback
+              e.waiting_buyer_feedback,
+              e.items_preview_json,
+              e.quote_preview_json
        FROM filtered e
        ORDER BY e.created_at DESC
        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
@@ -1111,6 +1288,18 @@ async function listSalesOrders({
               : null,
           lifecycle_stage: o.lifecycle_stage != null ? String(o.lifecycle_stage) : null,
           waiting_buyer_feedback: Boolean(o.waiting_buyer_feedback),
+          fulfillment_type:
+            o.fulfillment_type != null && String(o.fulfillment_type).trim() !== ""
+              ? String(o.fulfillment_type).trim()
+              : null,
+          chat_id:
+            o.chat_id != null && String(o.chat_id).trim() !== ""
+              ? Number(o.chat_id)
+              : null,
+          items_preview: Array.isArray(o.items_preview_json)
+            ? o.items_preview_json
+            : (o.items_preview_json != null ? o.items_preview_json : null),
+          quote_preview: o.quote_preview_json != null ? o.quote_preview_json : null,
         };
       }),
       total: Number(countRows[0].c),
@@ -1644,11 +1833,11 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
         `INSERT INTO sales_orders (source, external_order_id, customer_id, channel_id, status, order_total_amount,
           total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
           notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned,
-          lifecycle_status, ml_status, rating_deadline_at, conversation_id, created_at)
+          lifecycle_status, ml_status, rating_deadline_at, conversation_id, created_at, fulfillment_type)
          VALUES ('mercadolibre', $1, $2, $3, $4, $5,
           $6, $7, $8, $9::date,
           $10, NULL, FALSE, FALSE, $11, $12,
-          $13, $14, NOW() + ($15::text || ' days')::interval, $16, COALESCE($17::timestamptz, NOW()))
+          $13, $14, NOW() + ($15::text || ' days')::interval, $16, COALESCE($17::timestamptz, NOW()), 'retiro_tienda')
          RETURNING id`,
         [
           extId,
@@ -1675,11 +1864,11 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
         `INSERT INTO sales_orders (source, external_order_id, customer_id, channel_id, status, order_total_amount,
           total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
           notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned,
-          conversation_id, created_at)
+          conversation_id, created_at, fulfillment_type)
          VALUES ('mercadolibre', $1, $2, $3, $4, $5,
           $6, $7, $8, $9::date,
           $10, NULL, FALSE, FALSE, $11, $12,
-          $13, COALESCE($14::timestamptz, NOW()))
+          $13, COALESCE($14::timestamptz, NOW()), 'retiro_tienda')
          RETURNING id`,
         [
           extId,
@@ -1825,7 +2014,24 @@ async function syncMercadolibreSalesAfterMlOrderChange({ mlUserId, orderId }) {
       [extId]
     );
     if (!ex.rows.length) {
-      await importSalesOrderFromMlOrder({ mlUserId: mUid, orderId: oid });
+      const imported = await importSalesOrderFromMlOrder({ mlUserId: mUid, orderId: oid });
+      if (imported && !imported.idempotent) {
+        try {
+          const sseBroker = require("../realtime/sseBroker");
+          sseBroker.broadcast("new_sale", {
+            sales_order_id: imported.id,
+            ml_user_id: mUid,
+            order_id: oid,
+            external_order_id:
+              imported.external_order_id != null
+                ? String(imported.external_order_id)
+                : extId,
+            source: "ml_orders_webhook_sync",
+          });
+        } catch (_sse) {
+          /* no crítico */
+        }
+      }
     }
   } catch (e) {
     if (e && e.code === "IMPORT_DISABLED") return { skipped: true };
@@ -2140,6 +2346,7 @@ module.exports = {
   listSalesOrders,
   getSalesStats,
   patchSalesOrderStatus,
+  patchSalesOrderFulfillmentType,
   importSalesOrderFromMlOrder,
   importSalesOrdersFromMlTable,
   previewMlOrdersImport,

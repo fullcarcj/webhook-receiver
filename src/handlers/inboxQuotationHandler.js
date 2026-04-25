@@ -160,8 +160,13 @@ async function insertPresupuestoDraft(client, params) {
     createdBy,
     chatId,
     channelId,
+    salesOrderId,
     lines,
   } = params;
+  const salesOrderIdVal =
+    salesOrderId != null && Number.isFinite(Number(salesOrderId)) && Number(salesOrderId) > 0
+      ? Number(salesOrderId)
+      : null;
   const ins = await client.query(
     `INSERT INTO inventario_presupuesto (
        fecha_creacion,
@@ -175,6 +180,7 @@ async function insertPresupuestoDraft(client, params) {
        chat_id,
        channel_id,
        created_by,
+       sales_order_id,
        updated_at
      ) VALUES (
        NOW(),
@@ -188,6 +194,7 @@ async function insertPresupuestoDraft(client, params) {
        $7,
        $8,
        $9,
+       $10,
        NOW()
      )
      RETURNING id`,
@@ -201,6 +208,7 @@ async function insertPresupuestoDraft(client, params) {
       Number.isFinite(chatId) && chatId > 0 ? chatId : null,
       Number.isFinite(channelId) && channelId > 0 ? channelId : null,
       createdBy,
+      salesOrderIdVal,
     ]
   );
   const presupuestoId = ins.rows[0].id;
@@ -381,6 +389,7 @@ async function handleListQuotations(res, url) {
       p.fecha_creacion,
       p.channel_id,
       p.chat_id,
+      p.sales_order_id,
       p.cliente_id,
       c.full_name AS cliente_nombre,
       p.created_by,
@@ -413,6 +422,7 @@ async function handleListQuotations(res, url) {
     fecha_creacion: r.fecha_creacion,
     channel_id: r.channel_id,
     chat_id: r.chat_id,
+    sales_order_id: r.sales_order_id != null ? Number(r.sales_order_id) : null,
     cliente_id: r.cliente_id,
     cliente_nombre: r.cliente_nombre,
     created_by: r.created_by,
@@ -1120,6 +1130,62 @@ async function handleInboxQuotationRequest(req, res, url) {
             ? uidFm
             : null;
 
+      // Resolver sales_order_id para anclar la cotización a la transacción (cross-chat).
+      const { rows: soRowsFm } = await pool.query(
+        `SELECT id FROM sales_orders
+         WHERE source = 'mercadolibre'
+           AND (
+             external_order_id = $1
+             OR (external_order_id ~ '^[0-9]+-[0-9]+$' AND split_part(external_order_id, '-', 2) = $1)
+           )
+         ORDER BY id DESC LIMIT 1`,
+        [String(lookupKeyFm)]
+      );
+      const salesOrderIdFm = soRowsFm.length ? Number(soRowsFm[0].id) : null;
+
+      // Dedup: si ya existe cotización activa para esta sales_order, reutilizar.
+      if (salesOrderIdFm != null) {
+        const { rows: dupFmRows } = await pool.query(
+          `SELECT id FROM inventario_presupuesto
+           WHERE sales_order_id = $1
+             AND status NOT IN ('converted','expired')
+           ORDER BY fecha_creacion DESC LIMIT 1`,
+          [salesOrderIdFm]
+        );
+        if (dupFmRows.length) {
+          const dupFmId = Number(dupFmRows[0].id);
+          const detDupFm = await pool.query(
+            `SELECT id, cantidad, precio_unitario, subtotal, producto_id
+             FROM inventario_detallepresupuesto WHERE presupuesto_id = $1 ORDER BY id`,
+            [dupFmId]
+          );
+          const headDupFm = await pool.query(
+            `SELECT id, fecha_creacion, fecha_vencimiento, total, status,
+               cliente_id, chat_id, sales_order_id, channel_id, created_by, observaciones
+             FROM inventario_presupuesto WHERE id = $1`,
+            [dupFmId]
+          );
+          // Actualizar chat_id si no estaba enlazado aún.
+          if (headDupFm.rows[0].chat_id == null && chatIdNum > 0) {
+            await pool.query(
+              `UPDATE inventario_presupuesto SET chat_id = $1, updated_at = NOW() WHERE id = $2`,
+              [chatIdNum, dupFmId]
+            );
+            headDupFm.rows[0].chat_id = chatIdNum;
+          }
+          const hdFm = headDupFm.rows[0];
+          writeJson(res, 200, {
+            ok: true,
+            reused: true,
+            presupuesto: { ...hdFm, reference: buildReference(hdFm.channel_id, dupFmId) },
+            items: detDupFm.rows,
+            warnings: [],
+            skipped: [],
+          });
+          return true;
+        }
+      }
+
       const channelIdFm = 3;
       let presupuestoIdFm;
       const clientFm = await pool.connect();
@@ -1133,6 +1199,7 @@ async function handleInboxQuotationRequest(req, res, url) {
           createdBy:        createdByFm,
           chatId:           chatIdNum,
           channelId:        channelIdFm,
+          salesOrderId:     salesOrderIdFm,
           lines:            linesFm,
         });
         await clientFm.query("COMMIT");
@@ -1152,7 +1219,7 @@ async function handleInboxQuotationRequest(req, res, url) {
       );
       const headResFm = await pool.query(
         `SELECT id, fecha_creacion, fecha_vencimiento, total, status,
-           cliente_id, chat_id, channel_id, created_by, observaciones
+           cliente_id, chat_id, sales_order_id, channel_id, created_by, observaciones
          FROM inventario_presupuesto WHERE id = $1`,
         [presupuestoIdFm]
       );
@@ -1160,6 +1227,7 @@ async function handleInboxQuotationRequest(req, res, url) {
       const referenceFm = buildReference(headerFm.channel_id, presupuestoIdFm);
       writeJson(res, 201, {
         ok:          true,
+        reused:      false,
         presupuesto: { ...headerFm, reference: referenceFm },
         items:       detFm.rows,
         warnings:    warningsFm,
@@ -2313,13 +2381,314 @@ async function handleInboxQuotationRequest(req, res, url) {
       return true;
     }
 
+    // POST /api/inbox/quotations/from-sales-order — borrador desde sales_orders (sin chat obligatorio)
+    if (req.method === "POST" && pathname === "/api/inbox/quotations/from-sales-order") {
+      let bodySo = {};
+      try { bodySo = await parseJsonBody(req); } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" }); return true;
+      }
+      const soId = bodySo.sales_order_id != null ? Number(bodySo.sales_order_id) : NaN;
+      if (!Number.isFinite(soId) || soId <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "sales_order_id requerido" });
+        return true;
+      }
+      const { rows: soRows } = await pool.query(
+        `SELECT id, source, external_order_id, customer_id, conversation_id, ml_user_id
+         FROM sales_orders WHERE id = $1 LIMIT 1`,
+        [soId]
+      );
+      if (!soRows.length) {
+        writeJson(res, 404, { error: "not_found", message: "Orden de venta no encontrada" });
+        return true;
+      }
+      const so = soRows[0];
+      const isMlSo = String(so.source || "").toLowerCase().includes("mercadolibre");
+      if (!isMlSo) {
+        writeJson(res, 400, {
+          error: "not_ml_order",
+          message: "Solo se puede generar cotización automática desde órdenes de Mercado Libre.",
+        });
+        return true;
+      }
+      const clienteIdSo = so.customer_id != null ? Number(so.customer_id) : NaN;
+      if (!Number.isFinite(clienteIdSo) || clienteIdSo <= 0) {
+        writeJson(res, 400, {
+          error: "no_customer",
+          message: "Esta orden no tiene cliente resuelto. Asociá un cliente antes de cotizar.",
+        });
+        return true;
+      }
+
+      // Extraer ID de orden ML de external_order_id (formato: <ml_user_id>-<order_id>)
+      const extOid = String(so.external_order_id || "").trim();
+      let mlOidSo = extOid;
+      if (extOid.includes("-")) {
+        const parts = extOid.split("-");
+        mlOidSo = parts[parts.length - 1];
+      }
+      if (!mlOidSo) {
+        writeJson(res, 400, { error: "bad_request", message: "No se pudo extraer ID de orden ML." });
+        return true;
+      }
+
+      // Dedup limpio: cotización activa anclada a esta sales_order (cross-chat).
+      const { rows: dupRowsSo } = await pool.query(
+        `SELECT id FROM inventario_presupuesto
+         WHERE sales_order_id = $1
+           AND status NOT IN ('converted','expired')
+         ORDER BY fecha_creacion DESC LIMIT 1`,
+        [soId]
+      );
+      if (!dupRowsSo.length) {
+        // Fallback: dedup por observaciones si el presupuesto fue creado antes de la migración.
+        const obsPatternSo = `Generada desde orden ML ${mlOidSo}`;
+        const { rows: dupFallbackSo } = await pool.query(
+          `SELECT id FROM inventario_presupuesto
+           WHERE cliente_id = $1
+             AND observaciones LIKE $2
+             AND sales_order_id IS NULL
+             AND status NOT IN ('converted','expired')
+           ORDER BY fecha_creacion DESC LIMIT 1`,
+          [clienteIdSo, `%${obsPatternSo}%`]
+        );
+        if (dupFallbackSo.length) {
+          dupRowsSo.push(dupFallbackSo[0]);
+          // Retroalimentar sales_order_id en el presupuesto legado.
+          await pool.query(
+            `UPDATE inventario_presupuesto SET sales_order_id = $1, updated_at = NOW() WHERE id = $2`,
+            [soId, Number(dupFallbackSo[0].id)]
+          );
+        }
+      }
+      if (dupRowsSo.length) {
+        const dupId = Number(dupRowsSo[0].id);
+        const detDup = await pool.query(
+          `SELECT id, cantidad, precio_unitario, subtotal, producto_id
+           FROM inventario_detallepresupuesto WHERE presupuesto_id = $1 ORDER BY id`,
+          [dupId]
+        );
+        const headDup = await pool.query(
+          `SELECT id, fecha_creacion, fecha_vencimiento, total, status,
+             cliente_id, chat_id, sales_order_id, channel_id, created_by, observaciones
+           FROM inventario_presupuesto WHERE id = $1`,
+          [dupId]
+        );
+        const hd = headDup.rows[0];
+        // Enlazar chat si la orden ya tiene conversation_id y el presupuesto aún no tiene chat.
+        if (hd.chat_id == null && so.conversation_id != null) {
+          await pool.query(
+            `UPDATE inventario_presupuesto SET chat_id = $1, updated_at = NOW() WHERE id = $2`,
+            [Number(so.conversation_id), dupId]
+          );
+          hd.chat_id = Number(so.conversation_id);
+        }
+        writeJson(res, 200, {
+          ok: true,
+          reused: true,
+          presupuesto: { ...hd, reference: buildReference(hd.channel_id, dupId) },
+          items: detDup.rows,
+          warnings: [],
+          skipped: [],
+        });
+        return true;
+      }
+
+      // Buscar orden en ml_orders
+      const { rows: mlOrderRowsSo } = await pool.query(
+        `SELECT order_id, raw_json FROM ml_orders WHERE order_id = $1 LIMIT 1`,
+        [mlOidSo]
+      );
+      if (!mlOrderRowsSo.length || mlOrderRowsSo[0].raw_json == null) {
+        writeJson(res, 409, {
+          error: "order_not_synced",
+          message: "La orden ML no está sincronizada. Sincronizá órdenes e intentá de nuevo.",
+        });
+        return true;
+      }
+
+      const cidRateSo = (() => {
+        const c = bodySo.company_id != null ? Number(bodySo.company_id) : 1;
+        return Number.isFinite(c) && c > 0 ? c : 1;
+      })();
+      let rateRowSo = null;
+      try { rateRowSo = await getTodayRate(cidRateSo); } catch (_e) { rateRowSo = null; }
+
+      const warnPctSo = (() => {
+        const n = Number(process.env.ML_QUOTE_FROM_ML_PRICE_WARN_PCT);
+        return Number.isFinite(n) && n >= 0 && n <= 50 ? n : 2;
+      })();
+
+      const rawItemsSo = parseOrderItems(mlOrderRowsSo[0].raw_json);
+      if (!rawItemsSo.length) {
+        writeJson(res, 422, { error: "no_items", message: "La orden no tiene ítems en el JSON sincronizado." });
+        return true;
+      }
+
+      const warningsSo = []; const skippedSo = []; const linesSo = [];
+      for (const it of rawItemsSo) {
+        const prodSkuRowSo = await resolveProductSku(it.ml_item_id, it.variation_id, it.seller_sku);
+        if (!prodSkuRowSo || !prodSkuRowSo.product_sku) {
+          skippedSo.push({ ml_item_id: it.ml_item_id, seller_sku: it.seller_sku, reason: "product_not_mapped" });
+          continue;
+        }
+        const productIdSo = await resolveActiveProductoIdFromMlSkuRow(prodSkuRowSo);
+        if (!productIdSo) {
+          skippedSo.push({ ml_item_id: it.ml_item_id, seller_sku: it.seller_sku, reason: "product_inactive_or_missing" });
+          continue;
+        }
+        const qtyRawSo = it.quantity != null ? Number(it.quantity) : NaN;
+        const cantidadSo = Number.isFinite(qtyRawSo) && qtyRawSo > 0 ? qtyRawSo : 1;
+        const curSo = it.currency_id ? String(it.currency_id).toUpperCase() : "";
+        let itemForUsdSo = {};
+        if (curSo === "VES") {
+          const up = it.unit_price != null ? Number(it.unit_price) : NaN;
+          if (!Number.isFinite(up) || up < 0) { skippedSo.push({ ml_item_id: it.ml_item_id, reason: "invalid_unit_price" }); continue; }
+          itemForUsdSo = { precio_unitario_bs: up };
+          const binSo = rateRowSo ? Number(rateRowSo.binance_rate) : NaN;
+          const catalogUsdSo = prodSkuRowSo.price_usd != null ? Number(prodSkuRowSo.price_usd) : NaN;
+          if (Number.isFinite(binSo) && binSo > 0 && Number.isFinite(catalogUsdSo) && catalogUsdSo > 0) {
+            const expectedBsSo = Math.round(catalogUsdSo * binSo * 100) / 100;
+            if (expectedBsSo > 0) {
+              const diffPctSo = (Math.abs(up - expectedBsSo) / expectedBsSo) * 100;
+              if (diffPctSo > warnPctSo) {
+                warningsSo.push({ code: "ml_price_vs_catalog_bs", ml_item_id: it.ml_item_id, seller_sku: it.seller_sku,
+                  ml_unit_price_bs: up, expected_from_catalog_bs: expectedBsSo,
+                  diff_pct: Math.round(diffPctSo * 100) / 100, binance_rate: binSo });
+              }
+            }
+          }
+        } else if (curSo === "USD" || curSo === "") {
+          itemForUsdSo = { precio_unitario: Number(it.unit_price) };
+        } else {
+          warningsSo.push({ code: "currency_assumed_usd", ml_item_id: it.ml_item_id, currency_id: curSo });
+          itemForUsdSo = { precio_unitario: Number(it.unit_price) };
+        }
+        const resolvedSo = resolveQuotationLineUnitUsd(itemForUsdSo, rateRowSo);
+        if (resolvedSo.error) { skippedSo.push({ ml_item_id: it.ml_item_id, reason: resolvedSo.error }); continue; }
+        const puSo = resolvedSo.pu;
+        linesSo.push({ producto_id: productIdSo, cantidad: cantidadSo, precio_unitario: puSo, subtotal: Math.round(cantidadSo * puSo * 100) / 100 });
+      }
+
+      if (!linesSo.length) {
+        writeJson(res, 422, { error: "no_line_items", message: "No se pudo armar ninguna línea.", skipped: skippedSo, warnings: warningsSo });
+        return true;
+      }
+
+      const uniqSo = [...new Set(linesSo.map((L) => L.producto_id))];
+      const chkSo = await pool.query(`SELECT id FROM products WHERE id = ANY($1::bigint[]) AND is_active = true`, [uniqSo]);
+      if (chkSo.rows.length !== uniqSo.length) {
+        writeJson(res, 400, { error: "bad_request", message: "Uno o más productos no están activos." });
+        return true;
+      }
+
+      const totalSo = linesSo.reduce((acc, L) => acc + L.subtotal, 0);
+      const uidSo = user.userId != null ? Number(user.userId) : null;
+      // chat_id desde conversation_id de la orden (fusión automática con Bandeja si ya existe).
+      const chatIdSo = so.conversation_id != null ? Number(so.conversation_id) : null;
+      const channelIdSo = chatIdSo != null ? 3 : (bodySo.channel_id != null ? Number(bodySo.channel_id) : null);
+
+      let presupuestoIdSo;
+      const clientSo = await pool.connect();
+      try {
+        await clientSo.query("BEGIN");
+        presupuestoIdSo = await insertPresupuestoDraft(clientSo, {
+          fechaVencimiento: null,
+          total: totalSo,
+          observaciones: `Generada desde orden ML ${mlOidSo}.`,
+          clienteId: clienteIdSo,
+          createdBy: Number.isFinite(uidSo) && uidSo > 0 ? uidSo : null,
+          chatId: chatIdSo,
+          channelId: channelIdSo,
+          salesOrderId: soId,
+          lines: linesSo,
+        });
+        await clientSo.query("COMMIT");
+      } catch (e) {
+        await clientSo.query("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        clientSo.release();
+      }
+
+      const detSo = await pool.query(
+        `SELECT id, cantidad, precio_unitario, subtotal, producto_id
+         FROM inventario_detallepresupuesto WHERE presupuesto_id = $1 ORDER BY id`,
+        [presupuestoIdSo]
+      );
+      const headSo = await pool.query(
+        `SELECT id, fecha_creacion, fecha_vencimiento, total, status,
+           cliente_id, chat_id, sales_order_id, channel_id, created_by, observaciones
+         FROM inventario_presupuesto WHERE id = $1`,
+        [presupuestoIdSo]
+      );
+      const headerSo = headSo.rows[0];
+      writeJson(res, 201, {
+        ok: true,
+        reused: false,
+        presupuesto: { ...headerSo, reference: buildReference(headerSo.channel_id, presupuestoIdSo) },
+        items: detSo.rows,
+        warnings: warningsSo,
+        skipped: skippedSo,
+      });
+      return true;
+    }
+
     // GET /api/inbox/quotations — listado global paginado (antes de /:chatId)
     if (req.method === "GET" && pathname === "/api/inbox/quotations") {
       await handleListQuotations(res, url);
       return true;
     }
 
-    // GET /api/inbox/quotations/:chatId — cotizaciones activas de un chat
+    // GET /api/inbox/quotations/by-sales-order/:salesOrderId — cotización activa por transacción (cross-chat)
+    const bySoMatch = pathname.match(/^\/api\/inbox\/quotations\/by-sales-order\/(\d+)$/);
+    if (bySoMatch && req.method === "GET") {
+      const soIdBs = Number(bySoMatch[1]);
+      if (!Number.isFinite(soIdBs) || soIdBs <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "sales_order_id inválido" });
+        return true;
+      }
+      const { rows: rawBsRows } = await pool.query(
+        `SELECT ip.id, ip.total, ip.status, ip.fecha_vencimiento, ip.channel_id,
+           ip.sales_order_id, ip.chat_id,
+           ${sqlReferenceExpr("ip")} AS reference,
+           (
+             SELECT so2.id FROM sales_orders so2
+             WHERE so2.external_order_id = ('INV-PRESUP-' || ip.id::text)
+             LIMIT 1
+           ) AS linked_sales_order_id
+         FROM inventario_presupuesto ip
+         WHERE ip.sales_order_id = $1
+           AND ip.status NOT IN ('converted', 'expired')
+         ORDER BY ip.fecha_creacion DESC
+         LIMIT 5`,
+        [soIdBs]
+      );
+      const bsItems = [];
+      for (const r of rawBsRows) {
+        const st = await quotationPaymentSettlementService.getSettlementState(Number(r.id), null);
+        bsItems.push({
+          id:                       r.id,
+          total:                    r.total,
+          status:                   r.status,
+          fecha_vencimiento:        r.fecha_vencimiento,
+          channel_id:               r.channel_id,
+          reference:                r.reference,
+          sales_order_id:           r.sales_order_id,
+          chat_id:                  r.chat_id,
+          linked_sales_order_id:    r.linked_sales_order_id,
+          payment_verified:         Boolean(st.anyPaymentProgress),
+          payment_fully_settled:    Boolean(st.fullySettled),
+          payment_covered_usd_eq:   st.coveredUsdEquivalent,
+          payment_total_usd:        st.totalUsd,
+          payment_pending_usd_caja: Boolean(st.hasPendingUsdCaja),
+          payment_has_bs_baseline:  Boolean(st.hasBsReconciledBaseline),
+        });
+      }
+      writeJson(res, 200, { items: bsItems });
+      return true;
+    }
+
+    // GET /api/inbox/quotations/:chatId — cotizaciones activas de un chat (+ cross-chat por sales_order_id)
     const listMatch = pathname.match(/^\/api\/inbox\/quotations\/(\d+)$/);
     if (listMatch && req.method === "GET") {
       const chatId = Number(listMatch[1]);
@@ -2327,20 +2696,23 @@ async function handleInboxQuotationRequest(req, res, url) {
         writeJson(res, 400, { error: "bad_request", message: "chatId inválido" });
         return true;
       }
+      // Busca cotizaciones directas del chat Y las ancladas a la sales_order cuya conversation_id es este chat.
       const { rows: rawRows } = await pool.query(
         `SELECT ip.id, ip.total, ip.status, ip.fecha_vencimiento, ip.channel_id,
-           CASE
-             WHEN ip.channel_id = 2 THEN 'COT-WA-' || ip.id::text
-             WHEN ip.channel_id = 3 THEN 'COT-ML-' || ip.id::text
-             ELSE 'COT-' || ip.id::text
-           END AS reference,
+           ip.sales_order_id, ip.chat_id,
+           ${sqlReferenceExpr("ip")} AS reference,
            (
              SELECT so.id FROM sales_orders so
              WHERE so.external_order_id = ('INV-PRESUP-' || ip.id::text)
              LIMIT 1
            ) AS linked_sales_order_id
          FROM inventario_presupuesto ip
-         WHERE ip.chat_id = $1
+         WHERE (
+           ip.chat_id = $1
+           OR ip.sales_order_id IN (
+             SELECT id FROM sales_orders WHERE conversation_id = $1
+           )
+         )
            AND ip.status NOT IN ('converted', 'expired')
          ORDER BY ip.fecha_creacion DESC
          LIMIT 5`,
@@ -2356,6 +2728,8 @@ async function handleInboxQuotationRequest(req, res, url) {
           fecha_vencimiento:        r.fecha_vencimiento,
           channel_id:               r.channel_id,
           reference:                r.reference,
+          sales_order_id:           r.sales_order_id,
+          chat_id:                  r.chat_id,
           linked_sales_order_id:    r.linked_sales_order_id,
           payment_verified:         Boolean(st.anyPaymentProgress),
           payment_fully_settled:    Boolean(st.fullySettled),

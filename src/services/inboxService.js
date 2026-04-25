@@ -873,8 +873,15 @@ async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDe
       AND created_at > CURRENT_DATE
   `;
 
+  // Preguntas ML sin responder en la tabla pendiente
+  const mlQuestionsPendingSql = `
+    SELECT COUNT(*)::int AS ml_questions_pending
+    FROM ml_questions_pending
+    WHERE status = 'UNANSWERED'
+  `;
+
   try {
-    const [mainRes, facets, handoffResult, unreviewedResult, incorrectResult, exceptionsCount] =
+    const [mainRes, facets, handoffResult, unreviewedResult, incorrectResult, exceptionsCount, mlQuestionsResult] =
       await Promise.all([
         pool.query(sql, [...params]),
         fetchInboxFacets(),
@@ -893,11 +900,16 @@ async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDe
           throw err;
         }),
         exceptionsService.countOpen().catch(() => 0),
+        pool.query(mlQuestionsPendingSql).catch((err) => {
+          if (err.code === "42P01") return { rows: [{ ml_questions_pending: 0 }] };
+          throw err;
+        }),
       ]);
     const r = mainRes.rows[0] || {};
     const h = handoffResult.rows[0] || {};
     const u = unreviewedResult.rows[0] || {};
     const ic = incorrectResult.rows[0] || {};
+    const mq = mlQuestionsResult.rows[0] || {};
     return {
       total: Number(r.total) || 0,
       unread: Number(r.unread) || 0,
@@ -912,6 +924,7 @@ async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDe
       // BE-2.8
       bot_actions_unreviewed: Number(u.bot_actions_unreviewed) || 0,
       bot_actions_incorrect_today: Number(ic.bot_actions_incorrect_today) || 0,
+      ml_questions_pending: Number(mq.ml_questions_pending) || 0,
       facets,
     };
   } catch (err) {

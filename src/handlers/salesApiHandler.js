@@ -192,6 +192,11 @@ const patchBodySchema = z.object({
   status: z.enum(["paid", "cancelled", "shipped"]),
 });
 
+const patchFulfillmentBodySchema = z.object({
+  /** Clave canónica o `null` para limpiar. */
+  fulfillment_type: z.union([z.string().max(64), z.null()]),
+});
+
 const importMlBodySchema = z
   .object({
     ml_user_id: z.number().int().positive().optional(),
@@ -387,6 +392,8 @@ async function handleSalesApiRequest(req, res, url) {
               sales_order_id: data.id,
               ml_user_id: d.ml_user_id,
               order_id: d.order_id,
+              external_order_id:
+                data.external_order_id != null ? String(data.external_order_id) : null,
               source: "sales_import_ml",
             });
           } catch (_e) {
@@ -1124,6 +1131,30 @@ async function handleSalesApiRequest(req, res, url) {
           ended_at:    new Date().toISOString(),
         },
       });
+      return true;
+    }
+
+    const mFulfillmentPatch = pathname.match(/^\/api\/sales\/(so-\d+|\d+)\/fulfillment$/i);
+    if (req.method === "PATCH" && mFulfillmentPatch) {
+      if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+      let body = {};
+      try {
+        body = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const parsed = safeParse(patchFulfillmentBodySchema, body);
+      if (!parsed.ok) {
+        writeJson(res, 422, { error: "validation_error", details: parsed.error.issues });
+        return true;
+      }
+      const idPart = mFulfillmentPatch[1];
+      const updated = await salesService.patchSalesOrderFulfillmentType(
+        idPart,
+        parsed.data.fulfillment_type
+      );
+      writeJson(res, 200, { data: updated, meta: { timestamp: new Date().toISOString() } });
       return true;
     }
 

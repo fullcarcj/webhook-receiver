@@ -1608,6 +1608,46 @@ function scheduleTopicFetchFromWebhook(body) {
           });
         }
 
+        /** Import automático a sales_orders al recibir orders_v2 (SALES_ML_IMPORT_ENABLED=1). */
+        if (
+          result.ok &&
+          parsed &&
+          isOrdersV2Topic &&
+          process.env.SALES_ML_IMPORT_ENABLED === "1"
+        ) {
+          setImmediate(() => {
+            (async () => {
+              try {
+                const orderId = extractOrderIdFromOrder(parsed);
+                if (!orderId || !mlUserId) return;
+                const importResult = await salesService.importSalesOrderFromMlOrder({
+                  mlUserId,
+                  orderId,
+                });
+                if (importResult && importResult.skipped) {
+                  console.log(
+                    "[sales-auto-import] orden omitida (motivo: %s) ml_user_id=%s order_id=%s",
+                    importResult.reason || "too_old_or_dup",
+                    mlUserId,
+                    orderId
+                  );
+                } else if (importResult && !importResult.idempotent) {
+                  console.log(
+                    "[sales-auto-import] orden importada a sales_orders id=%s order_id=%s",
+                    importResult.id,
+                    orderId
+                  );
+                }
+              } catch (err) {
+                console.error(
+                  "[sales-auto-import] Error al importar orden orders_v2:",
+                  err && err.message ? err.message : err
+                );
+              }
+            })();
+          });
+        }
+
         if (result.ok && !isOrdersV2Topic && !isItemsTopic && !isOrdersFeedbackTopic) {
           processStatus = FETCH_PROCESS_STATUS_PENDING;
         }

@@ -133,6 +133,21 @@ class OrderGateway {
       await this.checkAndReserveStock(items, client);
 
       // 4. INSERT en sales_orders (CH-03 no pasa por MANUAL_SOURCES de salesService)
+      // Misma clave que importSalesOrderFromMlOrder: "{ml_user_id}-{order_id}" cuando hay cuenta;
+      // evita external_order_id solo numérico (rompe joins/listados alineados a ml_orders).
+      const nOid = Number(ml_order_id);
+      const nUid =
+        ml_user_id != null && String(ml_user_id).trim() !== ""
+          ? Number(ml_user_id)
+          : NaN;
+      const extOrderKey =
+        Number.isFinite(nUid) &&
+        nUid > 0 &&
+        Number.isFinite(nOid) &&
+        nOid > 0
+          ? `${nUid}-${nOid}`
+          : String(ml_order_id);
+
       const totalUsd = items.reduce(
         (sum, it) => sum + Number(it.unit_price_usd || 0) * Number(it.qty),
         0
@@ -145,7 +160,7 @@ class OrderGateway {
                  'pending', 'pending', 'mercado_envios')
          RETURNING id, payment_status, fulfillment_status`,
         [
-          String(ml_order_id),
+          extOrderKey,
           notes ?? null,
           totalUsd,
         ]
@@ -179,6 +194,23 @@ class OrderGateway {
       await client.query("COMMIT");
 
       await this._logSync("order", String(ml_order_id), "import", "ok", ml_user_id ?? null);
+
+      try {
+        const sseBroker = require("../realtime/sseBroker");
+        const nUid =
+          ml_user_id != null && String(ml_user_id).trim() !== ""
+            ? Number(ml_user_id)
+            : null;
+        sseBroker.broadcast("new_sale", {
+          sales_order_id: order.id,
+          ml_user_id: Number.isFinite(nUid) && nUid > 0 ? nUid : null,
+          order_id: Number(ml_order_id),
+          external_order_id: extOrderKey,
+          source: "order_gateway_ch03",
+        });
+      } catch (_sse) {
+        /* no crítico */
+      }
 
       return {
         order_id: order.id,

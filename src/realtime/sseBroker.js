@@ -2,6 +2,7 @@
 
 /** @type {Map<number, Set<import('http').ServerResponse>>} */
 const userSockets = new Map();
+const { traceMlQuestion } = require("../utils/mlQuestionTrace");
 
 const HEARTBEAT_MS = 25000;
 
@@ -74,6 +75,20 @@ function unregister(userId, res) {
 }
 
 function broadcast(eventName, payload) {
+  if (
+    payload &&
+    typeof payload === "object" &&
+    payload.source_type === "ml_question" &&
+    (eventName === "new_message" || eventName === "chat_reopened")
+  ) {
+    traceMlQuestion("sseBroker_broadcast", {
+      event: eventName,
+      chat_id: payload.chat_id != null ? Number(payload.chat_id) : null,
+      source_type: payload.source_type,
+      preview: payload.preview != null ? String(payload.preview) : "",
+      sockets_user_count: userSockets.size,
+    });
+  }
   for (const set of userSockets.values()) {
     for (const res of set) {
       try {

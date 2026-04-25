@@ -1258,6 +1258,17 @@ function scheduleTopicFetchFromWebhook(body) {
               try {
                 const row = buildQuestionPendingRow(parsed, mlUserId, notifId);
                 if (row) {
+                  try {
+                    const { traceMlQuestion } = require("./src/utils/mlQuestionTrace");
+                    traceMlQuestion("webhook_question_row_built", {
+                      ml_question_id: row.ml_question_id != null ? Number(row.ml_question_id) : null,
+                      ml_user_id: mlUserId,
+                      notif_id: notifId != null ? String(notifId) : null,
+                      ml_status: row.ml_status != null ? String(row.ml_status) : null,
+                    });
+                  } catch (_e) {
+                    /* trace best-effort */
+                  }
                   if (isQuestionAnsweredOrClosedStatus(row.ml_status)) {
                     const pendingSnap = await getMlQuestionPendingByQuestionId(row.ml_question_id);
                     const answeredRow = buildQuestionAnsweredRow(parsed, mlUserId, notifId);
@@ -1319,6 +1330,20 @@ function scheduleTopicFetchFromWebhook(body) {
                             r.skip === "already_sent" ||
                             r.skip === "dropped_stale_pending" ||
                             r.skip === "pending_too_old");
+                        try {
+                          const { traceMlQuestion } = require("./src/utils/mlQuestionTrace");
+                          traceMlQuestion("webhook_question_ia_attempt_result", {
+                            ml_question_id: row.ml_question_id != null ? Number(row.ml_question_id) : null,
+                            ml_user_id: mlUserId,
+                            ia_on: iaOn,
+                            ia_ok: r && r.ok === true,
+                            ia_skip: r && r.skip != null ? String(r.skip) : null,
+                            ia_status: r && r.status != null ? Number(r.status) : null,
+                            resolved_auto: Boolean(resueltaAuto),
+                          });
+                        } catch (_e) {
+                          /* trace best-effort */
+                        }
                         if (!resueltaAuto) {
                           await upsertMlQuestionPending({
                             ...row,
@@ -1355,6 +1380,15 @@ function scheduleTopicFetchFromWebhook(body) {
                       });
                     }
                     setImmediate(() => {
+                      try {
+                        const { traceMlQuestion } = require("./src/utils/mlQuestionTrace");
+                        traceMlQuestion("webhook_question_schedule_upsert_chat", {
+                          ml_question_id: row.ml_question_id != null ? Number(row.ml_question_id) : null,
+                          ml_user_id: mlUserId,
+                        });
+                      } catch (_e) {
+                        /* trace best-effort */
+                      }
                       (async () => {
                         try {
                           const { upsertMlQuestionChat } = require("./src/services/mlInboxBridge");

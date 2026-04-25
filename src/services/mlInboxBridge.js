@@ -9,6 +9,8 @@ const { pool } = require("../../db");
 const sseBroker = require("../realtime/sseBroker");
 const { applyInboundOmnichannelHook } = require("./omnichannelInboundHook");
 const { applyOutboundOmnichannelHook } = require("./omnichannelOutboundHook");
+const { traceMlQuestion } = require("../utils/mlQuestionTrace");
+const { invalidateInboxCountsCache } = require("./inboxService");
 
 function q(client) {
   return client && typeof client.query === "function" ? client : pool;
@@ -28,6 +30,11 @@ function parseTs(v) {
  */
 async function upsertMlQuestionChat(questionRow, client, ingestOpts = {}) {
   const silent = Boolean(ingestOpts && ingestOpts.silent);
+  traceMlQuestion("mlInboxBridge_upsert_question_chat_start", {
+    ml_question_id: questionRow && questionRow.ml_question_id != null ? Number(questionRow.ml_question_id) : null,
+    ml_user_id: questionRow && questionRow.ml_user_id != null ? Number(questionRow.ml_user_id) : null,
+    silent,
+  });
   // Whitelist operativo: si el número del comprador está en la lista, ignorar
   if (questionRow && questionRow.buyer_phone) {
     const { isPhoneWhitelisted } = require("../handlers/inboxWhitelistHandler");
@@ -117,6 +124,12 @@ async function upsertMlQuestionChat(questionRow, client, ingestOpts = {}) {
     );
     chatId = Number(ins.rows[0].id);
   }
+  traceMlQuestion("mlInboxBridge_upsert_question_chat_done", {
+    ml_question_id: mlQid,
+    chat_id: chatId,
+    is_new_chat: isNew,
+    silent,
+  });
 
   const insQ = await db.query(
     `INSERT INTO crm_messages (
@@ -129,6 +142,12 @@ async function upsertMlQuestionChat(questionRow, client, ingestOpts = {}) {
      ON CONFLICT (external_message_id) DO NOTHING`,
     [chatId, `ml_q_${mlQid}`, JSON.stringify({ text: qtext }), lastAt]
   );
+  traceMlQuestion("mlInboxBridge_insert_inbound_message_done", {
+    ml_question_id: mlQid,
+    chat_id: chatId,
+    inserted_message: insQ.rowCount > 0,
+    silent,
+  });
 
   // Bloque 1 · Motor omnicanal — inbound (omnichannelInboundHook)
   if (insQ.rowCount > 0 && !silent) {
@@ -137,6 +156,11 @@ async function upsertMlQuestionChat(questionRow, client, ingestOpts = {}) {
       previewText: qtext,
       messageType: "text",
     });
+    traceMlQuestion("mlInboxBridge_apply_inbound_hook_done", {
+      ml_question_id: mlQid,
+      chat_id: chatId,
+    });
+    invalidateInboxCountsCache();
   }
 
   if (Number.isFinite(buyerId) && buyerId > 0) {
@@ -240,6 +264,7 @@ async function upsertMlMessageChat(messageRow, client) {
       );
       await applyOutboundOmnichannelHook(db, chatId);
       sseBroker.broadcast("clear_notification", { chat_id: chatId });
+      invalidateInboxCountsCache();
     }
 
     return { chatId, isNew: false, direction: "outbound" };
@@ -330,6 +355,7 @@ async function upsertMlMessageChat(messageRow, client) {
       previewText: msgText,
       messageType: "text",
     });
+    invalidateInboxCountsCache();
   }
 
   if (buyerIdForLink != null) {
@@ -368,6 +394,7 @@ async function finalizeAnsweredMlQuestionInCrm(dbClient, chatId) {
   try {
     await applyOutboundOmnichannelHook(dbClient, cid);
     sseBroker.broadcast("clear_notification", { chat_id: cid });
+    invalidateInboxCountsCache();
   } catch (e) {
     console.error("[mlInboxBridge] finalizeAnsweredMlQuestionInCrm", e && e.message ? e.message : e);
   }

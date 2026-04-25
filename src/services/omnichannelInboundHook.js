@@ -2,6 +2,7 @@
 
 const pino = require("pino");
 const sseBroker = require("../realtime/sseBroker");
+const { traceMlQuestion } = require("../utils/mlQuestionTrace");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -173,6 +174,14 @@ async function applyInboundOmnichannelHook(dbClient, chatId, opts) {
       );
       sseBroker.broadcast("chat_reopened", ssePayload);
       sseBroker.broadcast("new_message", ssePayload);
+      if (source_type === "ml_question") {
+        traceMlQuestion("omnichannel_inbound_broadcast_reopened_and_new_message", {
+          chat_id: cid,
+          source_type,
+          channel_id,
+          preview,
+        });
+      }
       return;
     }
 
@@ -181,6 +190,14 @@ async function applyInboundOmnichannelHook(dbClient, chatId, opts) {
       [cid]
     );
     sseBroker.broadcast("new_message", ssePayload);
+    if (source_type === "ml_question") {
+      traceMlQuestion("omnichannel_inbound_broadcast_new_message", {
+        chat_id: cid,
+        source_type,
+        channel_id,
+        preview,
+      });
+    }
   } catch (e) {
     logger.error({ err: e }, "[omnichannel] inbound hook error");
   }

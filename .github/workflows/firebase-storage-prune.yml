@@ -1,0 +1,72 @@
+# Limpieza periódica de Firebase Storage: solo wa-audios/, wa-images/, wa-videos/
+# (nunca productos/). Ajustá cron y días según necesidad.
+#
+# Secrets obligatorios (mismo esquema que el servidor):
+#   FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY
+#
+# Opcional para el cron programado (por defecto el schedule hace dry-run):
+#   FIREBASE_STORAGE_PRUNE_SCHEDULE_EXECUTE=1  → en schedule usa --execute (borrado real)
+
+name: Firebase Storage prune (WA media)
+
+on:
+  schedule:
+    # Domingo 06:15 UTC — cambiá si querés otra periodicidad
+    - cron: "15 6 * * 0"
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: "Días de retención (archivos más viejos se listan o borran)"
+        required: false
+        default: "20"
+      dry_run:
+        description: "Solo listar (true) o borrar (false)"
+        type: boolean
+        required: false
+        default: true
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prune WA media folders
+        env:
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
+          FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
+        run: |
+          test -n "${FIREBASE_PROJECT_ID}"
+          test -n "${FIREBASE_CLIENT_EMAIL}"
+          test -n "${FIREBASE_PRIVATE_KEY}"
+
+          DAYS='${{ github.event.inputs.retention_days }}'
+          if [ -z "$DAYS" ] || [ "$DAYS" = "null" ]; then DAYS=20; fi
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "Modo: schedule"
+            if [ "${{ secrets.FIREBASE_STORAGE_PRUNE_SCHEDULE_EXECUTE }}" = "1" ]; then
+              echo "FIREBASE_STORAGE_PRUNE_SCHEDULE_EXECUTE=1 → borrado real"
+              node scripts/firebase-storage-prune-old.js --wa-media --skip-wait --days="$DAYS" --execute
+            else
+              echo "Sin secret FIREBASE_STORAGE_PRUNE_SCHEDULE_EXECUTE=1 → dry-run"
+              node scripts/firebase-storage-prune-old.js --wa-media --skip-wait --days="$DAYS" --dry-run
+            fi
+          else
+            echo "Modo: workflow_dispatch dry_run=${{ github.event.inputs.dry_run }}"
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              node scripts/firebase-storage-prune-old.js --wa-media --skip-wait --days="$DAYS" --dry-run
+            else
+              node scripts/firebase-storage-prune-old.js --wa-media --skip-wait --days="$DAYS" --execute
+            fi
+          fi

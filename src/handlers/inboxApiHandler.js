@@ -989,9 +989,11 @@ async function handleInboxApiRequest(req, res, url) {
       return true;
     }
     if (err && err.code === "CRM_SCHEMA_MISSING") {
+      const cause = err.cause;
       writeJson(res, 503, {
         error: "crm_schema_missing",
         message: err.message || String(err),
+        pg_code: cause && cause.code ? String(cause.code) : err.pgCode ? String(err.pgCode) : undefined,
       });
       return true;
     }

@@ -9,6 +9,7 @@ const { customersHasPhone2Column } = require("../utils/customersPhone2");
 const { salesOrdersHasLifecycleColumns } = require("../utils/salesOrdersLifecycle");
 const bundleService = require("./bundleService");
 const { V_SALES_UNIFIED_BS_AMOUNT } = require("../utils/statsHelpers");
+const { normalizePhone } = require("../utils/phoneNormalizer");
 
 const MANUAL_SOURCES = new Set(["mostrador", "social_media", "ecommerce", "fuerza_ventas"]);
 
@@ -688,16 +689,16 @@ async function fetchSalesOrderOmnichannelDetail(oid, opts) {
               rating_deadline_at, is_rating_alert`
       : "";
     const { rows: orows } = await pool.query(
-      `SELECT id, source, external_order_id, customer_id, status,
-              order_total_amount,
-              total_amount_bs, exchange_rate_bs_per_usd, payment_method,
-              loyalty_points_earned,
-              notes, sold_by, created_at, updated_at,
-              conversation_id,
-              COALESCE(applies_stock, TRUE) AS applies_stock,
-              COALESCE(records_cash, TRUE) AS records_cash,
-              ml_user_id,
-              fulfillment_type::text AS fulfillment_type,
+      `SELECT so.id, so.source, so.external_order_id, so.customer_id, so.status,
+              so.order_total_amount,
+              so.total_amount_bs, so.exchange_rate_bs_per_usd, so.payment_method,
+              so.loyalty_points_earned,
+              so.notes, so.sold_by, so.created_at, so.updated_at,
+              so.conversation_id,
+              COALESCE(so.applies_stock, TRUE) AS applies_stock,
+              COALESCE(so.records_cash, TRUE) AS records_cash,
+              so.ml_user_id,
+              so.fulfillment_type::text AS fulfillment_type,
               rl.bank_statement_id AS reconciled_statement_id
               ${lifecycleCols}
        FROM sales_orders so
@@ -1030,12 +1031,26 @@ async function listSalesOrders({
     cond.push(`vu.created_at <= $${n++}`);
     params.push(to);
   }
-  // Evita contaminar "ventas activas" con órdenes ML antiguas.
+  // Ventana ML: por defecto oculta órdenes con `created_at` (fecha compra ML) muy antigua.
+  // Incluye filas cuya fila ERP se actualizó recientemente (`sales_orders.updated_at`): import tardío,
+  // webhook o sync — evita que pedidos "nuevos" en ERP queden fuera del listado.
   const mlActiveDays = resolveMlActiveMaxDays();
-  cond.push(
-    `(vu.source <> 'mercadolibre' OR vu.created_at >= (NOW() - ($${n++}::text || ' days')::interval))`
-  );
+  const mlDaysParamIdx = n++;
   params.push(String(mlActiveDays));
+  cond.push(
+    `(vu.source <> 'mercadolibre' OR (
+      vu.created_at >= (NOW() - ($${mlDaysParamIdx}::text || ' days')::interval)
+      OR (
+        vu.source_table = 'sales_orders'
+        AND EXISTS (
+          SELECT 1 FROM sales_orders so_ml
+          WHERE so_ml.id = vu.source_id
+            AND so_ml.source = 'mercadolibre'
+            AND so_ml.updated_at >= (NOW() - ($${mlDaysParamIdx}::text || ' days')::interval)
+        )
+      )
+    ))`
+  );
   const whereVu = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
 
   const lifecycleStageExpr = `
@@ -1086,6 +1101,7 @@ async function listSalesOrders({
       SELECT vu.id, vu.source, vu.external_order_id, vu.customer_id, vu.status,
              vu.order_total_amount, vu.loyalty_points_earned,
              vu.notes, vu.sold_by, vu.created_at,
+             so.updated_at AS sales_order_updated_at,
              vu.reconciled_statement_id,
              so.ml_user_id AS ml_user_id,
              ma.nickname AS ml_account_nickname,
@@ -1108,6 +1124,18 @@ async function listSalesOrders({
                  THEN mo.raw_json::json #>> '{buyer,nickname}'
                  ELSE NULL END
              ) AS customer_name,
+             NULLIF(
+               TRIM(
+                 CONCAT_WS(
+                   ' / ',
+                   NULLIF(TRIM(cust.phone), ''),
+                   NULLIF(TRIM(cust.phone_2), ''),
+                   NULLIF(TRIM(cust.alternative_phone), '')
+                 )
+               ),
+               ''
+             ) AS customer_phones_line,
+             cust.primary_ml_buyer_id AS customer_primary_ml_buyer_id,
              (${lifecycleStageExpr}) AS lifecycle_stage,
              (${waitingBuyerExpr}) AS waiting_buyer_feedback,
              -- Preview de ítems (máx 3):
@@ -1214,7 +1242,17 @@ async function listSalesOrders({
                  LIMIT 1
                )
                ELSE NULL
-             END AS quote_preview_json
+             END AS quote_preview_json,
+             CASE
+               WHEN vu.source_table = 'sales_orders'
+                AND so.source = 'mercadolibre'
+                AND so.external_order_id ~ '^[0-9]+-[0-9]+$'
+               THEN split_part(so.external_order_id, '-', 2)::bigint
+               ELSE NULL
+             END AS ml_api_order_id,
+             mo.feedback_sale AS ml_feedback_sale,
+             mo.feedback_purchase AS ml_feedback_purchase,
+             mo.raw_json::json->>'site_id' AS ml_site_id
       ${enrichedFrom}
     )`;
 
@@ -1247,12 +1285,18 @@ async function listSalesOrders({
               e.total_amount_bs,
               e.exchange_rate_bs_per_usd,
               e.customer_name,
+              e.customer_phones_line,
+              e.customer_primary_ml_buyer_id,
               e.lifecycle_stage,
               e.waiting_buyer_feedback,
               e.items_preview_json,
-              e.quote_preview_json
+              e.quote_preview_json,
+              e.ml_api_order_id,
+              e.ml_feedback_sale,
+              e.ml_feedback_purchase,
+              e.ml_site_id
        FROM filtered e
-       ORDER BY e.created_at DESC
+       ORDER BY e.created_at DESC NULLS LAST, e.id DESC
        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       paramsList
     );
@@ -1335,10 +1379,36 @@ async function listSalesOrders({
             o.customer_name != null && String(o.customer_name).trim() !== ""
               ? String(o.customer_name).trim()
               : null,
+          customer_phones_line:
+            o.customer_phones_line != null && String(o.customer_phones_line).trim() !== ""
+              ? String(o.customer_phones_line).trim()
+              : null,
+          customer_primary_ml_buyer_id:
+            o.customer_primary_ml_buyer_id != null &&
+            Number.isFinite(Number(o.customer_primary_ml_buyer_id)) &&
+            Number(o.customer_primary_ml_buyer_id) > 0
+              ? Number(o.customer_primary_ml_buyer_id)
+              : null,
           items_preview: Array.isArray(o.items_preview_json)
             ? o.items_preview_json
             : (o.items_preview_json != null ? o.items_preview_json : null),
           quote_preview: o.quote_preview_json != null ? o.quote_preview_json : null,
+          ml_api_order_id:
+            o.ml_api_order_id != null && Number.isFinite(Number(o.ml_api_order_id))
+              ? Number(o.ml_api_order_id)
+              : null,
+          ml_feedback_sale:
+            o.ml_feedback_sale != null && String(o.ml_feedback_sale).trim() !== ""
+              ? String(o.ml_feedback_sale).trim()
+              : null,
+          ml_feedback_purchase:
+            o.ml_feedback_purchase != null && String(o.ml_feedback_purchase).trim() !== ""
+              ? String(o.ml_feedback_purchase).trim()
+              : null,
+          ml_site_id:
+            o.ml_site_id != null && String(o.ml_site_id).trim() !== ""
+              ? String(o.ml_site_id).trim().toUpperCase()
+              : null,
         };
       }),
       total: Number(countRows[0].c),
@@ -1580,10 +1650,20 @@ async function resolveCustomerIdFromMlBuyer(client, buyerId) {
   return null;
 }
 
-function normMlBuyerPhone(v) {
-  if (v == null) return null;
-  const s = String(v).trim();
-  return s === "" ? null : s;
+/**
+ * Cumple `chk_phone_format` en `customers.phone` / `phone_2`: solo dígitos, 7–15.
+ * Si ML trae formato no normalizable, devuelve null (se inserta sin teléfono; el buyer_id queda en notes).
+ */
+function sanitizeMlBuyerPhoneForCustomers(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const viaNorm = normalizePhone(s);
+  if (viaNorm && viaNorm.length >= 7 && viaNorm.length <= 15) return viaNorm;
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.length >= 7 && digits.length <= 15) return digits;
+  return null;
 }
 
 /**
@@ -1603,16 +1683,21 @@ async function ensureCustomerAndLinkMlBuyer(client, buyerId) {
   );
   if (!br.length) return null;
   const b = br[0];
-  const p1 = normMlBuyerPhone(b.phone_1);
-  const p2 = normMlBuyerPhone(b.phone_2);
+  const p1 = sanitizeMlBuyerPhoneForCustomers(b.phone_1);
+  const p2 = sanitizeMlBuyerPhoneForCustomers(b.phone_2);
   const nameFromMl =
     (b.nombre_apellido && String(b.nombre_apellido).trim()) ||
     (b.nickname && String(b.nickname).trim()) ||
     `Comprador ML ${bid}`;
 
   const hasPhone2Col = await customersHasPhone2Column(client);
+  const raw2 = b.phone_2 != null ? String(b.phone_2).trim() : "";
   const notesBase = `Auto ML buyer_id=${bid}`;
-  const notesWithAlt = p2 && !hasPhone2Col ? `${notesBase} | tel2 ML: ${p2}` : notesBase;
+  let notesWithAlt = notesBase;
+  if (!hasPhone2Col) {
+    if (p2) notesWithAlt = `${notesBase} | tel2 ML: ${p2}`;
+    else if (raw2) notesWithAlt = `${notesBase} | tel2 ML (sin formato BD): ${raw2.slice(0, 120)}`;
+  }
 
   let cid = await resolveCustomerIdFromMlBuyer(client, bid);
   if (cid != null) {
@@ -1766,7 +1851,13 @@ function lifecycleStatusFromSalesStatus(st) {
  *
  * @param {{ mlUserId: number, orderId: number }} p
  */
-async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
+/**
+ * @param {{ mlUserId: number, orderId: number, force?: boolean }} p
+ *   `force = true` omite el corte de antigüedad (`too_old_ml_order`). Usar siempre que el origen
+ *   sea un evento activo de ML (webhook `orders_v2`, feedback, reconciliación explícita) para evitar
+ *   órdenes huérfanas cuando la orden tiene más días que `SALES_ML_ACTIVE_MAX_DAYS`.
+ */
+async function importSalesOrderFromMlOrder({ mlUserId, orderId, force = false }) {
   if (process.env.SALES_ML_IMPORT_ENABLED !== "1") {
     const e = new Error("Import ML desactivado (SALES_ML_IMPORT_ENABLED=1)");
     e.code = "IMPORT_DISABLED";
@@ -1797,8 +1888,10 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId }) {
       throw e;
     }
     const ml = mrows[0];
-    const mlActiveDays = resolveMlActiveMaxDays();
-    if (ml.date_created) {
+    // El corte de antigüedad solo aplica al import automático/en lote.
+    // Con force=true (webhook activo, reconciliación explícita) se importa siempre.
+    if (!force && ml.date_created) {
+      const mlActiveDays = resolveMlActiveMaxDays();
       const ageMs = Date.now() - new Date(ml.date_created).getTime();
       const maxMs = mlActiveDays * 24 * 60 * 60 * 1000;
       if (Number.isFinite(ageMs) && ageMs > maxMs) {
@@ -2022,12 +2115,131 @@ function isMlFeedbackSalePositive(s) {
   return String(s || "").trim().toLowerCase() === "positive";
 }
 
+function mlFeedbackPostErrorMessage(mlRes) {
+  const d = mlRes && mlRes.data;
+  if (d && typeof d === "object") {
+    if (d.message != null) return String(d.message);
+    if (d.error != null) return String(d.error);
+    if (d.cause && typeof d.cause === "object" && d.cause.message != null) {
+      return String(d.cause.message);
+    }
+  }
+  const t = mlRes && typeof mlRes.rawText === "string" ? mlRes.rawText : "";
+  return t ? t.slice(0, 400) : mlRes && mlRes.status != null ? `HTTP ${mlRes.status}` : "Error ML";
+}
+
+/**
+ * POST `…/orders/{id}/feedback` — calificación del **vendedor hacia el comprador** (API ML).
+ *
+ * @param {{ mlUserId: number, orderId: number, fulfilled?: boolean, rating?: string, message: string, reason?: string, restock_item?: boolean }} p
+ */
+async function postMlSellerOrderFeedback({
+  mlUserId,
+  orderId,
+  fulfilled = true,
+  rating = "positive",
+  message,
+  reason,
+  restock_item,
+}) {
+  const uid = Number(mlUserId);
+  const oid = Number(orderId);
+  if (!Number.isFinite(uid) || uid <= 0 || !Number.isFinite(oid) || oid <= 0) {
+    const e = new Error("ml_user_id y order_id deben ser números válidos");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const msg = message != null ? String(message).trim() : "";
+  if (msg.length < 1 || msg.length > 160) {
+    const e = new Error("message: requerido, entre 1 y 160 caracteres");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const f = Boolean(fulfilled);
+  const r = String(rating || "positive").trim().toLowerCase();
+  if (f && r !== "positive") {
+    const e = new Error("Si la venta se cumplió (fulfilled: true), la calificación debe ser positive");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  if (!f && !["neutral", "negative"].includes(r)) {
+    const e = new Error("Si fulfilled es false, rating debe ser neutral o negative");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const body = { fulfilled: f, rating: r, message: msg };
+  if (!f) {
+    const rs = reason != null ? String(reason).trim() : "";
+    if (rs.length < 1) {
+      const e = new Error(
+        "reason es obligatoria cuando fulfilled es false (p. ej. OUT_OF_STOCK según documentación ML)"
+      );
+      e.code = "BAD_REQUEST";
+      throw e;
+    }
+    body.reason = rs;
+    body.restock_item = Boolean(restock_item);
+  }
+
+  const { mercadoLibrePostJsonForUser } = require("../../oauth-token");
+  const mlRes = await mercadoLibrePostJsonForUser(uid, `/orders/${oid}/feedback`, body);
+  if (!mlRes.ok) {
+    const m = mlFeedbackPostErrorMessage(mlRes);
+    const e = new Error(m || "Error al enviar calificación a Mercado Libre");
+    e.code = "ML_HTTP";
+    e.httpStatus =
+      Number(mlRes.status) >= 400 && Number(mlRes.status) < 600 ? Number(mlRes.status) : 502;
+    e.detail = {
+      path: mlRes.path,
+      http_status: mlRes.status,
+      body_preview: typeof mlRes.rawText === "string" ? mlRes.rawText.slice(0, 800) : null,
+    };
+    throw e;
+  }
+
+  const { fetchAndUpsertOrderFeedback } = require("../../ml-order-feedback-sync");
+  const fetchedAt = new Date().toISOString();
+  let feedbackRefresh = { ok: false };
+  try {
+    feedbackRefresh = await fetchAndUpsertOrderFeedback(uid, oid, fetchedAt);
+  } catch (fbErr) {
+    console.error("[postMlSellerOrderFeedback] fetch feedback post-submit", fbErr);
+    feedbackRefresh = {
+      ok: false,
+      err: fbErr && fbErr.message ? fbErr.message : String(fbErr),
+    };
+  }
+
+  let salesSync = null;
+  try {
+    salesSync = await syncMercadolibreSalesAfterMlOrderChange({
+      mlUserId: uid,
+      orderId: oid,
+      force: true,
+    });
+  } catch (syncErr) {
+    console.error("[postMlSellerOrderFeedback] sales sync", syncErr);
+    salesSync = { error: syncErr && syncErr.message ? syncErr.message : String(syncErr) };
+  }
+
+  return {
+    ok: true,
+    ml_response: mlRes.data,
+    feedback_refresh: feedbackRefresh,
+    sales_sync: salesSync,
+  };
+}
+
 /**
  * Tras cambios en `ml_orders` (webhook, sync órdenes/feedback): asegura fila en `sales_orders` y
  * marca `completed` cuando el vendedor dejó calificación positiva (`feedback_sale`).
  * Requiere migración `completed` en CHECK de `sales_orders` y `SALES_ML_IMPORT_ENABLED=1`.
  */
-async function syncMercadolibreSalesAfterMlOrderChange({ mlUserId, orderId }) {
+/**
+ * @param {{ mlUserId: number, orderId: number, force?: boolean }} p
+ *   `force` se propaga a `importSalesOrderFromMlOrder` para no descartar la orden por antigüedad.
+ */
+async function syncMercadolibreSalesAfterMlOrderChange({ mlUserId, orderId, force = false }) {
   if (process.env.SALES_ML_IMPORT_ENABLED !== "1") {
     return { skipped: true, reason: "SALES_ML_IMPORT_DISABLED" };
   }
@@ -2053,7 +2265,7 @@ async function syncMercadolibreSalesAfterMlOrderChange({ mlUserId, orderId }) {
       [extId]
     );
     if (!ex.rows.length) {
-      const imported = await importSalesOrderFromMlOrder({ mlUserId: mUid, orderId: oid });
+      const imported = await importSalesOrderFromMlOrder({ mlUserId: mUid, orderId: oid, force });
       if (imported && !imported.idempotent) {
         try {
           const sseBroker = require("../realtime/sseBroker");
@@ -2312,6 +2524,152 @@ async function importSalesOrdersFromMlTable({
 }
 
 /**
+ * Encuentra filas de `ml_orders` que no tienen `sales_orders` correspondiente e importa cada una.
+ *
+ * Casos cubiertos que el import automático por webhook podría haber perdido:
+ *  - Servidor caído durante el webhook.
+ *  - `SALES_ML_IMPORT_ENABLED` no estaba activo al momento del hook.
+ *  - Orden descartada por `too_old_ml_order` en el import automático.
+ *  - Error en el import que dejó la orden sin fila en ERP.
+ *
+ * @param {{ mlUserId?: number, allAccounts?: boolean, dryRun?: boolean, limit?: number, verbose?: boolean, onProgress?: (p: { current: number, total: number, ml_user_id: number, order_id: number|string }) => void }} p
+ *   - `allAccounts: true` procesa todas las cuentas registradas en `ml_accounts`.
+ *   - `dryRun: true` solo lista los huérfanos sin importar.
+ *   - `limit` máximo de órdenes a procesar por llamada (default 200, máx 1000).
+ *   - `verbose` / `onProgress`: feedback durante el import (CLI); en HTTP suele ir en false.
+ */
+async function reconcileMlSalesOrphans({
+  mlUserId,
+  allAccounts = false,
+  dryRun = false,
+  limit = 200,
+  verbose = false,
+  onProgress,
+} = {}) {
+  if (!dryRun && process.env.SALES_ML_IMPORT_ENABLED !== "1") {
+    const e = new Error("Import ML desactivado (SALES_ML_IMPORT_ENABLED=1)");
+    e.code = "IMPORT_DISABLED";
+    throw e;
+  }
+  const lim = Math.min(Math.max(Number(limit) || 200, 1), 1000);
+  let whereSql;
+  const qParams = [];
+  let n = 1;
+
+  if (allAccounts) {
+    whereSql = `${ML_ORDERS_REGISTERED_ACCOUNTS_SQL}`;
+  } else {
+    const mUid = Number(mlUserId);
+    if (!Number.isFinite(mUid) || mUid <= 0) {
+      const e = new Error("ml_user_id inválido (o usá allAccounts: true)");
+      e.code = "BAD_REQUEST";
+      throw e;
+    }
+    whereSql = `ml_user_id = $${n++}`;
+    qParams.push(mUid);
+  }
+
+  // Busca órdenes en ml_orders sin fila correspondiente en sales_orders.
+  // external_order_id en sales_orders = "{ml_user_id}-{order_id}".
+  const { rows: orphans } = await pool.query(
+    `SELECT mo.ml_user_id, mo.order_id, mo.status, mo.date_created
+     FROM ml_orders mo
+     WHERE ${whereSql}
+       AND NOT EXISTS (
+         SELECT 1 FROM sales_orders so
+         WHERE so.source = 'mercadolibre'
+           AND so.external_order_id = (mo.ml_user_id::text || '-' || mo.order_id::text)
+       )
+       AND mo.status IS NOT NULL
+       AND mo.status NOT IN ('cancelled', 'invalid')
+     ORDER BY mo.id DESC
+     LIMIT $${n++}`,
+    [...qParams, lim]
+  );
+
+  const summary = {
+    orphans_found: orphans.length,
+    imported: 0,
+    skipped: 0,
+    errors: [],
+    dry_run: dryRun,
+    scope: allAccounts ? "all_accounts" : "single",
+    ml_user_id: allAccounts ? null : Number(mlUserId),
+  };
+
+  if (dryRun) {
+    summary.sample = orphans.slice(0, 20).map((r) => ({
+      ml_user_id: r.ml_user_id,
+      order_id: r.order_id,
+      status: r.status,
+      date_created: r.date_created,
+    }));
+    return summary;
+  }
+
+  const total = orphans.length;
+  let sseBroker = null;
+  try {
+    sseBroker = require("../realtime/sseBroker");
+  } catch (_) {
+    /* sin SSE en scripts / tests */
+  }
+
+  for (let i = 0; i < orphans.length; i++) {
+    const r = orphans[i];
+    const current = i + 1;
+    const prog = { current, total, ml_user_id: r.ml_user_id, order_id: r.order_id };
+    if (typeof onProgress === "function") {
+      try {
+        onProgress(prog);
+      } catch (_p) {}
+    } else if (verbose) {
+      const line = `[reconcile] (${current}/${total}) importando ml_user_id=${r.ml_user_id} order_id=${r.order_id}`;
+      if (typeof process !== "undefined" && process.stdout && process.stdout.isTTY) {
+        process.stdout.write(`\r${line.padEnd(88)}`);
+      } else {
+        console.log(line);
+      }
+    }
+    try {
+      const out = await importSalesOrderFromMlOrder({
+        mlUserId: r.ml_user_id,
+        orderId: r.order_id,
+        force: true,
+      });
+      if (out && out.skipped) {
+        summary.skipped++;
+      } else {
+        summary.imported++;
+        if (sseBroker && typeof sseBroker.broadcast === "function") {
+          try {
+            sseBroker.broadcast("new_sale", {
+              sales_order_id: out.id,
+              ml_user_id: r.ml_user_id,
+              order_id: r.order_id,
+              external_order_id: `${r.ml_user_id}-${r.order_id}`,
+              source: "ml_reconcile_orphans",
+            });
+          } catch (_) {}
+        }
+      }
+    } catch (err) {
+      // NOT_FOUND en ml_orders (borrada?) o error de constraint: anotar y continuar.
+      summary.errors.push({
+        ml_user_id: r.ml_user_id,
+        order_id: r.order_id,
+        message: String(err && err.message),
+        code: err && err.code,
+      });
+    }
+  }
+  if (verbose && total > 0 && typeof process !== "undefined" && process.stdout && process.stdout.isTTY) {
+    process.stdout.write("\n");
+  }
+  return summary;
+}
+
+/**
  * Intenta vincular una orden ML a un crm_chat existente.
  *
  * Estrategia (en orden de preferencia):
@@ -2388,7 +2746,9 @@ module.exports = {
   patchSalesOrderFulfillmentType,
   importSalesOrderFromMlOrder,
   importSalesOrdersFromMlTable,
+  reconcileMlSalesOrphans,
   previewMlOrdersImport,
+  postMlSellerOrderFeedback,
   syncMercadolibreSalesAfterMlOrderChange,
   ensureCustomerAndLinkMlBuyer,
   mapErr,

@@ -232,6 +232,13 @@ const CHAT_STAGE_EXPR = `
   END
 `;
 
+/** Calcula `CHAT_STAGE_EXPR` una sola vez por fila (evita repetir el CASE en WHERE pipeline / filtros). */
+const JOIN_CHAT_STAGE_SCALAR = `
+  LEFT JOIN LATERAL (
+    SELECT ((${CHAT_STAGE_EXPR}))::text AS chat_stage_text
+  ) _cs ON true
+`;
+
 /**
  * Filtro `?pipeline_default=1`: pipeline abierto (≠ closed) con reglas de tiempo/origen.
  * Debe declararse después de `CHAT_STAGE_EXPR`. Requiere JOIN `qwin` si se usa.
@@ -420,7 +427,7 @@ function buildFilters(
   pushSrcOrConds(conds, srcParts);
 
   if (stageList && stageList.length) {
-    conds.push(`((${CHAT_STAGE_EXPR}))::text = ANY($${p}::text[])`);
+    conds.push(`_cs.chat_stage_text::text = ANY($${p}::text[])`);
     params.push(stageList);
     p += 1;
   }
@@ -430,9 +437,7 @@ function buildFilters(
   } else if (result === "converted") {
     conds.push(`sol.id IS NOT NULL`);
   } else if (result === "in_progress") {
-    conds.push(
-      `((${CHAT_STAGE_EXPR}))::text IN ('quote','order','payment','dispatch')`
-    );
+    conds.push(`_cs.chat_stage_text::text IN ('quote','order','payment','dispatch')`);
   }
 
   if (search) {
@@ -513,20 +518,17 @@ async function listInbox(opts) {
     ${JOIN_QUOTE_ACTIVE}
     ${quoteWinJoin}
     ${JOIN_ML_QUESTION_ANSWERED}
+    ${JOIN_CHAT_STAGE_SCALAR}
     ${JOIN_LAST_MESSAGE}
     WHERE 1=1
     ${where}
   `;
 
-  try {
-    const countSql = `SELECT COUNT(*)::bigint AS n ${fromCommon}`;
-    const { rows: countRows } = await pool.query(countSql, [...params]);
-    const total = Number(countRows[0].n) || 0;
+  const orderSql = pipelineDefault
+    ? `CASE WHEN (${PENDING_REPLY_EXPR}) THEN 0 ELSE 1 END, cc.last_message_at DESC NULLS LAST, cc.id DESC`
+    : `cc.last_message_at DESC NULLS LAST, cc.id DESC`;
 
-    const limPos = params.length + 1;
-    const listParams = [...params, limit + 1];
-    const sql = `
-      SELECT
+  const selectList = `
         cc.id,
         cc.phone,
         cc.source_type,
@@ -550,7 +552,7 @@ async function listInbox(opts) {
         so.payment_status::text AS payment_status,
         so.fulfillment_type,
         so.channel_id,
-        (${CHAT_STAGE_EXPR}) AS chat_stage,
+        _cs.chat_stage_text AS chat_stage,
         EXISTS (
           SELECT 1 FROM exceptions ex
           WHERE ex.chat_id = cc.id AND ex.status = 'open'
@@ -559,17 +561,45 @@ async function listInbox(opts) {
           SELECT ex2.reason FROM exceptions ex2
           WHERE ex2.chat_id = cc.id AND ex2.status = 'open'
           ORDER BY ex2.created_at DESC LIMIT 1
-        ) AS top_exception_reason
-      ${fromCommon}
-      ORDER BY ${
-        pipelineDefault
-          ? `CASE WHEN (${PENDING_REPLY_EXPR}) THEN 0 ELSE 1 END, cc.last_message_at DESC NULLS LAST, cc.id DESC`
-          : `cc.last_message_at DESC NULLS LAST, cc.id DESC`
-      }
-      LIMIT $${limPos}
-    `;
+        ) AS top_exception_reason`;
 
-    const { rows } = await pool.query(sql, listParams);
+  try {
+    const limPos = params.length + 1;
+    const listParams = [...params, limit + 1];
+
+    /** Sin cursor: una sola pasada (total vía ventana) en lugar de COUNT(*) + SELECT duplicado. */
+    const useWindowTotal = cursorIso == null;
+    let total = 0;
+    let rows;
+
+    if (useWindowTotal) {
+      const sql = `
+        SELECT * FROM (
+          SELECT
+            ${selectList},
+            COUNT(*) OVER() AS inbox_total
+          ${fromCommon}
+        ) inbox_counted
+        ORDER BY ${orderSqlOuter}
+        LIMIT $${limPos}
+      `;
+      const res = await pool.query(sql, listParams);
+      rows = res.rows;
+      total = rows.length ? Number(rows[0].inbox_total) || 0 : 0;
+    } else {
+      const countSql = `SELECT COUNT(*)::bigint AS n ${fromCommon}`;
+      const { rows: countRows } = await pool.query(countSql, [...params]);
+      total = Number(countRows[0].n) || 0;
+      const sql = `
+        SELECT
+          ${selectList}
+        ${fromCommon}
+        ORDER BY ${orderSqlInner}
+        LIMIT $${limPos}
+      `;
+      const res = await pool.query(sql, listParams);
+      rows = res.rows;
+    }
     const hasMore = rows.length > limit;
     const slice = hasMore ? rows.slice(0, limit) : rows;
 
@@ -824,6 +854,7 @@ async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDe
     ${JOIN_QUOTE_ACTIVE}
     ${quoteWinJoin}
     ${JOIN_ML_QUESTION_ANSWERED}
+    ${JOIN_CHAT_STAGE_SCALAR}
     ${JOIN_LAST_MESSAGE}
     WHERE 1=1
     ${where}

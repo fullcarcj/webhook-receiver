@@ -382,9 +382,11 @@ async function handleSalesApiRequest(req, res, url) {
       }
       const d = parsed.data;
       if (d.order_id != null) {
+        // force:true: el admin pidió una orden puntual — importar sin importar su antigüedad.
         const data = await salesService.importSalesOrderFromMlOrder({
           mlUserId: d.ml_user_id,
           orderId: d.order_id,
+          force: true,
         });
         if (!data.idempotent) {
           try {
@@ -413,6 +415,79 @@ async function handleSalesApiRequest(req, res, url) {
           mlFeedbackFilter: d.ml_feedback_filter,
         });
         writeJson(res, 200, { data, meta: { timestamp: new Date().toISOString() } });
+      }
+      return true;
+    }
+
+    /** POST /api/sales/ml/reconcile — detecta huérfanos en ml_orders sin sales_orders e importa. */
+    if (req.method === "POST" && (pathname === "/api/sales/ml/reconcile" || segment === "ml/reconcile")) {
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
+      let body = {};
+      try { body = await parseJsonBody(req); } catch (_e) { /* body opcional */ }
+      const dryRun = body.dry_run === true || String(body.dry_run ?? "").toLowerCase() === "true";
+      const allAccounts = body.all_accounts === true || String(body.all_accounts ?? "").toLowerCase() === "true";
+      const mlUserId = body.ml_user_id != null ? Number(body.ml_user_id) : undefined;
+      const limit = body.limit != null ? Number(body.limit) : undefined;
+      if (!allAccounts && (mlUserId == null || !Number.isFinite(mlUserId) || mlUserId <= 0)) {
+        writeJson(res, 400, { error: "bad_request", message: "Requerido: ml_user_id (número) o all_accounts:true" });
+        return true;
+      }
+      const result = await salesService.reconcileMlSalesOrphans({
+        mlUserId,
+        allAccounts,
+        dryRun,
+        limit,
+        verbose: body.verbose === true,
+      });
+      writeJson(res, 200, { data: result, meta: { timestamp: new Date().toISOString() } });
+      return true;
+    }
+
+    /** POST /api/sales/ml/feedback — calificación del vendedor hacia el comprador (API ML). */
+    if (req.method === "POST" && (pathname === "/api/sales/ml/feedback" || segment === "ml/feedback")) {
+      if (!await requireAdminOrPermission(req, res, 'ventas')) return true;
+      let body = {};
+      try {
+        body = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const mlUserId = body.ml_user_id != null ? Number(body.ml_user_id) : NaN;
+      const orderId = body.order_id != null ? Number(body.order_id) : NaN;
+      if (!Number.isFinite(mlUserId) || mlUserId <= 0 || !Number.isFinite(orderId) || orderId <= 0) {
+        writeJson(res, 400, {
+          error: "bad_request",
+          message: "Requeridos: ml_user_id (número) y order_id (número de orden ML)",
+        });
+        return true;
+      }
+      try {
+        const data = await salesService.postMlSellerOrderFeedback({
+          mlUserId,
+          orderId,
+          fulfilled: body.fulfilled !== false && String(body.fulfilled ?? "").toLowerCase() !== "false",
+          rating: body.rating != null ? String(body.rating) : "positive",
+          message: body.message,
+          reason: body.reason,
+          restock_item: body.restock_item === true || String(body.restock_item ?? "").toLowerCase() === "true",
+        });
+        writeJson(res, 200, { data, meta: { timestamp: new Date().toISOString() } });
+      } catch (e) {
+        if (e && e.code === "BAD_REQUEST") {
+          writeJson(res, 400, { error: "bad_request", message: e.message || "Solicitud inválida" });
+          return true;
+        }
+        if (e && e.code === "ML_HTTP") {
+          const st = Number(e.httpStatus) >= 400 && Number(e.httpStatus) < 600 ? Number(e.httpStatus) : 502;
+          writeJson(res, st, {
+            error: "ml_feedback_failed",
+            message: e.message || "Mercado Libre rechazó la calificación",
+            detail: e.detail || null,
+          });
+          return true;
+        }
+        throw e;
       }
       return true;
     }

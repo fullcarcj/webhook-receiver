@@ -219,6 +219,26 @@ async function handleCrmApiRequest(req, res, url) {
         return true;
       }
 
+      // POST /api/crm/customers/:id/sync-wa-chats-by-phone
+      if (req.method === "POST" && subpath === "/sync-wa-chats-by-phone") {
+        let body = {};
+        try {
+          body = await parseJsonBody(req);
+        } catch (_e) {
+          body = {};
+        }
+        const sid =
+          body.sales_order_id != null && body.sales_order_id !== ""
+            ? Number(body.sales_order_id)
+            : NaN;
+        const salesOrderInternalId = Number.isFinite(sid) && sid > 0 ? sid : null;
+        const data = await crmService.syncWaChatsByPhoneForCustomer(customerId, {
+          salesOrderInternalId,
+        });
+        writeJson(res, 200, { ok: true, data });
+        return true;
+      }
+
       // GET /api/crm/customers/:id/ml-buyers
       if (req.method === "GET" && subpath === "/ml-buyers") {
         const rows = await crmService.getMlBuyersForCustomer(customerId);

@@ -939,7 +939,8 @@ function scheduleMercadolibreSalesSync(mlUserId, orderId) {
   setImmediate(() => {
     try {
       const salesService = require("./src/services/salesService");
-      salesService.syncMercadolibreSalesAfterMlOrderChange({ mlUserId: uid, orderId: oid }).catch((e) => {
+      // force:true: el evento proviene de ML (activo), no cortar por antigüedad.
+      salesService.syncMercadolibreSalesAfterMlOrderChange({ mlUserId: uid, orderId: oid, force: true }).catch((e) => {
         console.error("[sales ml sync]", e && e.message ? e.message : e);
       });
     } catch (e) {
@@ -1620,9 +1621,11 @@ function scheduleTopicFetchFromWebhook(body) {
               try {
                 const orderId = extractOrderIdFromOrder(parsed);
                 if (!orderId || !mlUserId) return;
+                // force:true: si ML envía el webhook, la orden está activa sin importar su fecha.
                 const importResult = await salesService.importSalesOrderFromMlOrder({
                   mlUserId,
                   orderId,
+                  force: true,
                 });
                 if (importResult && importResult.skipped) {
                   console.log(

@@ -15,6 +15,7 @@
 
 const { pool } = require("../../db");
 const { normalizePhone } = require("../utils/phoneNormalizer");
+const { mergeCustomers } = require("./customerMergeService");
 
 /** Valores permitidos por `chk_id_type` en customers (customer-wallet.sql). */
 const ALLOWED_CUSTOMER_ID_TYPES = new Set(["V", "E", "J", "G", "P"]);
@@ -403,6 +404,117 @@ async function updateCustomer({ customerId, ...body }) {
   }
 }
 
+/**
+ * Tras guardar `customers.phone`, alinea hilos WA (`crm_chats`) por mismo número:
+ * fusiona otros `customer_id` en el indicado, asigna chats huérfanos y, si aplica,
+ * rellena `sales_orders.conversation_id` cuando aún era NULL.
+ * Dispara `triggerResponderNow` para que el worker Tipo M reclame cola pendiente.
+ */
+async function syncWaChatsByPhoneForCustomer(customerId, options = {}) {
+  const keepId = Number(customerId);
+  const salesOrderInternalId =
+    options.salesOrderInternalId != null && Number.isFinite(Number(options.salesOrderInternalId))
+      ? Number(options.salesOrderInternalId)
+      : null;
+
+  if (!Number.isFinite(keepId) || keepId <= 0) {
+    const e = new Error("customer_id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  const { rows: cr } = await pool.query(`SELECT id, phone FROM customers WHERE id = $1`, [keepId]);
+  if (!cr.length) {
+    const e = new Error("Cliente no encontrado");
+    e.code = "NOT_FOUND";
+    throw e;
+  }
+  const c = cr[0];
+  let needle = null;
+  try {
+    needle = c.phone ? normalizePhoneForCustomersTable(c.phone) : null;
+  } catch (_e) {
+    needle = c.phone ? String(c.phone).replace(/\D/g, "") : null;
+  }
+  if (!needle || String(needle).length < 10) {
+    const e = new Error("El cliente no tiene un teléfono válido para buscar chats WA");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  const { rows: chats } = await pool.query(
+    `SELECT c.id, c.customer_id
+       FROM crm_chats c
+      WHERE COALESCE(c.source_type, 'wa_inbound') IN ('wa_inbound', 'wa_ml_linked')
+        AND regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') = $1
+      ORDER BY c.last_message_at DESC NULLS LAST, c.id DESC`,
+    [needle]
+  );
+
+  const seen = new Set();
+  const dropIds = [];
+  for (const ch of chats) {
+    const cid = ch.customer_id != null ? Number(ch.customer_id) : null;
+    if (cid && cid !== keepId && !seen.has(cid)) {
+      seen.add(cid);
+      dropIds.push(cid);
+    }
+  }
+
+  const merges = [];
+  for (const dId of dropIds) {
+    try {
+      merges.push(
+        await mergeCustomers(keepId, dId, { triggeredBy: "sync_wa_phone_ventas" })
+      );
+    } catch (err) {
+      if (err && (err.code === "CUSTOMER_NOT_FOUND" || err.code === "SAME_CUSTOMER")) continue;
+      throw err;
+    }
+  }
+
+  const up = await pool.query(
+    `UPDATE crm_chats c
+        SET customer_id = $2,
+            updated_at = NOW()
+      WHERE COALESCE(c.source_type, 'wa_inbound') IN ('wa_inbound', 'wa_ml_linked')
+        AND regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') = $1
+        AND (c.customer_id IS DISTINCT FROM $2)`,
+    [needle, keepId]
+  );
+
+  let conversation_updated = false;
+  if (chats.length > 0 && Number.isFinite(salesOrderInternalId) && salesOrderInternalId > 0) {
+    const primaryChatId = Number(chats[0].id);
+    const so = await pool.query(
+      `UPDATE sales_orders
+          SET conversation_id = $1,
+              updated_at = NOW()
+        WHERE id = $2
+          AND customer_id = $3
+          AND conversation_id IS NULL`,
+      [primaryChatId, salesOrderInternalId, keepId]
+    );
+    conversation_updated = (so.rowCount || 0) > 0;
+  }
+
+  try {
+    const { triggerResponderNow } = require("./aiResponder");
+    triggerResponderNow();
+  } catch (_e) {
+    /* opcional */
+  }
+
+  return {
+    needle,
+    chats_found: chats.length,
+    chats_relinked: up.rowCount || 0,
+    merges_count: merges.length,
+    merges,
+    conversation_updated,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // linkMlBuyer({ customerId, mlBuyerId, isPrimary, notes, linkedBy })
 //
@@ -740,6 +852,7 @@ module.exports = {
   searchCustomers,
   createCustomer,
   updateCustomer,
+  syncWaChatsByPhoneForCustomer,
   linkMlBuyer,
   getMlBuyersForCustomer,
   addWalletTransaction,

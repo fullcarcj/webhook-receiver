@@ -12,9 +12,10 @@ function isSchemaMissing(err) {
 
 function mapSchemaError(err) {
   if (isSchemaMissing(err)) {
-    const e = new Error("crm_schema_missing");
+    const e = new Error(err.message || "crm_schema_missing");
     e.code = "CRM_SCHEMA_MISSING";
     e.cause = err;
+    if (err.code) e.pgCode = err.code;
     return e;
   }
   return err;

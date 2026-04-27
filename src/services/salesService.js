@@ -6,7 +6,10 @@ const loyaltyService = require("./loyaltyService");
 const { getTodayRate } = require("./currencyService");
 const { CustomerModel } = require("./crmIdentityService");
 const { customersHasPhone2Column } = require("../utils/customersPhone2");
-const { salesOrdersHasLifecycleColumns } = require("../utils/salesOrdersLifecycle");
+const {
+  salesOrdersHasLifecycleColumns,
+  salesOrdersHasTotalAmountUsdColumn,
+} = require("../utils/salesOrdersLifecycle");
 const bundleService = require("./bundleService");
 const { V_SALES_UNIFIED_BS_AMOUNT } = require("../utils/statsHelpers");
 const { normalizePhone } = require("../utils/phoneNormalizer");
@@ -478,8 +481,19 @@ async function createOrder({
         ? Number(conversationId)
         : null;
 
+    const orderTotalStr = totalAmountUsd.toFixed(2);
+    const hasLegacyTotalUsd = await salesOrdersHasTotalAmountUsdColumn(client);
     const ins = await client.query(
-      `INSERT INTO sales_orders (
+      hasLegacyTotalUsd
+        ? `INSERT INTO sales_orders (
+         source, channel_id, seller_id, external_order_id, customer_id, status,
+         order_total_amount, total_amount_usd, total_amount_bs, exchange_rate_bs_per_usd, payment_method,
+         payment_status, fulfillment_status,
+         notes, sold_by, conversation_id, applies_stock, records_cash
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9, $10, $11, $12, $13, $14, $15, TRUE, TRUE)
+       RETURNING id, created_at`
+        : `INSERT INTO sales_orders (
          source, channel_id, seller_id, external_order_id, customer_id, status,
          order_total_amount, total_amount_bs, exchange_rate_bs_per_usd, payment_method,
          payment_status, fulfillment_status,
@@ -494,7 +508,7 @@ async function createOrder({
         extId,
         cid,
         insertStatus,
-        totalAmountUsd.toFixed(2),
+        orderTotalStr,
         totalBs != null ? totalBs.toFixed(2) : null,
         rate != null && Number.isFinite(rate) ? rate : null,
         pay,
@@ -533,16 +547,30 @@ async function createOrder({
       }
       const deliveryAddedBs = clientBs;
       if (deliveryAddedBs > 0) {
-        await client.query(
-          `UPDATE sales_orders
+        if (hasLegacyTotalUsd) {
+          await client.query(
+            `UPDATE sales_orders
+           SET order_total_amount = order_total_amount + $1,
+               total_amount_usd = total_amount_usd + $1,
+               total_amount_bs = COALESCE(total_amount_bs, 0) + $1,
+               zone_id = $2,
+               has_delivery = TRUE,
+               updated_at = NOW()
+           WHERE id = $3`,
+            [deliveryAddedBs, zId, orderId]
+          );
+        } else {
+          await client.query(
+            `UPDATE sales_orders
            SET order_total_amount = order_total_amount + $1,
                total_amount_bs = COALESCE(total_amount_bs, 0) + $1,
                zone_id = $2,
                has_delivery = TRUE,
                updated_at = NOW()
            WHERE id = $3`,
-          [deliveryAddedBs, zId, orderId]
-        );
+            [deliveryAddedBs, zId, orderId]
+          );
+        }
       } else {
         await client.query(
           `UPDATE sales_orders
@@ -904,6 +932,26 @@ const SALES_ORDER_FULFILLMENT_TYPES = new Set([
   "desde_bodega",
 ]);
 
+/** Alineado a `paymentMethodEnum` en `salesApiHandler.js` (POST ventas). */
+const SALES_ORDER_PAYMENT_METHOD_CODES = new Set([
+  "cash",
+  "card",
+  "transfer",
+  "mercadopago",
+  "pago_movil",
+  "other",
+  "unknown",
+  "zelle",
+  "binance",
+  "usd",
+  "efectivo",
+  "efectivo_bs",
+  "panama",
+  "credito",
+  "ves_banesco",
+  "ves_bdv",
+]);
+
 /**
  * Actualiza `fulfillment_type` en `sales_orders` (ventas omnicanal, no POS).
  * @param {string} rawId `so-N` o `N`
@@ -943,6 +991,55 @@ async function patchSalesOrderFulfillmentType(rawId, fulfillmentType) {
          updated_at = NOW()
      WHERE id = $2`,
     [rawFt, oid]
+  );
+  if (!rowCount) {
+    const e = new Error("NOT_FOUND");
+    e.code = "NOT_FOUND";
+    throw e;
+  }
+
+  return getSalesOrderById(`so-${oid}`);
+}
+
+/**
+ * Actualiza `payment_method` en `sales_orders` (omnicanal; mismos códigos que alta de venta).
+ * @param {string} rawId `so-N` o `N`
+ * @param {string|null|undefined} paymentMethod código permitido o null para limpiar
+ */
+async function patchSalesOrderPaymentMethod(rawId, paymentMethod) {
+  const s = rawId != null ? String(rawId).trim() : "";
+  if (/^pos-/i.test(s)) {
+    const e = new Error("No aplica a ventas POS (pos-*)");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  let oid = NaN;
+  if (/^so-\d+$/i.test(s)) oid = Number(s.slice(3));
+  else if (/^\d+$/.test(s)) oid = Number(s);
+  if (!Number.isFinite(oid) || oid <= 0) {
+    const e = new Error("id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  const rawPm =
+    paymentMethod == null || String(paymentMethod).trim() === ""
+      ? null
+      : String(paymentMethod).trim().toLowerCase();
+  if (rawPm != null && !SALES_ORDER_PAYMENT_METHOD_CODES.has(rawPm)) {
+    const e = new Error(
+      `payment_method inválido: use ${Array.from(SALES_ORDER_PAYMENT_METHOD_CODES).sort().join(", ")} o null`
+    );
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+
+  const { rowCount } = await pool.query(
+    `UPDATE sales_orders
+     SET payment_method = $1,
+         updated_at = NOW()
+     WHERE id = $2`,
+    [rawPm, oid]
   );
   if (!rowCount) {
     const e = new Error("NOT_FOUND");
@@ -1110,6 +1207,41 @@ async function listSalesOrders({
              so.rate_type::text AS rate_type,
              so.total_amount_bs,
              so.exchange_rate_bs_per_usd,
+             so.payment_method::text AS payment_method,
+             CASE
+               WHEN vu.source_table = 'sales_orders' THEN (
+                 SELECT jsonb_build_object(
+                   'source', r.source,
+                   'match_level', r.match_level,
+                   'resolved_by', r.resolved_by,
+                   'created_at', r.created_at,
+                   'bank_statement_id', r.bank_statement_id,
+                   'payment_attempt_id', r.payment_attempt_id,
+                   'bank', CASE WHEN bs.id IS NOT NULL THEN jsonb_build_object(
+                     'tx_date', bs.tx_date,
+                     'amount', bs.amount,
+                     'description', bs.description,
+                     'reference_number', bs.reference_number,
+                     'payment_type', bs.payment_type
+                   ) END,
+                   'payment_attempt', CASE WHEN pa.id IS NOT NULL THEN jsonb_build_object(
+                     'firebase_url', pa.firebase_url,
+                     'extracted_amount_bs', pa.extracted_amount_bs,
+                     'extracted_date', pa.extracted_date,
+                     'extracted_reference', pa.extracted_reference,
+                     'extracted_bank', pa.extracted_bank,
+                     'extracted_payment_type', pa.extracted_payment_type
+                   ) END
+                 )
+                 FROM reconciliation_log r
+                 LEFT JOIN bank_statements bs ON bs.id = r.bank_statement_id
+                 LEFT JOIN payment_attempts pa ON pa.id = r.payment_attempt_id
+                 WHERE r.order_id = vu.source_id
+                 ORDER BY r.created_at DESC, r.id DESC
+                 LIMIT 1
+               )
+               ELSE NULL::jsonb
+             END AS payment_reconciliation_json,
              COALESCE(
                cust.full_name,
                CASE WHEN mo.raw_json IS NOT NULL
@@ -1284,6 +1416,8 @@ async function listSalesOrders({
               e.rate_type,
               e.total_amount_bs,
               e.exchange_rate_bs_per_usd,
+              e.payment_method,
+              e.payment_reconciliation_json,
               e.customer_name,
               e.customer_phones_line,
               e.customer_primary_ml_buyer_id,
@@ -1348,6 +1482,18 @@ async function listSalesOrders({
           created_at: o.created_at,
           reconciled_statement_id:
             o.reconciled_statement_id != null ? Number(o.reconciled_statement_id) : null,
+          payment_reconciliation: (() => {
+            const j = o.payment_reconciliation_json;
+            if (j == null) return null;
+            if (typeof j === "string") {
+              try {
+                return JSON.parse(j);
+              } catch {
+                return null;
+              }
+            }
+            return typeof j === "object" ? j : null;
+          })(),
           ml_user_id:
             o.ml_user_id != null && Number.isFinite(Number(o.ml_user_id))
               ? Number(o.ml_user_id)
@@ -1374,6 +1520,10 @@ async function listSalesOrders({
           exchange_rate_bs_per_usd:
             o.exchange_rate_bs_per_usd != null && Number.isFinite(Number(o.exchange_rate_bs_per_usd))
               ? Number(o.exchange_rate_bs_per_usd)
+              : null,
+          payment_method:
+            o.payment_method != null && String(o.payment_method).trim() !== ""
+              ? String(o.payment_method).trim().toLowerCase()
               : null,
           customer_name:
             o.customer_name != null && String(o.customer_name).trim() !== ""
@@ -1958,16 +2108,19 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId, force = false })
     const mlConvId = await lookupMlConversation({ buyerId: ml.buyer_id, customerId });
 
     const hasLifecycle = await salesOrdersHasLifecycleColumns(client);
+    const hasLegacyTotalUsd = await salesOrdersHasTotalAmountUsdColumn(client);
+    const amtPairCols =
+      "order_total_amount" + (hasLegacyTotalUsd ? ", total_amount_usd,\n          " : ",\n          ");
+    const amtPairVals =
+      (hasLegacyTotalUsd ? "$5, $5,\n          " : "$5,\n          ");
     let ins;
     const mlCreatedAt = ml.date_created || null;
     if (hasLifecycle) {
       ins = await client.query(
-        `INSERT INTO sales_orders (source, external_order_id, customer_id, channel_id, status, order_total_amount,
-          total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
+        `INSERT INTO sales_orders (source, external_order_id, customer_id, channel_id, status, ${amtPairCols}total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
           notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned,
           lifecycle_status, ml_status, rating_deadline_at, conversation_id, created_at, fulfillment_type)
-         VALUES ('mercadolibre', $1, $2, $3, $4, $5,
-          $6, $7, $8, $9::date,
+         VALUES ('mercadolibre', $1, $2, $3, $4, ${amtPairVals}$6, $7, $8, $9::date,
           $10, NULL, FALSE, FALSE, $11, $12,
           $13, $14, NOW() + ($15::text || ' days')::interval, $16, COALESCE($17::timestamptz, NOW()), 'retiro_tienda')
          RETURNING id`,
@@ -1993,12 +2146,10 @@ async function importSalesOrderFromMlOrder({ mlUserId, orderId, force = false })
       );
     } else {
       ins = await client.query(
-        `INSERT INTO sales_orders (source, external_order_id, customer_id, channel_id, status, order_total_amount,
-          total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
+        `INSERT INTO sales_orders (source, external_order_id, customer_id, channel_id, status, ${amtPairCols}total_amount_bs, exchange_rate_bs_per_usd, rate_type, rate_date,
           notes, sold_by, applies_stock, records_cash, ml_user_id, loyalty_points_earned,
           conversation_id, created_at, fulfillment_type)
-         VALUES ('mercadolibre', $1, $2, $3, $4, $5,
-          $6, $7, $8, $9::date,
+         VALUES ('mercadolibre', $1, $2, $3, $4, ${amtPairVals}$6, $7, $8, $9::date,
           $10, NULL, FALSE, FALSE, $11, $12,
           $13, COALESCE($14::timestamptz, NOW()), 'retiro_tienda')
          RETURNING id`,
@@ -2744,6 +2895,7 @@ module.exports = {
   getSalesStats,
   patchSalesOrderStatus,
   patchSalesOrderFulfillmentType,
+  patchSalesOrderPaymentMethod,
   importSalesOrderFromMlOrder,
   importSalesOrdersFromMlTable,
   reconcileMlSalesOrphans,

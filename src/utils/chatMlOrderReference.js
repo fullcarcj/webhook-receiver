@@ -7,6 +7,22 @@
  * 3) sales_orders.external_order_id por conversation_id
  */
 
+/**
+ * `sales_orders.external_order_id` canónico es `ml_user_id-order_id`.
+ * La columna `ml_orders.order_id` es solo el id numérico de ML → extraer el segmento derecho.
+ * Si no hay patrón `digits-digits`, devuelve el string recibido (id ML solo, u otro).
+ *
+ * @param {string|number|null|undefined} linked
+ * @returns {string}
+ */
+function mlOrdersOrderIdFromLinkedValue(linked) {
+  const s = linked == null ? "" : String(linked).trim();
+  if (!s) return s;
+  const m = /^(\d+)-(\d+)$/.exec(s);
+  if (m && m[2]) return m[2];
+  return s;
+}
+
 async function resolveLinkedMlOrderId(pool, chatId) {
   const { rows: chatRows } = await pool.query(
     `SELECT ml_order_id, phone FROM crm_chats WHERE id = $1`,
@@ -81,16 +97,17 @@ async function resolveMlOrderReferenceBs(pool, chatId, activeRate) {
   const oid = await resolveLinkedMlOrderId(pool, chatId);
   if (!oid) return { referenceBs: NaN, meta: null, ml_order_id: null };
 
-  let mlKey = String(oid).trim();
+  let mlKey = mlOrdersOrderIdFromLinkedValue(String(oid).trim());
   let { rows: moR } = await pool.query(
     `SELECT total_amount::numeric AS total_amount, currency_id::text AS currency_id
        FROM ml_orders WHERE order_id::text = $1 LIMIT 1`,
     [mlKey]
   );
   if (!moR.length) {
-    const alt = await resolveExternalMlOrderIdFromSalesLink(pool, mlKey);
-    if (alt !== mlKey) {
-      mlKey = alt;
+    const alt = await resolveExternalMlOrderIdFromSalesLink(pool, oid);
+    const altNorm = mlOrdersOrderIdFromLinkedValue(String(alt).trim());
+    if (altNorm !== mlKey) {
+      mlKey = altNorm;
       const again = await pool.query(
         `SELECT total_amount::numeric AS total_amount, currency_id::text AS currency_id
            FROM ml_orders WHERE order_id::text = $1 LIMIT 1`,
@@ -184,4 +201,5 @@ module.exports = {
   resolveLinkedMlOrderId,
   resolveExternalMlOrderIdFromSalesLink,
   resolveMlOrderReferenceBs,
+  mlOrdersOrderIdFromLinkedValue,
 };

@@ -580,7 +580,7 @@ async function listInbox(opts) {
             COUNT(*) OVER() AS inbox_total
           ${fromCommon}
         ) inbox_counted
-        ORDER BY ${orderSqlOuter}
+        ORDER BY ${orderSql}
         LIMIT $${limPos}
       `;
       const res = await pool.query(sql, listParams);
@@ -594,7 +594,7 @@ async function listInbox(opts) {
         SELECT
           ${selectList}
         ${fromCommon}
-        ORDER BY ${orderSqlInner}
+        ORDER BY ${orderSql}
         LIMIT $${limPos}
       `;
       const res = await pool.query(sql, listParams);
@@ -792,6 +792,7 @@ function invalidateInboxCountsCache() {
  * @param {string|null} [opts.result] o null
  * @param {string|null} [opts.search] o null
  * @param {boolean}     [opts.noCache] si true, salta el caché (fuerza refetch)
+ * @param {boolean}     [opts.skipFacets] si true, no ejecuta `fetchInboxFacets` (menos carga DB; facetas en ceros).
  */
 async function getInboxCounts(opts = {}) {
   const srcParts =
@@ -816,22 +817,34 @@ async function getInboxCounts(opts = {}) {
     opts.pipelineDefault === 1 ||
     String(opts.pipelineDefault || "") === "1";
 
+  const skipFacets =
+    opts.skipFacets === true ||
+    opts.skipFacets === 1 ||
+    String(opts.skipFacets || "") === "1";
+
   // Caché TTL: evita 6 queries pesadas en cada polling del frontend.
   // noCache=true lo salta (fuerza frescura cuando el usuario interactúa).
   if (!opts.noCache) {
-    const cacheKey = `${String(srcParts?.join(",") ?? "")}|${String(search ?? "")}|${String(stageList?.join(",") ?? "")}|${String(result ?? "")}|${pipelineDefault ? "1" : "0"}`;
+    const cacheKey = `${String(srcParts?.join(",") ?? "")}|${String(search ?? "")}|${String(stageList?.join(",") ?? "")}|${String(result ?? "")}|${pipelineDefault ? "1" : "0"}|${skipFacets ? "sf1" : "sf0"}`;
     const hit = _getCachedCounts(cacheKey);
     if (hit) return hit;
 
-    const _origResult = await _runInboxCounts({ srcParts, search, stageList, result, pipelineDefault });
+    const _origResult = await _runInboxCounts({
+      srcParts,
+      search,
+      stageList,
+      result,
+      pipelineDefault,
+      skipFacets,
+    });
     _setCachedCounts(cacheKey, _origResult);
     return _origResult;
   }
 
-  return _runInboxCounts({ srcParts, search, stageList, result, pipelineDefault });
+  return _runInboxCounts({ srcParts, search, stageList, result, pipelineDefault, skipFacets });
 }
 
-async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDefault }) {
+async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDefault, skipFacets }) {
   const hideAnsweredIdleMl = !srcParts || srcParts.length === 0;
   const { where, params } = buildFilters(
     null,
@@ -912,10 +925,13 @@ async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDe
   `;
 
   try {
+    const facetsPromise = skipFacets
+      ? Promise.resolve(buildInboxFacetsPayload({}))
+      : fetchInboxFacets();
     const [mainRes, facets, handoffResult, unreviewedResult, incorrectResult, exceptionsCount, mlQuestionsResult] =
       await Promise.all([
         pool.query(sql, [...params]),
-        fetchInboxFacets(),
+        facetsPromise,
         pool.query(handoffSql).catch((err) => {
           // Tabla bot_handoffs aún no migrada — degradar a 0 sin error
           if (err.code === "42P01") return { rows: [{ handed_over: "0" }] };

@@ -17,6 +17,7 @@ const {
   resolveLinkedMlOrderId,
   resolveExternalMlOrderIdFromSalesLink,
   resolveMlOrderReferenceBs,
+  mlOrdersOrderIdFromLinkedValue,
 } = require("../utils/chatMlOrderReference");
 const { getTodayRate } = require("../services/currencyService");
 const { pool } = require("../../db");
@@ -211,7 +212,8 @@ async function handleInboxMlOrderRequest(req, res, url) {
       return true;
     }
 
-    let lookupKey = String(mlOrderId).trim();
+    // external_order_id puede ser "ml_user_id-order_id"; ml_orders.order_id es solo el id ML (bigint).
+    let lookupKey = mlOrdersOrderIdFromLinkedValue(mlOrderId);
     // 2. Obtener raw_json de la orden (ml_orders.order_id = id ML; el chat puede guardar sales_orders.id)
     let { rows: orderRows } = await pool.query(
       `SELECT order_id, status, total_amount, currency_id, date_created, raw_json
@@ -221,9 +223,10 @@ async function handleInboxMlOrderRequest(req, res, url) {
       [lookupKey]
     );
     if (!orderRows.length) {
-      const altKey = await resolveExternalMlOrderIdFromSalesLink(pool, lookupKey);
-      if (altKey !== lookupKey) {
-        lookupKey = altKey;
+      const altKey = await resolveExternalMlOrderIdFromSalesLink(pool, mlOrderId);
+      const lookup2 = mlOrdersOrderIdFromLinkedValue(String(altKey).trim());
+      if (lookup2 !== lookupKey) {
+        lookupKey = lookup2;
         const again = await pool.query(
           `SELECT order_id, status, total_amount, currency_id, date_created, raw_json
            FROM ml_orders

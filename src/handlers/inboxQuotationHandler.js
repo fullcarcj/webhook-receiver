@@ -28,6 +28,7 @@ const { sendChatMessage } = require("../services/chatMessageService");
 const { getTodayRate } = require("../services/currencyService");
 const {
   resolveLinkedMlOrderId,
+  mlOrdersOrderIdFromLinkedValue,
   resolveExternalMlOrderIdFromSalesLink,
 } = require("../utils/chatMlOrderReference");
 const { parseOrderItems, resolveProductSku } = require("./inboxMlOrderHandler");
@@ -955,15 +956,16 @@ async function handleInboxQuotationRequest(req, res, url) {
         return true;
       }
 
-      let lookupKeyFm = String(mlOrderIdFm).trim();
+      let lookupKeyFm = mlOrdersOrderIdFromLinkedValue(mlOrderIdFm);
       let { rows: orderRowsFm } = await pool.query(
         `SELECT order_id, raw_json FROM ml_orders WHERE order_id = $1 LIMIT 1`,
         [lookupKeyFm]
       );
       if (!orderRowsFm.length) {
-        const altFm = await resolveExternalMlOrderIdFromSalesLink(pool, lookupKeyFm);
-        if (altFm !== lookupKeyFm) {
-          lookupKeyFm = altFm;
+        const altFm = await resolveExternalMlOrderIdFromSalesLink(pool, mlOrderIdFm);
+        const lookup2Fm = mlOrdersOrderIdFromLinkedValue(String(altFm).trim());
+        if (lookup2Fm !== lookupKeyFm) {
+          lookupKeyFm = lookup2Fm;
           const againFm = await pool.query(
             `SELECT order_id, raw_json FROM ml_orders WHERE order_id = $1 LIMIT 1`,
             [lookupKeyFm]

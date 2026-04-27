@@ -18,6 +18,7 @@
 
 const { pool } = require("../../db");
 const salesService = require("./salesService");
+const { salesOrdersHasTotalAmountUsdColumn } = require("../utils/salesOrdersLifecycle");
 
 const CHANNEL_SOURCE = {
   1: "mostrador",
@@ -148,22 +149,29 @@ class OrderGateway {
           ? `${nUid}-${nOid}`
           : String(ml_order_id);
 
-      const totalUsd = items.reduce(
+      const totalUsdRaw = items.reduce(
         (sum, it) => sum + Number(it.unit_price_usd || 0) * Number(it.qty),
         0
       );
+      const totalUsd =
+        Number.isFinite(totalUsdRaw) && totalUsdRaw > 0 ? totalUsdRaw : 0.01;
+      const totalStr = totalUsd.toFixed(2);
+      const hasLegacyTotalUsd = await salesOrdersHasTotalAmountUsdColumn(client);
       const orderRes = await client.query(
-        `INSERT INTO sales_orders
+        hasLegacyTotalUsd
+          ? `INSERT INTO sales_orders
            (source, channel_id, external_order_id, customer_id, notes,
-            total_amount_usd, payment_status, fulfillment_status, fulfillment_type)
+            order_total_amount, total_amount_usd, payment_status, fulfillment_status, fulfillment_type)
+         VALUES ('mercadolibre', 3, $1, NULL, $2, $3, $3,
+                 'pending', 'pending', 'mercado_envios')
+         RETURNING id, payment_status, fulfillment_status`
+          : `INSERT INTO sales_orders
+           (source, channel_id, external_order_id, customer_id, notes,
+            order_total_amount, payment_status, fulfillment_status, fulfillment_type)
          VALUES ('mercadolibre', 3, $1, NULL, $2, $3,
                  'pending', 'pending', 'mercado_envios')
          RETURNING id, payment_status, fulfillment_status`,
-        [
-          extOrderKey,
-          notes ?? null,
-          totalUsd,
-        ]
+        [extOrderKey, notes ?? null, totalStr]
       );
       const order = orderRes.rows[0];
 
@@ -310,7 +318,7 @@ class OrderGateway {
 
     // CH-05: si el monto supera el umbral, marcar como pending_approval
     if (ch === 5) {
-      const totalUsd = Number(order.total_amount_usd ?? 0);
+      const totalUsd = Number(order.order_total_amount ?? order.total_amount_usd ?? 0);
       if (totalUsd > FV_APPROVAL_THRESHOLD_USD) {
         await pool.query(
           `UPDATE sales_orders SET approval_status = 'pending_approval' WHERE id = $1`,

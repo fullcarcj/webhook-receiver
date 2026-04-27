@@ -99,7 +99,7 @@ function mlSiteIdFromOrderRawJson(rawJson) {
 
 /**
  * Inbox unificado CRM + órdenes: GET /api/inbox, GET /api/inbox/counts
- * (`counts` incluye `facets`: totales por source_type, sales_channel_id, chat_stage y result.
+ * (`counts` incluye `facets` salvo `?facets=0`: totales por source_type, sales_channel_id, chat_stage y result.
  *  Los totales principales (`total`, `unread`, etc.) usan los mismos JOIN/WHERE que la lista
  *  si se pasan `?src=&stage=&result=&search=` — coherentes con `GET /api/inbox`.)
  * @returns {Promise<boolean>}
@@ -146,12 +146,16 @@ async function handleInboxApiRequest(req, res, url) {
       const pipelineDefault =
         pipelineRaw === "1" || String(pipelineRaw || "").toLowerCase() === "true";
 
+      const facetsRaw = url.searchParams.get("facets");
+      const skipFacets = facetsRaw === "0" || String(facetsRaw || "").toLowerCase() === "false";
+
       const data = await getInboxCounts({
         src: vsrc.value,
         search: search || null,
         stage: vstage.value,
         result: result || null,
         pipelineDefault,
+        skipFacets,
       });
       writeJson(res, 200, data);
       return true;

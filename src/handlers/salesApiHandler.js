@@ -113,6 +113,8 @@ const paymentMethodEnum = z.enum([
   "efectivo_bs",
   "panama",
   "credito",
+  "ves_banesco",
+  "ves_bdv",
 ]);
 
 const createBodySchema = z.object({
@@ -195,6 +197,11 @@ const patchBodySchema = z.object({
 const patchFulfillmentBodySchema = z.object({
   /** Clave canónica o `null` para limpiar. */
   fulfillment_type: z.union([z.string().max(64), z.null()]),
+});
+
+const patchPaymentMethodBodySchema = z.object({
+  /** Mismo catálogo que `payment_method` en POST /api/sales; `null` limpia. */
+  payment_method: z.union([paymentMethodEnum, z.null()]),
 });
 
 const importMlBodySchema = z
@@ -1230,6 +1237,30 @@ async function handleSalesApiRequest(req, res, url) {
         parsed.data.fulfillment_type
       );
       writeJson(res, 200, { data: updated, meta: { timestamp: new Date().toISOString() } });
+      return true;
+    }
+
+    const mPaymentMethodPatch = pathname.match(/^\/api\/sales\/(so-\d+|\d+)\/payment-method$/i);
+    if (req.method === "PATCH" && mPaymentMethodPatch) {
+      if (!await requireAdminOrPermission(req, res, "ventas")) return true;
+      let body = {};
+      try {
+        body = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const parsed = safeParse(patchPaymentMethodBodySchema, body);
+      if (!parsed.ok) {
+        writeJson(res, 422, { error: "validation_error", details: parsed.error.issues });
+        return true;
+      }
+      const idPartPm = mPaymentMethodPatch[1];
+      const updatedPm = await salesService.patchSalesOrderPaymentMethod(
+        idPartPm,
+        parsed.data.payment_method
+      );
+      writeJson(res, 200, { data: updatedPm, meta: { timestamp: new Date().toISOString() } });
       return true;
     }
 

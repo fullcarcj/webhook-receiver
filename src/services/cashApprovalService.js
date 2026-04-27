@@ -12,8 +12,13 @@ const loyaltyService = require("./loyaltyService");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "cash_approval" });
 
-// DECISIÓN: solo transferencia y pago móvil Bs van a conciliación automática Banesco.
-const BS_AUTO_RECONCILIATION_METHODS = new Set(["transfer", "pago_movil"]);
+// DECISIÓN: transferencia / pago móvil Bs y carriles VES explícitos van a conciliación automática Banesco.
+const BS_AUTO_RECONCILIATION_METHODS = new Set([
+  "transfer",
+  "pago_movil",
+  "ves_banesco",
+  "ves_bdv",
+]);
 
 const DEFAULT_TOLERANCE = 0.01;
 
@@ -26,6 +31,8 @@ function isCashApprovalPaymentMethod(paymentMethod) {
 function mapPaymentMethodToCurrency(paymentMethod) {
   const u = String(paymentMethod || "").toLowerCase().trim();
   const map = {
+    ves_banesco: "EFECTIVO_BS",
+    ves_bdv: "EFECTIVO_BS",
     zelle: "ZELLE",
     binance: "BINANCE",
     usd: "USD",

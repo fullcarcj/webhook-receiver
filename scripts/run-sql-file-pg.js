@@ -40,21 +40,55 @@ async function runSqlFile(sqlPathAbs) {
     throw e;
   }
   const sql = fs.readFileSync(sqlPathAbs, "utf8");
-  const client = new Client({
-    connectionString: url,
-    ssl: poolSslOption(),
-    connectionTimeoutMillis: Number(process.env.PG_POOL_CONNECTION_MS || 30_000),
-  });
-  await client.connect();
-  client.on("notice", (msg) => {
-    const t = msg && (msg.message || msg.toString());
-    if (t) process.stderr.write(`[pg-notice] ${t}\n`);
-  });
-  try {
-    await client.query(sql);
-  } finally {
-    await client.end();
+  const maxAttempts = Math.max(
+    1,
+    Number(process.env.PG_SQL_FILE_RETRIES || 3) || 3
+  );
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const client = new Client({
+      connectionString: url,
+      ssl: poolSslOption(),
+      connectionTimeoutMillis: Number(process.env.PG_POOL_CONNECTION_MS || 30_000),
+    });
+    client.on("notice", (msg) => {
+      const t = msg && (msg.message || msg.toString());
+      if (t) process.stderr.write(`[pg-notice] ${t}\n`);
+    });
+    client.on("error", (err) => {
+      const m = err && err.message ? err.message : String(err);
+      process.stderr.write(`[pg-client] ${m}\n`);
+    });
+    try {
+      await client.connect();
+      await client.query(sql);
+      await client.end();
+      return;
+    } catch (e) {
+      lastErr = e;
+      try {
+        await client.end();
+      } catch (_) {
+        /* ignore */
+      }
+      const msg = e && e.message ? e.message : "";
+      const transient =
+        /Connection terminated unexpectedly/i.test(msg) ||
+        /ECONNRESET|EPIPE|ETIMEDOUT|socket hang up/i.test(msg) ||
+        e.code === "57P01" ||
+        e.code === "08006";
+      if (transient && attempt < maxAttempts) {
+        const wait = 1500 * attempt;
+        process.stderr.write(
+          `[run-sql-file-pg] conexión inestable (intento ${attempt}/${maxAttempts}): ${msg}; reintento en ${wait}ms\n`
+        );
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      throw e;
+    }
   }
+  throw lastErr;
 }
 
 async function main() {

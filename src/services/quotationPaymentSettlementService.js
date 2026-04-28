@@ -11,6 +11,9 @@ const { getTodayRate } = require("./currencyService");
 
 const DEFAULT_COMPANY_ID = 1;
 
+/** Evita consultar `information_schema` en cada cotización del listado inbox. */
+let _allocationTableExistsCache = null;
+
 /** @param {number} totalUsd */
 function toleranceUsd(totalUsd) {
   const t = Math.abs(Number(totalUsd) || 0);
@@ -22,6 +25,7 @@ function toleranceUsd(totalUsd) {
  * @returns {Promise<boolean>}
  */
 async function allocationTableExists(client) {
+  if (_allocationTableExistsCache !== null) return _allocationTableExistsCache;
   const q = client || pool;
   const { rows } = await q.query(
     `SELECT 1
@@ -30,7 +34,8 @@ async function allocationTableExists(client) {
         AND table_name = 'quotation_payment_allocations'
       LIMIT 1`
   );
-  return rows.length > 0;
+  _allocationTableExistsCache = rows.length > 0;
+  return _allocationTableExistsCache;
 }
 
 /**
@@ -68,6 +73,46 @@ async function hydrateLegacyMatchedAttempts(client, quotationId) {
          WHERE x.payment_attempt_id = pa.id AND x.quotation_id = pa.reconciled_quotation_id
        )`,
     [quotationId, rate]
+  );
+}
+
+/**
+ * Hidrata piernas VES legacy para varias cotizaciones en un solo `getTodayRate` + INSERT.
+ * @param {import('pg').PoolClient | null} client
+ * @param {number[]} quotationIds
+ */
+async function hydrateLegacyMatchedAttemptsBatch(client, quotationIds) {
+  if (!(await allocationTableExists(client))) return;
+  const q = client || pool;
+  const ids = [...new Set(quotationIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0))];
+  if (!ids.length) return;
+  const rateRow = await getTodayRate(DEFAULT_COMPANY_ID).catch(() => null);
+  const rate =
+    rateRow && Number(rateRow.active_rate) > 0 ? Number(rateRow.active_rate) : null;
+  if (!rate) return;
+  await q.query(
+    `INSERT INTO quotation_payment_allocations (
+       quotation_id, payment_attempt_id, source_currency,
+       amount_original, amount_usd_equivalent, fx_rate_bs_per_usd, usd_caja_status
+     )
+     SELECT
+       pa.reconciled_quotation_id,
+       pa.id,
+       'VES',
+       pa.extracted_amount_bs,
+       ROUND((pa.extracted_amount_bs / $2::numeric)::numeric, 6),
+       $2::numeric,
+       NULL
+     FROM payment_attempts pa
+     WHERE pa.reconciled_quotation_id = ANY($1::bigint[])
+       AND pa.reconciliation_status = 'matched'
+       AND pa.extracted_amount_bs IS NOT NULL
+       AND pa.extracted_amount_bs > 0
+       AND NOT EXISTS (
+         SELECT 1 FROM quotation_payment_allocations x
+         WHERE x.payment_attempt_id = pa.id AND x.quotation_id = pa.reconciled_quotation_id
+       )`,
+    [ids, rate]
   );
 }
 
@@ -193,6 +238,136 @@ async function getSettlementState(quotationId, client) {
 }
 
 /**
+ * Mismo criterio que `getSettlementState` pero en pocas idas a BD (listados inbox).
+ * @param {number[]} quotationIds
+ * @param {import('pg').PoolClient | null} client
+ * @returns {Promise<Map<number, object>>}
+ */
+async function getSettlementStatesForQuotationIds(quotationIds, client) {
+  const q = client || pool;
+  const ids = [...new Set(quotationIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0))];
+  /** @type {Map<number, object>} */
+  const map = new Map();
+  if (!ids.length) return map;
+
+  const tbl = await allocationTableExists(client);
+
+  if (!tbl) {
+    const { rows } = await q.query(
+      `SELECT DISTINCT pa.reconciled_quotation_id AS qid
+         FROM payment_attempts pa
+        WHERE pa.reconciled_quotation_id = ANY($1::bigint[])
+          AND pa.reconciliation_status = 'matched'`,
+      [ids]
+    );
+    const matchedSet = new Set(rows.map((r) => Number(r.qid)));
+    for (const id of ids) {
+      const legacyMatched = matchedSet.has(id);
+      map.set(id, {
+        schemaAllocations: false,
+        coveredUsdEquivalent: 0,
+        totalUsd: null,
+        toleranceUsd: 0,
+        hasPendingUsdCaja: false,
+        hasRejectedUsd: false,
+        overAllocated: false,
+        hasBsReconciledBaseline: legacyMatched,
+        fullySettled: legacyMatched,
+        anyPaymentProgress: legacyMatched,
+      });
+    }
+    return map;
+  }
+
+  await hydrateLegacyMatchedAttemptsBatch(client, ids);
+
+  const { rows: bsRows } = await q.query(
+    `SELECT DISTINCT a.quotation_id AS qid
+       FROM quotation_payment_allocations a
+      WHERE a.quotation_id = ANY($1::bigint[]) AND a.source_currency = 'VES'
+     UNION
+     SELECT DISTINCT pa.reconciled_quotation_id AS qid
+       FROM payment_attempts pa
+      WHERE pa.reconciled_quotation_id = ANY($1::bigint[])
+        AND pa.reconciliation_status = 'matched'
+        AND pa.extracted_amount_bs IS NOT NULL AND pa.extracted_amount_bs > 0`,
+    [ids]
+  );
+  const hasBsSet = new Set(bsRows.map((r) => Number(r.qid)));
+
+  const { rows: heads } = await q.query(
+    `SELECT id, total::numeric AS total_usd FROM inventario_presupuesto WHERE id = ANY($1::bigint[])`,
+    [ids]
+  );
+  const totalById = new Map(heads.map((h) => [Number(h.id), Number(h.total_usd) || 0]));
+
+  const { rows: allocRows } = await q.query(
+    `SELECT quotation_id, source_currency, amount_usd_equivalent::numeric AS eq, usd_caja_status
+       FROM quotation_payment_allocations
+      WHERE quotation_id = ANY($1::bigint[])`,
+    [ids]
+  );
+  /** @type {Map<number, Array<{ source_currency: string, eq: string, usd_caja_status: string|null }>>} */
+  const allocByQid = new Map();
+  for (const id of ids) allocByQid.set(id, []);
+  for (const r of allocRows) {
+    const qid = Number(r.quotation_id);
+    if (!allocByQid.has(qid)) allocByQid.set(qid, []);
+    allocByQid.get(qid).push(r);
+  }
+
+  const { rows: progRows } = await q.query(
+    `SELECT DISTINCT pa.reconciled_quotation_id AS qid
+       FROM payment_attempts pa
+      WHERE pa.reconciled_quotation_id = ANY($1::bigint[])
+        AND pa.reconciliation_status = 'matched'`,
+    [ids]
+  );
+  const progSet = new Set(progRows.map((r) => Number(r.qid)));
+
+  for (const id of ids) {
+    const totalUsd = totalById.has(id) ? totalById.get(id) : 0;
+    const rowsFor = allocByQid.get(id) || [];
+    let covered = 0;
+    let hasPendingUsd = false;
+    let hasRejectedUsd = false;
+    for (const r of rowsFor) {
+      const eq = Number(r.eq);
+      if (!Number.isFinite(eq) || eq <= 0) continue;
+      const cur = String(r.source_currency || "").toUpperCase();
+      if (cur === "VES") {
+        covered += eq;
+      } else if (cur === "USD") {
+        const st = r.usd_caja_status;
+        if (st === "approved") covered += eq;
+        else if (st === "pending" || st == null) hasPendingUsd = true;
+        else if (st === "rejected") hasRejectedUsd = true;
+      }
+    }
+    const tol = toleranceUsd(totalUsd);
+    const covers = covered >= totalUsd - tol;
+    const overAllocated = covered > totalUsd + tol;
+    const fullySettled =
+      rowsFor.length > 0 && covers && !hasPendingUsd && !hasRejectedUsd && !overAllocated;
+    const hasBsReconciledBaseline = hasBsSet.has(id);
+
+    map.set(id, {
+      schemaAllocations: true,
+      coveredUsdEquivalent: covered,
+      totalUsd,
+      toleranceUsd: tol,
+      hasPendingUsdCaja: hasPendingUsd,
+      hasRejectedUsd,
+      overAllocated,
+      hasBsReconciledBaseline,
+      fullySettled,
+      anyPaymentProgress: rowsFor.length > 0 || progSet.has(id),
+    });
+  }
+  return map;
+}
+
+/**
  * @param {import('pg').PoolClient} client
  * @param {object} p
  * @param {number} p.quotationId
@@ -292,6 +467,7 @@ module.exports = {
   allocationTableExists,
   toleranceUsd,
   getSettlementState,
+  getSettlementStatesForQuotationIds,
   hydrateLegacyMatchedAttempts,
   insertAllocation,
   insertCajaApprovedUsdComplement,

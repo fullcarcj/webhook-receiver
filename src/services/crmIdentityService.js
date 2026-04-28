@@ -6,7 +6,11 @@ const { findCustomerIdByPhoneAndPersonName } = require("./customerDedupPhoneName
 
 function isSchemaMissing(err) {
   const c = err && err.code;
-  // 42P01 undefined_table · 42703 undefined_column · 42704 undefined_object
+  const msg = String((err && err.message) || "");
+  // 42P01 suele ser «relation … does not exist»; «missing FROM-clause entry» también usa 42P01
+  // pero es error de SQL (alcance de alias), no esquema faltante.
+  if (c === "42P01" && /missing FROM-clause entry/i.test(msg)) return false;
+  // 42P01 undefined_table · 42703 undefined_column · 42P04 / 42704 undefined_object
   return c === "42P01" || c === "42703" || c === "42P04" || c === "42704";
 }
 

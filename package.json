@@ -105,6 +105,8 @@
     "db:reconciliation-all": "npm run db:payment-attempts && npm run db:reconciliation-log && npm run db:sales-orders-overdue",
     "db:quotation-payment-allocations": "node scripts/run-sql-file-pg.js sql/20260427_quotation_payment_allocations.sql",
     "db:quotation-edit-log": "node scripts/run-sql-file-pg.js sql/20260428_quotation_edit_log.sql",
+    "db:delivery-product": "node scripts/run-sql-file-pg.js sql/20260428_delivery_product_quotation.sql",
+    "db:delivery-zones-caracas": "node scripts/run-sql-file-pg.js sql/20260428_delivery_zones_caracas.sql",
     "db:quotation-sales-link": "node scripts/run-sql-file-pg.js sql/20260425_quotation_sales_order_link.sql",
     "db:wa-anti-spam": "node scripts/run-wa-anti-spam-migration.js",
     "db:kits-bundles": "node scripts/run-kits-bundles-migration.js",

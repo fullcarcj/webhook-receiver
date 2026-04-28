@@ -752,6 +752,62 @@ async function fetchSalesOrderOmnichannelDetail(oid, opts) {
        FROM sales_order_items WHERE sales_order_id = $1 ORDER BY id`,
       [oid]
     );
+
+    // Preview de ítems para órdenes ML: extraer de ml_orders.raw_json -> order_items.
+    // sales_order_items siempre está vacío en importaciones ML (applies_stock=FALSE).
+    let itemsPreview = null;
+    if (o.source === "mercadolibre" && o.external_order_id) {
+      try {
+        const extParts = String(o.external_order_id).split("-");
+        if (extParts.length === 2) {
+          const mlUserId = Number(extParts[0]);
+          const mlOrderId = Number(extParts[1]);
+          if (Number.isFinite(mlUserId) && Number.isFinite(mlOrderId)) {
+            const { rows: mlRows } = await pool.query(
+              `SELECT mo.raw_json,
+                      json_agg(
+                        json_build_object(
+                          'sku',       COALESCE(
+                                         NULLIF(item_el #>> '{item,seller_sku}', ''),
+                                         NULLIF(item_el #>> '{item,seller_custom_field}', ''),
+                                         item_el #>> '{item,id}'
+                                       ),
+                          'name',      COALESCE(
+                                         NULLIF(TRIM(item_el #>> '{item,title}'), ''),
+                                         item_el #>> '{item,id}'
+                                       ),
+                          'qty',       CASE
+                                         WHEN (item_el ->> 'quantity') ~ '^[0-9]+(\\.[0-9]+)?$'
+                                         THEN (item_el ->> 'quantity')::numeric
+                                         ELSE 1
+                                       END,
+                          'unit_price_usd', NULL,
+                          'image_url', COALESCE(
+                                         NULLIF(TRIM(ml_th.thumbnail), ''),
+                                         NULLIF(item_el #>> '{item,thumbnail}', ''),
+                                         NULLIF(item_el #>> '{item,secure_thumbnail}', '')
+                                       )
+                        ) ORDER BY t.ord
+                      ) AS preview
+               FROM ml_orders mo,
+                    json_array_elements((mo.raw_json::json) -> 'order_items')
+                      WITH ORDINALITY AS t(item_el, ord)
+               LEFT JOIN ml_listings ml_th
+                 ON ml_th.item_id = NULLIF(TRIM(t.item_el #>> '{item,id}'), '')
+               WHERE mo.ml_user_id = $1 AND mo.order_id = $2
+               GROUP BY mo.raw_json`,
+              [mlUserId, mlOrderId]
+            );
+            if (mlRows.length && Array.isArray(mlRows[0].preview)) {
+              itemsPreview = mlRows[0].preview;
+            }
+          }
+        }
+      } catch (_previewErr) {
+        // No bloquear si ml_orders no existe o raw_json está vacío
+      }
+    }
+
     const tot = Number(o.order_total_amount);
     const responseId = opts && opts.responseId != null ? opts.responseId : o.id;
     return {
@@ -795,6 +851,7 @@ async function fetchSalesOrderOmnichannelDetail(oid, opts) {
         o.conversation_id != null && String(o.conversation_id).trim() !== ""
           ? Number(o.conversation_id)
           : null,
+      items_preview: itemsPreview,
       items: irows.map((r) => {
         const sub = Number(r.line_total_usd);
         return {

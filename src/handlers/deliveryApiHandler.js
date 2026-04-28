@@ -35,9 +35,12 @@ const zoneSchema = z.object({
   estimated_minutes: z.number().int().min(1).optional(),
 });
 
-const zonePatchSchema = zoneSchema.partial().refine((d) => Object.keys(d).length > 0, {
-  message: "Debe enviar al menos un campo",
-});
+const zonePatchSchema = zoneSchema
+  .partial()
+  .extend({ is_active: z.boolean().optional() })
+  .refine((d) => Object.keys(d).length > 0, {
+    message: "Debe enviar al menos un campo",
+  });
 
 const providerSchema = z.object({
   name: z.string().min(2).max(100),
@@ -91,7 +94,19 @@ async function handleDeliveryApiRequest(req, res, url) {
     req.method === "GET" ? "read" : req.method === "DELETE" ? "admin" : "write";
   const isGetZones = req.method === "GET" && pathname === "/api/delivery/zones";
   if (isGetZones) {
-    if (
+    const allZones = url.searchParams.get("all") === "1";
+    if (allZones) {
+      if (!userHasModuleAction(user, "settings", "read")) {
+        res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            error: "FORBIDDEN",
+            message: "Se requiere settings:read para listar todas las zonas (incl. inactivas)",
+          })
+        );
+        return true;
+      }
+    } else if (
       !userHasModuleAction(user, "ventas", "read") &&
       !userHasModuleAction(user, "settings", "read")
     ) {
@@ -109,9 +124,10 @@ async function handleDeliveryApiRequest(req, res, url) {
   }
 
   try {
-    // GET /api/delivery/zones
+    // GET /api/delivery/zones  (?all=1 incluye inactivas; solo settings:read)
     if (req.method === "GET" && pathname === "/api/delivery/zones") {
-      const data = await deliveryService.getZones();
+      const allZones = url.searchParams.get("all") === "1";
+      const data = allZones ? await deliveryService.getZonesAll() : await deliveryService.getZones();
       writeJson(res, 200, { data, meta: { timestamp: new Date().toISOString() } });
       return true;
     }
@@ -171,11 +187,15 @@ async function handleDeliveryApiRequest(req, res, url) {
     if (req.method === "GET" && pathname === "/api/delivery/services") {
       const status = url.searchParams.get("status") || undefined;
       const providerId = url.searchParams.get("provider_id");
+      const from = url.searchParams.get("from") || undefined;
+      const to = url.searchParams.get("to") || undefined;
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || "50"), 1), 200);
       const offset = Math.max(Number(url.searchParams.get("offset") || "0"), 0);
       const data = await deliveryService.listServices({
         status,
         providerId: providerId ? Number(providerId) : undefined,
+        from,
+        to,
         limit,
         offset,
       });

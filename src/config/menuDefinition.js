@@ -325,6 +325,16 @@ const MENU_SECTIONS = [
         allowedRoles: ["SUPERUSER", "ADMIN"],
       },
       {
+        id: "cfg.delivery",
+        label: "Delivery",
+        path: "/config/delivery",
+        icon: "Truck",
+        apiPath:
+          "GET /api/delivery/zones?all=1 · GET /api/delivery/providers · GET /api/delivery/services · POST …/liquidate",
+        minRole: "ADMIN",
+        allowedRoles: ["SUPERUSER", "ADMIN"],
+      },
+      {
         id: "cfg.dedup",
         label: "Duplicados CRM",
         path: "/config/dedup",

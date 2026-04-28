@@ -17,6 +17,18 @@ async function getZones() {
   return rows;
 }
 
+/** Todas las zonas (incl. inactivas) — panel de configuración. */
+async function getZonesAll() {
+  const { rows } = await pool.query(
+    `SELECT id, zone_name, description, base_cost_bs, client_price_bs,
+            base_cost_usd, currency_pago, estimated_minutes, is_active,
+            created_at, updated_at
+     FROM delivery_zones
+     ORDER BY is_active DESC, zone_name ASC`
+  );
+  return rows;
+}
+
 async function getZoneById(zoneId) {
   const { rows } = await pool.query(
     `SELECT * FROM delivery_zones WHERE id = $1 AND is_active = TRUE`,
@@ -137,7 +149,7 @@ async function createDeliveryService(client, { orderId, zoneId, zone }) {
   return rows[0];
 }
 
-async function listServices({ status, providerId, limit = 50, offset = 0 }) {
+async function listServices({ status, providerId, limit = 50, offset = 0, from, to }) {
   const cond = ["1=1"];
   const params = [];
   let n = 1;
@@ -148,6 +160,14 @@ async function listServices({ status, providerId, limit = 50, offset = 0 }) {
   if (providerId) {
     cond.push(`ds.provider_id = $${n++}`);
     params.push(providerId);
+  }
+  if (from) {
+    cond.push(`ds.created_at >= $${n++}::timestamptz`);
+    params.push(from);
+  }
+  if (to) {
+    cond.push(`ds.created_at <= $${n++}::timestamptz`);
+    params.push(to);
   }
   const where = cond.join(" AND ");
   params.push(limit, offset);
@@ -334,6 +354,7 @@ async function getDeliveryStats(startDate, endDate) {
 module.exports = {
   DELIVERY_CURRENCIES,
   getZones,
+  getZonesAll,
   getZoneById,
   createZone,
   updateZone,

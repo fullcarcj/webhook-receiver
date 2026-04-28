@@ -1503,9 +1503,10 @@ async function handleInboxQuotationRequest(req, res, url) {
            p.sku,
            p.name,
            p.description,
-           COALESCE(p.stock_qty, 0)::int AS stock_qty
+           COALESCE(i.stock_qty, 0)::int AS stock_qty
          FROM inventario_detallepresupuesto d
          JOIN products p ON p.id = d.producto_id
+         LEFT JOIN inventory i ON i.product_id = p.id
          WHERE d.presupuesto_id = $1
          ORDER BY d.id ASC`,
         [pid]
@@ -1619,7 +1620,8 @@ async function handleInboxQuotationRequest(req, res, url) {
 
       const uniq = [...new Set(productIds)];
       const chk = await pool.query(
-        `SELECT id, COALESCE(stock_qty, 0)::numeric AS stock_qty
+        `SELECT id, COALESCE(stock_qty, 0)::numeric AS stock_qty,
+                COALESCE(is_service, FALSE) AS is_service
          FROM products
          WHERE id = ANY($1::bigint[]) AND is_active = true`,
         [uniq]
@@ -1631,9 +1633,11 @@ async function handleInboxQuotationRequest(req, res, url) {
         });
         return true;
       }
-      const stockById = new Map(chk.rows.map((r) => [Number(r.id), Number(r.stock_qty)]));
+      const productInfoById = new Map(chk.rows.map((r) => [Number(r.id), r]));
       for (const L of lines) {
-        const sq = stockById.get(L.producto_id) ?? 0;
+        const info = productInfoById.get(L.producto_id);
+        if (info?.is_service) continue; // servicios no consumen stock
+        const sq = Number(info?.stock_qty ?? 0);
         if (L.cantidad > sq) {
           writeJson(res, 400, {
             error:   "bad_request",
@@ -1691,9 +1695,10 @@ async function handleInboxQuotationRequest(req, res, url) {
       const det = await pool.query(
         `SELECT d.id, d.cantidad, d.precio_unitario, d.subtotal, d.producto_id,
            p.sku, p.name, p.description,
-           COALESCE(p.stock_qty, 0)::int AS stock_qty
+           COALESCE(i.stock_qty, 0)::int AS stock_qty
          FROM inventario_detallepresupuesto d
          JOIN products p ON p.id = d.producto_id
+         LEFT JOIN inventory i ON i.product_id = p.id
          WHERE d.presupuesto_id = $1
          ORDER BY d.id ASC`,
         [pid]
@@ -1709,6 +1714,153 @@ async function handleInboxQuotationRequest(req, res, url) {
         ok: true,
         presupuesto: headAfter.rows[0],
         lines: det.rows,
+      });
+      return true;
+    }
+
+    // ─── POST /api/inbox/quotations/:id/add-delivery ────────────────────────────
+    // Agrega (o reemplaza) la línea SVC-DELIVERY en la cotización y guarda la zona
+    // para usarla al crear la orden ERP sin duplicar el monto de envío.
+    const addDeliveryMatch = pathname.match(/^\/api\/inbox\/quotations\/(\d+)\/add-delivery$/);
+    if (addDeliveryMatch && req.method === "POST") {
+      const pId = Number(addDeliveryMatch[1]);
+      if (!Number.isFinite(pId) || pId <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "id inválido" });
+        return true;
+      }
+      let body = {};
+      try { body = await parseJsonBody(req); } catch (_) {
+        writeJson(res, 400, { error: "invalid_json" }); return true;
+      }
+      const zoneId = body.zone_id != null ? Number(body.zone_id) : NaN;
+      if (!Number.isFinite(zoneId) || zoneId <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "zone_id requerido y debe ser positivo" });
+        return true;
+      }
+
+      // Verificar cotización
+      const { rows: ipRows } = await pool.query(
+        `SELECT id, status, total FROM inventario_presupuesto WHERE id = $1`, [pId]
+      );
+      if (!ipRows.length) {
+        writeJson(res, 404, { error: "not_found", message: "Cotización no encontrada" });
+        return true;
+      }
+      const ipSt = String(ipRows[0].status || "").toLowerCase();
+      if (["converted", "expired", "rejected"].includes(ipSt)) {
+        writeJson(res, 409, { error: "conflict", message: `No se puede modificar cotización en estado '${ipSt}'.` });
+        return true;
+      }
+
+      // Zona de delivery
+      const { rows: zRows } = await pool.query(
+        `SELECT id, zone_name, client_price_bs FROM delivery_zones WHERE id = $1 AND is_active = TRUE`, [zoneId]
+      );
+      if (!zRows.length) {
+        writeJson(res, 404, { error: "not_found", message: "Zona de delivery no encontrada o inactiva" });
+        return true;
+      }
+      const zone = zRows[0];
+      const listBs = Number(zone.client_price_bs || 0);
+
+      // Precio override opcional
+      let deliveryBs = listBs;
+      if (body.delivery_client_price_bs != null && body.delivery_client_price_bs !== "") {
+        const override = Number(String(body.delivery_client_price_bs).replace(",", "."));
+        if (Number.isFinite(override) && override > 0) deliveryBs = override;
+      }
+      if (deliveryBs <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "El monto de delivery debe ser mayor a cero" });
+        return true;
+      }
+
+      // Tasa del día para convertir Bs → USD (precio en la línea de cotización va en USD)
+      const rateRow = await getTodayRate(1).catch(() => null);
+      const rate = rateRow && Number(rateRow.active_rate) > 0 ? Number(rateRow.active_rate) : null;
+      if (!rate) {
+        writeJson(res, 503, { error: "no_rate", message: "No hay tasa del día cargada; cargá la tasa BCV antes de agregar delivery." });
+        return true;
+      }
+      const deliveryUsd = Math.round((deliveryBs / rate) * 1e6) / 1e6;
+
+      // Producto SVC-DELIVERY
+      const { rows: svcRows } = await pool.query(
+        `SELECT id FROM products WHERE sku = 'SVC-DELIVERY' AND is_active = TRUE LIMIT 1`
+      );
+      if (!svcRows.length) {
+        writeJson(res, 503, {
+          error: "product_missing",
+          message: "Producto SVC-DELIVERY no existe. Ejecutar: npm run db:delivery-product",
+        });
+        return true;
+      }
+      const svcProductId = Number(svcRows[0].id);
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Eliminar línea de delivery anterior (si existe) y recalcular total sin ella
+        await client.query(
+          `DELETE FROM inventario_detallepresupuesto
+           WHERE presupuesto_id = $1 AND producto_id = $2`,
+          [pId, svcProductId]
+        );
+
+        // Insertar nueva línea
+        await client.query(
+          `INSERT INTO inventario_detallepresupuesto
+             (cantidad, precio_unitario, subtotal, producto_id, presupuesto_id)
+           VALUES (1, $1, $1, $2, $3)`,
+          [deliveryUsd, svcProductId, pId]
+        );
+
+        // Recalcular total sumando todas las líneas
+        await client.query(
+          `UPDATE inventario_presupuesto
+           SET total = (
+                 SELECT COALESCE(SUM(subtotal), 0)
+                 FROM inventario_detallepresupuesto
+                 WHERE presupuesto_id = $1
+               ),
+               delivery_zone_id = $2,
+               delivery_line_bs  = $3,
+               updated_at = NOW()
+           WHERE id = $1`,
+          [pId, zoneId, deliveryBs]
+        );
+
+        await client.query("COMMIT");
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+
+      // Devolver cabecera actualizada
+      const { rows: headRows } = await pool.query(
+        `SELECT ip.id, ip.total, ip.status, ip.delivery_zone_id, ip.delivery_line_bs,
+                ${sqlReferenceExpr("ip")} AS reference
+         FROM inventario_presupuesto ip WHERE ip.id = $1`,
+        [pId]
+      );
+      const { rows: detRows } = await pool.query(
+        `SELECT d.id, d.cantidad, d.precio_unitario, d.subtotal, d.producto_id,
+                p.sku, p.name, COALESCE(p.is_service, FALSE) AS is_service
+         FROM inventario_detallepresupuesto d
+         JOIN products p ON p.id = d.producto_id
+         WHERE d.presupuesto_id = $1
+         ORDER BY d.id ASC`,
+        [pId]
+      );
+      writeJson(res, 200, {
+        ok: true,
+        zone_name: zone.zone_name,
+        delivery_bs: deliveryBs,
+        delivery_usd: deliveryUsd,
+        presupuesto: headRows[0],
+        lines: detRows,
       });
       return true;
     }
@@ -1907,7 +2059,8 @@ async function handleInboxQuotationRequest(req, res, url) {
       const soldBy = String(user.username ?? user.email ?? user.userId ?? "crm");
 
       const { rows: ipr } = await pool.query(
-        `SELECT id, status, channel_id, chat_id, cliente_id, total, observaciones
+        `SELECT id, status, channel_id, chat_id, cliente_id, total, observaciones,
+                delivery_zone_id, delivery_line_bs
          FROM inventario_presupuesto WHERE id = $1`,
         [pId]
       );
@@ -1985,9 +2138,10 @@ async function handleInboxQuotationRequest(req, res, url) {
       }
 
       const { rows: lineRows } = await pool.query(
-        `SELECT d.cantidad, d.precio_unitario, pr.sku
+        `SELECT d.cantidad, d.precio_unitario, pr.sku,
+                COALESCE(pr.is_service, FALSE) AS is_service
          FROM inventario_detallepresupuesto d
-         INNER JOIN productos pr ON pr.id = d.producto_id
+         INNER JOIN products pr ON pr.id = d.producto_id
          WHERE d.presupuesto_id = $1
          ORDER BY d.id`,
         [pId]
@@ -1997,6 +2151,28 @@ async function handleInboxQuotationRequest(req, res, url) {
         return true;
       }
 
+      // Separar ítems regulares de líneas de servicio (delivery).
+      // El delivery va por la ruta zone_id + deliveryClientPriceBs; no como ítem de inventario.
+      const regularLines = lineRows.filter((L) => !L.is_service);
+      if (!regularLines.length) {
+        writeJson(res, 400, { error: "bad_request", message: "Cotización sin líneas de producto (solo servicios)." });
+        return true;
+      }
+
+      // Delivery: prioridad body > cotización (delivery_zone_id + delivery_line_bs)
+      const finalZoneId =
+        createOrderZoneId != null
+          ? createOrderZoneId
+          : ip.delivery_zone_id != null && Number(ip.delivery_zone_id) > 0
+            ? Number(ip.delivery_zone_id)
+            : null;
+      const finalDeliveryBs =
+        createOrderDeliveryBs != null
+          ? createOrderDeliveryBs
+          : ip.delivery_line_bs != null && Number(ip.delivery_line_bs) > 0
+            ? Number(ip.delivery_line_bs)
+            : undefined;
+
       const salesService = require("../services/salesService");
       let orderId;
       try {
@@ -2004,7 +2180,7 @@ async function handleInboxQuotationRequest(req, res, url) {
           source: "social_media",
           channelId: 2,
           customerId: Number(ip.cliente_id),
-          items: lineRows.map((L) => ({
+          items: regularLines.map((L) => ({
             sku: String(L.sku || "").trim(),
             quantity: Math.floor(Number(L.cantidad)),
             unit_price_usd: Number(L.precio_unitario),
@@ -2015,8 +2191,8 @@ async function handleInboxQuotationRequest(req, res, url) {
           externalOrderId: extKey,
           paymentMethod: "pago_movil",
           conversationId: Number(ip.chat_id),
-          zoneId: createOrderZoneId,
-          deliveryClientPriceBs: createOrderDeliveryBs,
+          zoneId: finalZoneId,
+          deliveryClientPriceBs: finalDeliveryBs,
         });
         orderId = Number(created.id);
         if (!Number.isFinite(orderId) || orderId <= 0) {
@@ -2651,7 +2827,7 @@ async function handleInboxQuotationRequest(req, res, url) {
       }
       const { rows: rawBsRows } = await pool.query(
         `SELECT ip.id, ip.total, ip.status, ip.fecha_vencimiento, ip.channel_id,
-           ip.sales_order_id, ip.chat_id,
+           ip.sales_order_id, ip.chat_id, ip.delivery_zone_id,
            ${sqlReferenceExpr("ip")} AS reference,
            (
              SELECT so2.id FROM sales_orders so2
@@ -2665,9 +2841,25 @@ async function handleInboxQuotationRequest(req, res, url) {
          LIMIT 5`,
         [soIdBs]
       );
+      const qIdsBs = rawBsRows.map((r) => Number(r.id));
+      const stMapBs = await quotationPaymentSettlementService.getSettlementStatesForQuotationIds(
+        qIdsBs,
+        null
+      );
       const bsItems = [];
       for (const r of rawBsRows) {
-        const st = await quotationPaymentSettlementService.getSettlementState(Number(r.id), null);
+        const st = stMapBs.get(Number(r.id)) || {
+          schemaAllocations: true,
+          coveredUsdEquivalent: 0,
+          totalUsd: 0,
+          toleranceUsd: 0,
+          hasPendingUsdCaja: false,
+          hasRejectedUsd: false,
+          overAllocated: false,
+          hasBsReconciledBaseline: false,
+          fullySettled: false,
+          anyPaymentProgress: false,
+        };
         bsItems.push({
           id:                       r.id,
           total:                    r.total,
@@ -2678,6 +2870,7 @@ async function handleInboxQuotationRequest(req, res, url) {
           sales_order_id:           r.sales_order_id,
           chat_id:                  r.chat_id,
           linked_sales_order_id:    r.linked_sales_order_id,
+          delivery_zone_id:         r.delivery_zone_id ?? null,
           payment_verified:         Boolean(st.anyPaymentProgress),
           payment_fully_settled:    Boolean(st.fullySettled),
           payment_covered_usd_eq:   st.coveredUsdEquivalent,
@@ -2701,7 +2894,7 @@ async function handleInboxQuotationRequest(req, res, url) {
       // Busca cotizaciones directas del chat Y las ancladas a la sales_order cuya conversation_id es este chat.
       const { rows: rawRows } = await pool.query(
         `SELECT ip.id, ip.total, ip.status, ip.fecha_vencimiento, ip.channel_id,
-           ip.sales_order_id, ip.chat_id,
+           ip.sales_order_id, ip.chat_id, ip.delivery_zone_id,
            ${sqlReferenceExpr("ip")} AS reference,
            (
              SELECT so.id FROM sales_orders so
@@ -2720,9 +2913,25 @@ async function handleInboxQuotationRequest(req, res, url) {
          LIMIT 5`,
         [chatId]
       );
+      const qIdsList = rawRows.map((r) => Number(r.id));
+      const stMapList = await quotationPaymentSettlementService.getSettlementStatesForQuotationIds(
+        qIdsList,
+        null
+      );
       const rows = [];
       for (const r of rawRows) {
-        const st = await quotationPaymentSettlementService.getSettlementState(Number(r.id), null);
+        const st = stMapList.get(Number(r.id)) || {
+          schemaAllocations: true,
+          coveredUsdEquivalent: 0,
+          totalUsd: 0,
+          toleranceUsd: 0,
+          hasPendingUsdCaja: false,
+          hasRejectedUsd: false,
+          overAllocated: false,
+          hasBsReconciledBaseline: false,
+          fullySettled: false,
+          anyPaymentProgress: false,
+        };
         rows.push({
           id:                       r.id,
           total:                    r.total,
@@ -2733,6 +2942,7 @@ async function handleInboxQuotationRequest(req, res, url) {
           sales_order_id:           r.sales_order_id,
           chat_id:                  r.chat_id,
           linked_sales_order_id:    r.linked_sales_order_id,
+          delivery_zone_id:         r.delivery_zone_id ?? null,
           payment_verified:         Boolean(st.anyPaymentProgress),
           payment_fully_settled:    Boolean(st.fullySettled),
           payment_covered_usd_eq:   st.coveredUsdEquivalent,

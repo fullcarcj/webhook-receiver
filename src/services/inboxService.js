@@ -495,6 +495,9 @@ async function listInbox(opts) {
     opts.pipelineDefault === 1 ||
     String(opts.pipelineDefault || "") === "1";
 
+  /** Sin cursor: SELECT envuelto en subquery (total vía ventana); ORDER BY externo solo ve alias de columnas. */
+  const useWindowTotal = cursorIso == null;
+
   const hideAnsweredIdleMl = !srcParts || srcParts.length === 0;
   const { where, params } = buildFilters(
     filter,
@@ -524,9 +527,13 @@ async function listInbox(opts) {
     ${where}
   `;
 
-  const orderSql = pipelineDefault
-    ? `CASE WHEN (${PENDING_REPLY_EXPR}) THEN 0 ELSE 1 END, cc.last_message_at DESC NULLS LAST, cc.id DESC`
-    : `cc.last_message_at DESC NULLS LAST, cc.id DESC`;
+  const orderSql = useWindowTotal
+    ? pipelineDefault
+      ? `CASE WHEN customer_waiting_reply THEN 0 ELSE 1 END, last_message_at DESC NULLS LAST, id DESC`
+      : `last_message_at DESC NULLS LAST, id DESC`
+    : pipelineDefault
+      ? `CASE WHEN (${PENDING_REPLY_EXPR}) THEN 0 ELSE 1 END, cc.last_message_at DESC NULLS LAST, cc.id DESC`
+      : `cc.last_message_at DESC NULLS LAST, cc.id DESC`;
 
   const selectList = `
         cc.id,
@@ -567,8 +574,6 @@ async function listInbox(opts) {
     const limPos = params.length + 1;
     const listParams = [...params, limit + 1];
 
-    /** Sin cursor: una sola pasada (total vía ventana) en lugar de COUNT(*) + SELECT duplicado. */
-    const useWindowTotal = cursorIso == null;
     let total = 0;
     let rows;
 
@@ -859,7 +864,7 @@ async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDe
 
   const quoteWinJoin = pipelineDefault ? JOIN_QUOTE_WINDOW_START : "";
 
-  const fromCommon = `
+  const fromFilteredChats = `
     FROM crm_chats cc
     LEFT JOIN customers c ON cc.customer_id = c.id
     ${JOIN_ORDER}
@@ -873,23 +878,31 @@ async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDe
     ${where}
   `;
 
+  // Subconsulta: el planificador puede fallar al combinar `FILTER` + `COUNT(DISTINCT …)` con
+  // `PENDING_REPLY_EXPR` (alias `last_msg`). Se agregan filas ya resueltas y luego se cuentan.
   const sql = `
     SELECT
-      COUNT(DISTINCT cc.id) AS total,
-      COUNT(DISTINCT cc.id) FILTER (WHERE (${PENDING_REPLY_EXPR})) AS unread,
-      COUNT(DISTINCT cc.id) FILTER (
-        WHERE so.payment_status = 'pending'::payment_status_enum
-      ) AS payment_pending,
-      COUNT(DISTINCT cc.id) FILTER (WHERE so.id IS NULL) AS quote,
-      COUNT(DISTINCT cc.id) FILTER (
-        WHERE so.payment_status = 'approved'::payment_status_enum
-          AND so.fulfillment_type IS NOT NULL
+      COUNT(DISTINCT t.cid) AS total,
+      COUNT(DISTINCT t.cid) FILTER (WHERE t.pending_reply) AS unread,
+      COUNT(DISTINCT t.cid) FILTER (WHERE t.so_pay_st = 'pending') AS payment_pending,
+      COUNT(DISTINCT t.cid) FILTER (WHERE t.so_id IS NULL) AS quote,
+      COUNT(DISTINCT t.cid) FILTER (
+        WHERE t.so_pay_st = 'approved' AND t.so_ff IS NOT NULL
       ) AS dispatch,
-      COUNT(DISTINCT cc.id) FILTER (WHERE cc.source_type = 'wa_inbound') AS wa,
-      COUNT(DISTINCT cc.id) FILTER (
-        WHERE cc.source_type IN ('ml_question','ml_message','wa_ml_linked')
+      COUNT(DISTINCT t.cid) FILTER (WHERE t.source_type = 'wa_inbound') AS wa,
+      COUNT(DISTINCT t.cid) FILTER (
+        WHERE t.source_type IN ('ml_question','ml_message','wa_ml_linked')
       ) AS ml
-    ${fromCommon}
+    FROM (
+      SELECT
+        cc.id AS cid,
+        cc.source_type::text AS source_type,
+        (${PENDING_REPLY_EXPR}) AS pending_reply,
+        so.id AS so_id,
+        so.payment_status::text AS so_pay_st,
+        so.fulfillment_type AS so_ff
+      ${fromFilteredChats}
+    ) t
   `;
 
   // BE-1.8: chats con handoff activo en este momento

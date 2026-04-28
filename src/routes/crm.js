@@ -174,6 +174,24 @@ async function handleCrmApiRequest(req, res, url) {
         writeJson(res, result.created ? 201 : 200, { ok: true, ...result });
         return true;
       }
+      if (req.method === "PUT" || req.method === "PATCH") {
+        const body = await parseJsonBody(req);
+        try {
+          const row = await crmService.updateCustomerByMlBuyerId(mlBuyerId, body);
+          writeJson(res, 200, { ok: true, data: row });
+        } catch (e) {
+          if (e && e.code === "NOT_FOUND") {
+            writeJson(res, 404, { ok: false, error: "not_found" });
+            return true;
+          }
+          if (e && e.code === "BAD_REQUEST" && String(e.message) === "no_updatable_fields") {
+            writeJson(res, 400, { ok: false, error: "no_updatable_fields" });
+            return true;
+          }
+          throw e;
+        }
+        return true;
+      }
     }
 
     // ── /api/crm/customers ──────────────────────────────────────────────────

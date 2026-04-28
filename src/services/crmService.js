@@ -398,6 +398,61 @@ async function createCustomer(body) {
   }
 }
 
+/** Campos que `updateCustomer` acepta (resto del JSON de un GET se ignora). */
+const CUSTOMER_UPDATE_KEYS = [
+  "full_name",
+  "id_type",
+  "id_number",
+  "email",
+  "phone",
+  "phone_2",
+  "address",
+  "city",
+  "customer_type",
+  "crm_status",
+  "notes",
+  "tags",
+  "is_active",
+];
+
+/**
+ * Toma un cuerpo tipo respuesta GET y deja solo campos actualizables.
+ * `phone_2` / `phone` en 0 (FileMaker) se tratan como ausente → null.
+ */
+function pickCustomerPatchAllowlist(body) {
+  if (!body || typeof body !== "object") return {};
+  const out = {};
+  for (const k of CUSTOMER_UPDATE_KEYS) {
+    if (body[k] === undefined) continue;
+    let v = body[k];
+    if ((k === "phone" || k === "phone_2") && (v === 0 || v === "0")) {
+      v = null;
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * PUT/PATCH desde `/api/crm/buyers/:mlBuyerId/customer`: resuelve `customers.id`
+ * y aplica solo allowlist (no toca `primary_ml_buyer_id` ni agregados).
+ */
+async function updateCustomerByMlBuyerId(mlBuyerId, body) {
+  const cust = await getCustomerByMlBuyerId(mlBuyerId);
+  if (!cust) {
+    const e = new Error("not_found");
+    e.code = "NOT_FOUND";
+    throw e;
+  }
+  const patch = pickCustomerPatchAllowlist(body);
+  if (Object.keys(patch).length === 0) {
+    const e = new Error("no_updatable_fields");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  return updateCustomer({ customerId: cust.id, ...patch });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // updateCustomer({ customerId, ...campos })
 //
@@ -915,6 +970,8 @@ module.exports = {
   getCustomer,
   searchCustomers,
   createCustomer,
+  pickCustomerPatchAllowlist,
+  updateCustomerByMlBuyerId,
   updateCustomer,
   syncWaChatsByPhoneForCustomer,
   linkMlBuyer,

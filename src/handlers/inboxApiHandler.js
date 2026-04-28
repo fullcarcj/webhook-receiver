@@ -994,10 +994,74 @@ async function handleInboxApiRequest(req, res, url) {
     }
     if (err && err.code === "CRM_SCHEMA_MISSING") {
       const cause = err.cause;
+      const pgMessage = cause && cause.message ? String(cause.message) : null;
+      const pgCode    = cause && cause.code ? String(cause.code) : err.pgCode ? String(err.pgCode) : null;
+      const pgDetail  = cause && cause.detail ? String(cause.detail) : null;
+
+      // Mapear el código Postgres al objeto exacto que falta
+      let missing = null;
+      if (pgMessage) {
+        const tableMatch  = pgMessage.match(/relation "([^"]+)" does not exist/i);
+        const columnMatch = pgMessage.match(/column "([^"]+)" of relation "([^"]+)" does not exist/i)
+                         || pgMessage.match(/column "([^"]+)" does not exist/i)
+                         || pgMessage.match(/column ([^\s"]+) does not exist/i);
+        const typeMatch   = pgMessage.match(/type "([^"]+)" does not exist/i);
+        if (tableMatch)       missing = { type: "table",  name: tableMatch[1] };
+        else if (columnMatch) missing = { type: "column", name: columnMatch[1] };
+        else if (typeMatch)   missing = { type: "type",   name: typeMatch[1] };
+      }
+
+      // Mapear el objeto faltante a la migración específica
+      const migMap = {
+        crm_chats:                    "npm run db:whatsapp-hub",
+        crm_messages:                 "npm run db:whatsapp-hub",
+        crm_system_events:            "npm run db:whatsapp-hub",
+        customers:                    "npm run db:customer-wallet",
+        customer_wallets:             "npm run db:customer-wallet",
+        crm_customer_identities:      "node scripts/run-sql-file-pg.js sql/crm-solomotor3k.sql",
+        sales_channels:               "npm run db:sales-channels",
+        sales_orders:                 "npm run db:sales-all",
+        payment_status_enum:          "npm run db:sales-channels",
+        exceptions:                   "npm run db:exceptions",
+        bot_handoffs:                 "npm run db:bot-handoffs",
+        bot_actions:                  "npm run db:bot-actions",
+        inventario_presupuesto:       "Migración de inventario/presupuesto (ver sql/)",
+        ml_sku_mapping:               "npm run db:omnichannel",
+        ml_webhooks_logs:             "npm run db:omnichannel",
+      };
+      // Columnas específicas de crm_chats que requieren parches
+      const colMap = {
+        source_type:              "npm run db:omnichannel",
+        ml_order_id:              "npm run db:omnichannel",
+        identity_status:          "npm run db:omnichannel",
+        assigned_to:              "npm run db:omnichannel",
+        conversation_id:          "npm run db:omnichannel",
+        "status":                 "node scripts/run-sql-file-pg.js sql/20260420_crm_chats_omnichannel_states.sql",
+        sla_deadline_at:          "node scripts/run-sql-file-pg.js sql/20260420_crm_chats_omnichannel_states.sql",
+        last_inbound_at:          "node scripts/run-sql-file-pg.js sql/20260420_crm_chats_omnichannel_states.sql",
+        last_outbound_at:         "node scripts/run-sql-file-pg.js sql/20260420_crm_chats_omnichannel_states.sql",
+        is_operational:           "npm run db:internal-chat-mode",
+        ml_question_answered_at:  "npm run db:crm-ml-question-answered-at",
+        marked_attended_at:       "npm run db:crm-chats-marked-attended",
+        sales_default_hidden_at:  "npm run db:crm-sales-default-hidden",
+        identity_candidates:      "npm run db:crm-candidates",
+        fb_psid:                  "npm run db:facebook",
+      };
+
+      let fix = null;
+      if (missing) {
+        fix = missing.type === "column"
+          ? (colMap[missing.name] ?? null)
+          : (migMap[missing.name] ?? null);
+      }
+
       writeJson(res, 503, {
         error: "crm_schema_missing",
-        message: err.message || String(err),
-        pg_code: cause && cause.code ? String(cause.code) : err.pgCode ? String(err.pgCode) : undefined,
+        pg_code: pgCode,
+        pg_message: pgMessage,
+        pg_detail: pgDetail,
+        missing,
+        fix: fix ?? "Ver orden de migraciones en sql/run-migrations.md y package.json (db:whatsapp-hub → db:sales-channels → db:omnichannel → db:exceptions y parches crm_* )",
       });
       return true;
     }

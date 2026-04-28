@@ -921,7 +921,7 @@ async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDe
   const mlQuestionsPendingSql = `
     SELECT COUNT(*)::int AS ml_questions_pending
     FROM ml_questions_pending
-    WHERE status = 'UNANSWERED'
+    WHERE ml_status = 'UNANSWERED'
   `;
 
   try {
@@ -948,7 +948,7 @@ async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDe
         }),
         exceptionsService.countOpen().catch(() => 0),
         pool.query(mlQuestionsPendingSql).catch((err) => {
-          if (err.code === "42P01") return { rows: [{ ml_questions_pending: 0 }] };
+          if (err.code === "42P01" || err.code === "42703") return { rows: [{ ml_questions_pending: 0 }] };
           throw err;
         }),
       ]);

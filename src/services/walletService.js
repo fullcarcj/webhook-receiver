@@ -513,7 +513,7 @@ async function ensureCustomerFromMlBuyer(mlBuyerId, overrides) {
     if (!customer) {
       // 2. ¿customer con primary_ml_buyer_id?
       const { rows: [byPrimary] } = await pool.query(
-        `SELECT * FROM customers WHERE primary_ml_buyer_id = $1 LIMIT 1`,
+        `SELECT * FROM customers WHERE primary_ml_buyer_id = $1 AND is_active = TRUE LIMIT 1`,
         [bid]
       );
       customer = byPrimary;
@@ -526,20 +526,37 @@ async function ensureCustomerFromMlBuyer(mlBuyerId, overrides) {
           ? String(overrides.full_name).trim()
           : (buyer.nombre_apellido || buyer.nickname || `ML ${bid}`);
 
-      const { rows: [newCust] } = await pool.query(
-        `INSERT INTO customers
-           (full_name, phone, primary_ml_buyer_id, notes)
-         VALUES ($1, $2, $3, $4)
-         RETURNING *`,
-        [
-          fullName,
-          buyer.phone_1 || (overrides && overrides.phone) || null,
-          bid,
-          overrides && overrides.notes ? String(overrides.notes) : null,
-        ]
-      );
-      customer = newCust;
-      created  = true;
+      try {
+        const { rows: [newCust] } = await pool.query(
+          `INSERT INTO customers
+             (full_name, phone, primary_ml_buyer_id, notes)
+           VALUES ($1, $2, $3, $4)
+           RETURNING *`,
+          [
+            fullName,
+            buyer.phone_1 || (overrides && overrides.phone) || null,
+            bid,
+            overrides && overrides.notes ? String(overrides.notes) : null,
+          ]
+        );
+        customer = newCust;
+        created = true;
+      } catch (insErr) {
+        if (insErr && insErr.code === "23505") {
+          const { rows: [again] } = await pool.query(
+            `SELECT * FROM customers WHERE primary_ml_buyer_id = $1 AND is_active = TRUE LIMIT 1`,
+            [bid]
+          );
+          if (again) {
+            customer = again;
+            created = false;
+          } else {
+            throw insErr;
+          }
+        } else {
+          throw insErr;
+        }
+      }
     }
 
     // 4. Vincular si no estaba en customer_ml_buyers

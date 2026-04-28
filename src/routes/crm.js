@@ -155,14 +155,25 @@ async function handleCrmApiRequest(req, res, url) {
       return true;
     }
 
-    // ── Convertir buyer ML en customer CRM ─────────────────────────────────
-    // POST /api/crm/buyers/:mlBuyerId/customer
+    // ── Buyer ML → customer CRM (GET solo lectura; POST find-or-create) ───
+    // GET|POST /api/crm/buyers/:mlBuyerId/customer
     const buyerCustomerMatch = pathname.match(/^\/api\/crm\/buyers\/(\d+)\/customer$/);
-    if (req.method === "POST" && buyerCustomerMatch) {
+    if (buyerCustomerMatch) {
       const mlBuyerId = Number(buyerCustomerMatch[1]);
-      const result = await crmService.findOrCreateFromBuyer(mlBuyerId);
-      writeJson(res, result.created ? 201 : 200, { ok: true, ...result });
-      return true;
+      if (req.method === "GET") {
+        const row = await crmService.getCustomerByMlBuyerId(mlBuyerId);
+        if (!row) {
+          writeJson(res, 404, { ok: false, error: "not_found" });
+          return true;
+        }
+        writeJson(res, 200, { ok: true, data: row });
+        return true;
+      }
+      if (req.method === "POST") {
+        const result = await crmService.findOrCreateFromBuyer(mlBuyerId);
+        writeJson(res, result.created ? 201 : 200, { ok: true, ...result });
+        return true;
+      }
     }
 
     // ── /api/crm/customers ──────────────────────────────────────────────────

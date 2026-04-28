@@ -180,6 +180,8 @@
     "db:quotation-convert-pipeline": "node scripts/run-sql-file-pg.js sql/20260425_bloque4_quotation_convert_pipeline.sql",
     "db:chats-discard-whitelist": "node scripts/run-sql-file-pg.js sql/20260425_bloque4_chats_discard_whitelist.sql",
     "db:internal-chat-mode": "node scripts/run-sql-file-pg.js sql/20260425_internal_chat_mode.sql",
+    "db:customers-merge-soft-columns": "node scripts/run-sql-file-pg.js sql/20260428_customers_merge_soft_unique_ml_buyer.sql",
+    "merge:customers-ml-buyer-dupes": "node scripts/mergeDuplicateCustomersByMlBuyer.js",
     "db:financial-tables": "node scripts/run-financial-tables-migration.js",
     "db:cash-approval": "node scripts/run-cash-approval-migration.js",
     "db:exchange-rates": "node scripts/run-exchange-rates-migration.js",

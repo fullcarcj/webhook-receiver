@@ -1849,8 +1849,16 @@ async function ensureCustomerAndLinkMlBuyer(client, buyerId) {
     else if (raw2) notesWithAlt = `${notesBase} | tel2 ML (sin formato BD): ${raw2.slice(0, 120)}`;
   }
 
-  let cid = await resolveCustomerIdFromMlBuyer(client, bid);
-  if (cid != null) {
+  const linkMlBuyerRow = async (existingCid) => {
+    await client.query(
+      `INSERT INTO customer_ml_buyers (customer_id, ml_buyer_id, is_primary)
+       VALUES ($1, $2, TRUE)
+       ON CONFLICT (customer_id, ml_buyer_id) DO NOTHING`,
+      [existingCid, bid]
+    );
+  };
+
+  const upsertExistingCustomer = async (existingCid) => {
     if (hasPhone2Col) {
       await client.query(
         `UPDATE customers SET
@@ -1863,7 +1871,7 @@ async function ensureCustomerAndLinkMlBuyer(client, buyerId) {
            primary_ml_buyer_id = COALESCE(primary_ml_buyer_id, $5::bigint),
            updated_at = NOW()
          WHERE id = $1`,
-        [cid, p1, p2, nameFromMl, bid]
+        [existingCid, p1, p2, nameFromMl, bid]
       );
     } else {
       await client.query(
@@ -1876,41 +1884,47 @@ async function ensureCustomerAndLinkMlBuyer(client, buyerId) {
            primary_ml_buyer_id = COALESCE(primary_ml_buyer_id, $4::bigint),
            updated_at = NOW()
          WHERE id = $1`,
-        [cid, p1, nameFromMl, bid]
+        [existingCid, p1, nameFromMl, bid]
       );
     }
-    await client.query(
-      `INSERT INTO customer_ml_buyers (customer_id, ml_buyer_id, is_primary)
-       VALUES ($1, $2, TRUE)
-       ON CONFLICT (customer_id, ml_buyer_id) DO NOTHING`,
-      [cid, bid]
-    );
+    await linkMlBuyerRow(existingCid);
+  };
+
+  let cid = await resolveCustomerIdFromMlBuyer(client, bid);
+  if (cid != null) {
+    await upsertExistingCustomer(cid);
     return cid;
   }
 
   let ins;
-  if (hasPhone2Col) {
-    ins = await client.query(
-      `INSERT INTO customers (company_id, full_name, primary_ml_buyer_id, phone, phone_2, notes)
-       VALUES (1, $1, $2, $3, $4, $5)
-       RETURNING id`,
-      [nameFromMl, bid, p1, p2, notesBase]
-    );
-  } else {
-    ins = await client.query(
-      `INSERT INTO customers (company_id, full_name, primary_ml_buyer_id, phone, notes)
-       VALUES (1, $1, $2, $3, $4)
-       RETURNING id`,
-      [nameFromMl, bid, p1, notesWithAlt]
-    );
+  try {
+    if (hasPhone2Col) {
+      ins = await client.query(
+        `INSERT INTO customers (company_id, full_name, primary_ml_buyer_id, phone, phone_2, notes)
+         VALUES (1, $1, $2, $3, $4, $5)
+         RETURNING id`,
+        [nameFromMl, bid, p1, p2, notesBase]
+      );
+    } else {
+      ins = await client.query(
+        `INSERT INTO customers (company_id, full_name, primary_ml_buyer_id, phone, notes)
+         VALUES (1, $1, $2, $3, $4)
+         RETURNING id`,
+        [nameFromMl, bid, p1, notesWithAlt]
+      );
+    }
+  } catch (e) {
+    if (e && e.code === "23505") {
+      cid = await resolveCustomerIdFromMlBuyer(client, bid);
+      if (cid != null) {
+        await upsertExistingCustomer(cid);
+        return cid;
+      }
+    }
+    throw e;
   }
   cid = Number(ins.rows[0].id);
-  await client.query(
-    `INSERT INTO customer_ml_buyers (customer_id, ml_buyer_id, is_primary)
-     VALUES ($1, $2, TRUE)
-     ON CONFLICT (customer_id, ml_buyer_id) DO NOTHING`,
-    [cid, bid]
-  );
+  await linkMlBuyerRow(cid);
   return cid;
 }
 

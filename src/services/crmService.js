@@ -97,6 +97,43 @@ function mapCrmError(err) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// getCustomerByMlBuyerId(mlBuyerId)
+//
+// Solo lectura: fila `customers` por buyer ML (mismo id que `primary_ml_buyer_id`).
+// 1) `customer_ml_buyers`  2) si no, `customers.primary_ml_buyer_id` activo.
+// No crea filas; no exige wallet.
+// ─────────────────────────────────────────────────────────────────────────────
+async function getCustomerByMlBuyerId(mlBuyerId) {
+  const bid = Number(mlBuyerId);
+  if (!Number.isFinite(bid) || bid <= 0) {
+    const e = new Error("ml_buyer_id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  try {
+    const { rows: [linked] } = await pool.query(
+      `SELECT c.*
+       FROM customers c
+       JOIN customer_ml_buyers cmb ON cmb.customer_id = c.id
+       WHERE cmb.ml_buyer_id = $1
+       LIMIT 1`,
+      [bid]
+    );
+    if (linked) return linked;
+
+    const { rows: [byPrimary] } = await pool.query(
+      `SELECT * FROM customers
+       WHERE primary_ml_buyer_id = $1 AND is_active = TRUE
+       LIMIT 1`,
+      [bid]
+    );
+    return byPrimary || null;
+  } catch (err) {
+    throw mapCrmError(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // findOrCreateFromBuyer(mlBuyerId)
 //
 // Busca el customer vinculado a este buyer de ML.
@@ -137,9 +174,9 @@ async function findOrCreateFromBuyer(mlBuyerId) {
       throw e;
     }
 
-    // 3. ¿Existe customer con primary_ml_buyer_id?
+    // 3. ¿Existe customer con primary_ml_buyer_id? (solo activos — duplicados inactivos tras merge soft)
     const { rows: [byPrimary] } = await pool.query(
-      `SELECT * FROM customers WHERE primary_ml_buyer_id = $1 LIMIT 1`,
+      `SELECT * FROM customers WHERE primary_ml_buyer_id = $1 AND is_active = TRUE LIMIT 1`,
       [bid]
     );
     if (byPrimary) {
@@ -163,13 +200,35 @@ async function findOrCreateFromBuyer(mlBuyerId) {
     try {
       await client.query("BEGIN");
 
-      const { rows: [newCust] } = await client.query(
-        `INSERT INTO customers
-           (full_name, phone, primary_ml_buyer_id, customer_type)
-         VALUES ($1, $2, $3, 'RETAIL')
-         RETURNING *`,
-        [fullName, buyer.phone_1 || null, bid]
-      );
+      let newCust;
+      try {
+        const ins = await client.query(
+          `INSERT INTO customers
+             (full_name, phone, primary_ml_buyer_id, customer_type)
+           VALUES ($1, $2, $3, 'RETAIL')
+           RETURNING *`,
+          [fullName, buyer.phone_1 || null, bid]
+        );
+        newCust = ins.rows[0];
+      } catch (insErr) {
+        if (insErr && insErr.code === "23505") {
+          await client.query("ROLLBACK");
+          const retry = await pool.query(
+            `SELECT * FROM customers WHERE primary_ml_buyer_id = $1 AND is_active = TRUE LIMIT 1`,
+            [bid]
+          );
+          if (retry.rows[0]) {
+            await pool.query(
+              `INSERT INTO customer_ml_buyers (customer_id, ml_buyer_id, is_primary)
+               VALUES ($1, $2, TRUE)
+               ON CONFLICT DO NOTHING`,
+              [retry.rows[0].id, bid]
+            );
+            return { customer: retry.rows[0], created: false };
+          }
+        }
+        throw insErr;
+      }
 
       await client.query(
         `INSERT INTO customer_ml_buyers
@@ -182,7 +241,11 @@ async function findOrCreateFromBuyer(mlBuyerId) {
       await client.query("COMMIT");
       return { customer: newCust, created: true };
     } catch (err) {
-      await client.query("ROLLBACK");
+      try {
+        await client.query("ROLLBACK");
+      } catch (_rb) {
+        /* ya abortada tras 23505 + retry */
+      }
       throw err;
     } finally {
       client.release();
@@ -848,6 +911,7 @@ async function getWalletSummary(customerId) {
 
 module.exports = {
   findOrCreateFromBuyer,
+  getCustomerByMlBuyerId,
   getCustomer,
   searchCustomers,
   createCustomer,

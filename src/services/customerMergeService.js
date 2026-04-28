@@ -98,6 +98,29 @@ async function mergeLoyalty(client, loserId, winnerId) {
   await client.query(`DELETE FROM loyalty_accounts WHERE customer_id = $1`, [loserId]);
 }
 
+/**
+ * Ejecuta `fn` en un SAVEPOINT: si `fn` falla con un código en `ignorePgCodes`,
+ * se revierte solo ese bloque y la transacción sigue viva (evita 25P02 al ignorar 42P01).
+ * @param {import("pg").PoolClient} client
+ * @param {string} savepointId identificador corto (a-z0-9_)
+ * @param {() => Promise<void>} fn
+ * @param {Set<string>|string[]} [ignorePgCodes] p.ej. ['42P01','42703']
+ */
+async function runInSavepoint(client, savepointId, fn, ignorePgCodes) {
+  const ign = ignorePgCodes instanceof Set ? ignorePgCodes : new Set(ignorePgCodes || []);
+  const sp = `sp_m_${String(savepointId).replace(/[^a-z0-9_]/gi, "_").slice(0, 40)}`;
+  await client.query(`SAVEPOINT ${sp}`);
+  try {
+    await fn();
+    await client.query(`RELEASE SAVEPOINT ${sp}`);
+  } catch (e) {
+    await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+    await client.query(`RELEASE SAVEPOINT ${sp}`);
+    const code = e && e.code ? String(e.code) : "";
+    if (!ign.has(code)) throw e;
+  }
+}
+
 async function mergeWallets(client, loserId, winnerId) {
   const { rows: lw } = await client.query(
     `SELECT id, customer_id, currency, balance FROM customer_wallets WHERE customer_id = $1`,
@@ -193,12 +216,16 @@ async function enrichCustomerFromDropped(client, keepId, dropId) {
  * @param {number|string} dropId
  * @param {object} [options]
  * @param {import("pg").PoolClient} [options.dbClient] transacción externa (no release)
+ * @param {boolean} [options.softDeleteDropped] si true: desactiva el duplicado (is_active=false,
+ *   primary_ml_buyer_id NULL) y opcionalmente merged_into_customer_id; no hace DELETE físico.
+ *   Requiere columnas merged_* (sql/20260428_customers_merge_soft_unique_ml_buyer.sql).
  */
 async function mergeCustomers(keepId, dropId, options = {}) {
   const triggeredBy = options.triggeredBy || "manual";
   const score = options.score != null ? Number(options.score) : null;
   const scoreBreakdown = options.scoreBreakdown != null ? options.scoreBreakdown : null;
   const dryRun = Boolean(options.dryRun);
+  const softDeleteDropped = Boolean(options.softDeleteDropped);
   const externalClient = options.dbClient || null;
   if (externalClient && dryRun) {
     throw Object.assign(new Error("DRY_RUN_REQUIRES_INTERNAL_POOL"), { code: "DRY_RUN_REQUIRES_INTERNAL_POOL" });
@@ -264,7 +291,7 @@ async function mergeCustomers(keepId, dropId, options = {}) {
     );
     rowsAffected.crm_identities += idMove.rowCount || 0;
 
-    try {
+    await runInSavepoint(client, "crm_veh", async () => {
       const vehIns = await client.query(
         `INSERT INTO crm_customer_vehicles (customer_id, generation_id, plate, color, notes, added_at)
          SELECT $1, v.generation_id, v.plate, v.color, v.notes, COALESCE(v.added_at, NOW())
@@ -281,9 +308,7 @@ async function mergeCustomers(keepId, dropId, options = {}) {
       rowsAffected.crm_vehicles += vehIns.rowCount || 0;
       const vehDel = await client.query(`DELETE FROM crm_customer_vehicles WHERE customer_id = $1`, [dId]);
       rowsAffected.crm_vehicles += vehDel.rowCount || 0;
-    } catch (e) {
-      if (e && e.code !== "42P01") throw e;
-    }
+    }, ["42P01"]);
 
     const mbDup = await client.query(
       `DELETE FROM customer_ml_buyers
@@ -304,15 +329,13 @@ async function mergeCustomers(keepId, dropId, options = {}) {
     const msg = await client.query(`UPDATE crm_messages SET customer_id = $1 WHERE customer_id = $2`, [kId, dId]);
     rowsAffected.crm_messages += msg.rowCount || 0;
 
-    try {
+    await runInSavepoint(client, "wa_logs", async () => {
       const wa = await client.query(
         `UPDATE crm_whatsapp_logs SET customer_id = $1 WHERE customer_id = $2`,
         [kId, dId]
       );
       rowsAffected.whatsapp_logs += wa.rowCount || 0;
-    } catch (e) {
-      if (e && e.code !== "42P01") throw e;
-    }
+    }, ["42P01"]);
 
     try {
       const so = await client.query(`UPDATE sales_orders SET customer_id = $1 WHERE customer_id = $2`, [kId, dId]);
@@ -326,31 +349,74 @@ async function mergeCustomers(keepId, dropId, options = {}) {
       throw e;
     }
 
-    try {
+    await runInSavepoint(client, "inv_pres", async () => {
+      await client.query(
+        `UPDATE inventario_presupuesto SET cliente_id = $1 WHERE cliente_id = $2`,
+        [kId, dId]
+      );
+    }, ["42P01", "42703"]);
+
+    await runInSavepoint(client, "pay_att", async () => {
+      await client.query(`UPDATE payment_attempts SET customer_id = $1 WHERE customer_id = $2`, [kId, dId]);
+    }, ["42P01", "42703"]);
+
+    await runInSavepoint(client, "wt_cust", async () => {
       const wt = await client.query(
         `UPDATE wallet_transactions SET customer_id = $1 WHERE customer_id = $2`,
         [kId, dId]
       );
       rowsAffected.wallets += wt.rowCount || 0;
-    } catch (e) {
-      if (e && e.code !== "42P01") throw e;
-    }
+    }, ["42P01"]);
 
-    try {
+    await runInSavepoint(client, "loyalty", async () => {
       await mergeLoyalty(client, dId, kId);
-    } catch (e) {
-      if (e && e.code !== "42P01") throw e;
-    }
+    }, ["42P01"]);
 
-    try {
+    await runInSavepoint(client, "wallets", async () => {
       await mergeWallets(client, dId, kId);
-    } catch (e) {
-      if (e && e.code !== "42P01") throw e;
-    }
+    }, ["42P01"]);
 
     await enrichCustomerFromDropped(client, kId, dId);
 
-    await client.query(`DELETE FROM customers WHERE id = $1`, [dId]);
+    if (softDeleteDropped) {
+      const { rows: colRows } = await client.query(
+        `SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'customers' AND column_name = 'merged_into_customer_id'
+         LIMIT 1`
+      );
+      const noteLine = `[merge ${triggeredBy}] fusionado en customer_id=${kId}`;
+      if (colRows.length) {
+        await client.query(
+          `UPDATE customers SET
+             is_active = FALSE,
+             primary_ml_buyer_id = NULL,
+             merged_into_customer_id = $1,
+             merged_at = NOW(),
+             notes = CASE
+               WHEN COALESCE(TRIM(notes), '') = '' THEN $2::text
+               ELSE TRIM(notes) || E'\n' || $2::text
+             END,
+             updated_at = NOW()
+           WHERE id = $3`,
+          [kId, noteLine, dId]
+        );
+      } else {
+        await client.query(
+          `UPDATE customers SET
+             is_active = FALSE,
+             primary_ml_buyer_id = NULL,
+             notes = CASE
+               WHEN COALESCE(TRIM(notes), '') = '' THEN $1::text
+               ELSE TRIM(notes) || E'\n' || $1::text
+             END,
+             updated_at = NOW()
+           WHERE id = $2`,
+          [noteLine, dId]
+        );
+      }
+    } else {
+      await client.query(`DELETE FROM customers WHERE id = $1`, [dId]);
+    }
 
     await client.query(
       `INSERT INTO customer_merge_log (

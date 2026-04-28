@@ -155,21 +155,46 @@ async function handleCrmApiRequest(req, res, url) {
       return true;
     }
 
-    // ── Buyer ML → customer CRM (GET solo lectura; POST find-or-create) ───
-    // GET|POST /api/crm/buyers/:mlBuyerId/customer
+    // ── Buyer ML → customer CRM ─────────────────────────────────────────────
+    // GET  /api/crm/buyers/:mlBuyerId/customer
+    // POST /api/crm/buyers/:mlBuyerId/customer  → find-or-create (sin cuerpo o ignorado)
+    // POST …/customer?update=1  → mismo cuerpo que PUT/PATCH (Insert from URL suele fallar con PUT → error 10)
+    // PUT|PATCH …/customer  → actualizar cliente vinculado al buyer
     const buyerCustomerMatch = pathname.match(/^\/api\/crm\/buyers\/(\d+)\/customer$/);
     if (buyerCustomerMatch) {
       const mlBuyerId = Number(buyerCustomerMatch[1]);
       if (req.method === "GET") {
         const row = await crmService.getCustomerByMlBuyerId(mlBuyerId);
         if (!row) {
-          writeJson(res, 404, { ok: false, error: "not_found" });
+          writeJson(res, 404, { ok: false, error: "not_found", detail: "no_customer_for_ml_buyer" });
           return true;
         }
         writeJson(res, 200, { ok: true, data: row });
         return true;
       }
       if (req.method === "POST") {
+        const wantsUpdate =
+          url.searchParams.get("update") === "1" ||
+          url.searchParams.get("update") === "true" ||
+          url.searchParams.get("save") === "1";
+        if (wantsUpdate) {
+          const body = await parseJsonBody(req);
+          try {
+            const row = await crmService.updateCustomerByMlBuyerId(mlBuyerId, body);
+            writeJson(res, 200, { ok: true, data: row, method: "POST", query: "update=1" });
+          } catch (e) {
+            if (e && e.code === "NOT_FOUND") {
+              writeJson(res, 404, { ok: false, error: "not_found", detail: "no_customer_for_ml_buyer" });
+              return true;
+            }
+            if (e && e.code === "BAD_REQUEST" && String(e.message) === "no_updatable_fields") {
+              writeJson(res, 400, { ok: false, error: "no_updatable_fields", detail: "body_sin_campos_editables" });
+              return true;
+            }
+            throw e;
+          }
+          return true;
+        }
         const result = await crmService.findOrCreateFromBuyer(mlBuyerId);
         writeJson(res, result.created ? 201 : 200, { ok: true, ...result });
         return true;
@@ -181,11 +206,11 @@ async function handleCrmApiRequest(req, res, url) {
           writeJson(res, 200, { ok: true, data: row });
         } catch (e) {
           if (e && e.code === "NOT_FOUND") {
-            writeJson(res, 404, { ok: false, error: "not_found" });
+            writeJson(res, 404, { ok: false, error: "not_found", detail: "no_customer_for_ml_buyer" });
             return true;
           }
           if (e && e.code === "BAD_REQUEST" && String(e.message) === "no_updatable_fields") {
-            writeJson(res, 400, { ok: false, error: "no_updatable_fields" });
+            writeJson(res, 400, { ok: false, error: "no_updatable_fields", detail: "body_sin_campos_editables" });
             return true;
           }
           throw e;

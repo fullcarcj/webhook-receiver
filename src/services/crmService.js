@@ -432,16 +432,65 @@ const CUSTOMER_UPDATE_KEYS = [
   "is_active",
 ];
 
+const CUSTOMER_UPDATE_KEY_SET = new Set(CUSTOMER_UPDATE_KEYS);
+
+/** Claves compactas típicas de clientes (p. ej. JSON sin guiones bajos). */
+const EXTRA_CUSTOMER_KEY_ALIASES = Object.freeze({
+  fullname: "full_name",
+  idnumber: "id_number",
+  idtype: "id_type",
+  customertype: "customer_type",
+  crmstatus: "crm_status",
+  clientsegment: "client_segment",
+  alternativephone: "alternative_phone",
+  isactive: "is_active",
+});
+
 /**
- * Toma un cuerpo tipo respuesta GET y deja solo campos actualizables.
+ * Nombre de propiedad JSON → snake_case (FileMaker: `Phone`, `Phone_2`, `Full_Name`).
+ */
+function fieldNameToSnakeCase(raw) {
+  let s = String(raw || "").trim();
+  if (!s) return "";
+  s = s.replace(/\s+/g, "_");
+  s = s
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase();
+  return s.replace(/_+/g, "_").replace(/^_|_$/g, "");
+}
+
+function canonicalCustomerUpdateKey(rawKey) {
+  const s = fieldNameToSnakeCase(rawKey);
+  if (CUSTOMER_UPDATE_KEY_SET.has(s)) return s;
+  const alias = EXTRA_CUSTOMER_KEY_ALIASES[s];
+  return alias || null;
+}
+
+/**
+ * Solo claves actualizables, normalizadas a snake_case (misma pauta que `updateCustomer`).
+ */
+function normalizeCustomerPatchKeys(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  const out = {};
+  for (const [rawKey, v] of Object.entries(body)) {
+    const canon = canonicalCustomerUpdateKey(rawKey);
+    if (canon) out[canon] = v;
+  }
+  return out;
+}
+
+/**
+ * Toma un cuerpo tipo respuesta GET (o FileMaker) y deja solo campos actualizables.
+ * Acepta `Phone` / `Phone_2` / `fullName`, etc.
  * `phone_2` / `phone` / `alternative_phone` en 0 (FileMaker) → null.
  */
 function pickCustomerPatchAllowlist(body) {
-  if (!body || typeof body !== "object") return {};
+  const flat = normalizeCustomerPatchKeys(body);
   const out = {};
   for (const k of CUSTOMER_UPDATE_KEYS) {
-    if (body[k] === undefined) continue;
-    let v = body[k];
+    if (flat[k] === undefined) continue;
+    let v = flat[k];
     if (
       (k === "phone" || k === "phone_2" || k === "alternative_phone") &&
       (v === 0 || v === "0")
@@ -487,7 +536,7 @@ async function updateCustomer({ customerId, ...body }) {
     throw e;
   }
 
-  const patch = { ...body };
+  const patch = normalizeCustomerPatchKeys(body);
   if (patch.phone !== undefined) {
     patch.phone = normalizePhoneForCustomersTable(patch.phone);
   }
@@ -992,6 +1041,7 @@ module.exports = {
   searchCustomers,
   createCustomer,
   pickCustomerPatchAllowlist,
+  normalizeCustomerPatchKeys,
   updateCustomerByMlBuyerId,
   updateCustomer,
   syncWaChatsByPhoneForCustomer,

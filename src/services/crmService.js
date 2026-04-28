@@ -61,6 +61,21 @@ function normalizeIdTypeForCustomer(raw) {
   return t;
 }
 
+/** Coherente con `customers.client_segment` CHECK (sql/20260410_customers_wa_enrichment.sql). */
+function normalizeClientSegment(raw) {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const t = String(raw).trim().toLowerCase();
+  if (!t) return null;
+  const ok = ["personal", "business", "enterprise"];
+  if (!ok.includes(t)) {
+    const e = new Error("client_segment debe ser personal, business o enterprise");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  return t;
+}
+
 // ─── tx_type válidos expuestos por la API CRM ──────────────────────────────
 // Subconjunto del ENUM wallet_tx_type que tiene sentido para el CRM.
 // Se mapean a los valores EXACTOS del ENUM en wallet_transactions.
@@ -406,10 +421,12 @@ const CUSTOMER_UPDATE_KEYS = [
   "email",
   "phone",
   "phone_2",
+  "alternative_phone",
   "address",
   "city",
   "customer_type",
   "crm_status",
+  "client_segment",
   "notes",
   "tags",
   "is_active",
@@ -417,7 +434,7 @@ const CUSTOMER_UPDATE_KEYS = [
 
 /**
  * Toma un cuerpo tipo respuesta GET y deja solo campos actualizables.
- * `phone_2` / `phone` en 0 (FileMaker) se tratan como ausente → null.
+ * `phone_2` / `phone` / `alternative_phone` en 0 (FileMaker) → null.
  */
 function pickCustomerPatchAllowlist(body) {
   if (!body || typeof body !== "object") return {};
@@ -425,7 +442,10 @@ function pickCustomerPatchAllowlist(body) {
   for (const k of CUSTOMER_UPDATE_KEYS) {
     if (body[k] === undefined) continue;
     let v = body[k];
-    if ((k === "phone" || k === "phone_2") && (v === 0 || v === "0")) {
+    if (
+      (k === "phone" || k === "phone_2" || k === "alternative_phone") &&
+      (v === 0 || v === "0")
+    ) {
       v = null;
     }
     out[k] = v;
@@ -474,19 +494,20 @@ async function updateCustomer({ customerId, ...body }) {
   if (patch.phone_2 !== undefined) {
     patch.phone_2 = normalizePhoneForCustomersTable(patch.phone_2);
   }
+  if (patch.alternative_phone !== undefined) {
+    patch.alternative_phone = normalizePhoneForCustomersTable(patch.alternative_phone);
+  }
   if (patch.id_type !== undefined) {
     patch.id_type = normalizeIdTypeForCustomer(patch.id_type);
   }
-
-  const ALLOWED = [
-    "full_name", "id_type", "id_number", "email", "phone", "phone_2",
-    "address", "city", "customer_type", "crm_status", "notes", "tags", "is_active",
-  ];
+  if (patch.client_segment !== undefined) {
+    patch.client_segment = normalizeClientSegment(patch.client_segment);
+  }
 
   const sets = [];
   const params = [];
 
-  for (const key of ALLOWED) {
+  for (const key of CUSTOMER_UPDATE_KEYS) {
     if (patch[key] === undefined) continue;
     params.push(key === "tags" ? patch[key] : patch[key]);
     const cast = key === "tags" ? `$${params.length}::text[]`

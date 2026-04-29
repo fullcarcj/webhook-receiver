@@ -106,7 +106,6 @@ const {
   insertWasenderWebhookEvent,
   listWasenderWebhookEvents,
   upsertMlAccount,
-  isMlUserIdInAccounts,
   listMlAccounts,
   setMlAccountCookiesNetscape,
   clearMlAccountCookiesNetscape,
@@ -418,6 +417,11 @@ function isMensajesInventarioProductosPath(pathname) {
   return pathname === "/mensajes-inventario-productos" || pathname === "/mensajes-inventario-productos/";
 }
 
+/** GET FileMaker: nombre/apellido derivados de `customers.full_name` (JSON). Ver `filemakerCustomerNameGetSecretExpected`. */
+function isFilemakerCustomerNameGetPath(pathname) {
+  return pathname === "/filemaker/customer-name" || pathname === "/filemaker/customer-name/";
+}
+
 function isVentasDetalleWebPath(pathname) {
   return pathname === "/ventas-detalle-web" || pathname === "/ventas-detalle-web/";
 }
@@ -525,6 +529,18 @@ function rejectAdminSecret(req, res) {
   res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
   return true;
+}
+
+/**
+ * Secreto GET `customer-name`: `FILEMAKER_CUSTOMERS_GET_SECRET` o, si vacío, `FILEMAKER_TIPO_G_SECRET`.
+ * Misma transmisión que POST FileMaker (`filemakerTipoGSecretFromRequest`).
+ */
+function filemakerCustomerNameGetSecretExpected() {
+  const a = process.env.FILEMAKER_CUSTOMERS_GET_SECRET;
+  if (a != null && String(a).trim() !== "") return String(a).trim();
+  const b = process.env.FILEMAKER_TIPO_G_SECRET;
+  if (b != null && String(b).trim() !== "") return String(b).trim();
+  return "";
 }
 
 /** Secreto POST FileMaker (`/filemaker/tipo-g`, `/mensajes-tipo-g`, `/filemaker/inventario-productos`, `/mensajes-inventario-productos`): `Authorization: Bearer`, `X-Filemaker-Secret` o `?secret=`. */
@@ -2187,6 +2203,8 @@ const server = http.createServer(async (req, res) => {
           "POST /filemaker/tipo-g o POST /mensajes-tipo-g (mismo JSON y FILEMAKER_TIPO_G_SECRET) — actualiza ml_buyers e intenta WhatsApp tipo E · GET /mensajes-tipo-g?k=ADMIN_SECRET (log ml_filemaker_tipo_g_log)",
         filemaker_inventario_productos:
           "POST /filemaker/inventario-productos o POST /mensajes-inventario-productos (JSON producto + FILEMAKER_INVENTARIO_PRODUCTOS_SECRET) — upsert tabla productos; GET inventario sigue en /inventario-productos?k=ADMIN_SECRET",
+        filemaker_customer_name:
+          "GET /filemaker/customer-name?customer_id=|id=|ml_buyer_id=|buyer_id=|phone= — JSON: full_name, nombre, apellido (primera palabra / resto); Bearer o X-Filemaker-Secret o ?secret= con FILEMAKER_CUSTOMERS_GET_SECRET o FILEMAKER_TIPO_G_SECRET",
         catalogo_publico_frontend:
           "API pública /api/v1: GET /api/v1 (índice), GET /api/v1/health, GET /api/v1/catalog?search=&limit=&offset= — catálogo con cabecera X-API-KEY (=FRONTEND_API_KEY); CORS FRONTEND_CORS_ORIGINS; rate limit FRONTEND_RATE_LIMIT_*; solo id, sku, nombre, precio_venta, stock · compat motor/válvulas: GET /api/v1/catalog/compat/makes|/models?make=|/search?make=&model=&year=&displacement_l=|/for-sku?sku=|/equivalences?sku= (misma X-API-KEY; requiere sql/catalog-motor-compatibility.sql)",
         api_wallet_admin:
@@ -3882,6 +3900,127 @@ const server = http.createServer(async (req, res) => {
       console.error("[filemaker inventario productos]", e);
       res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: false, error: "internal_error", detail: e.message || String(e) }));
+    }
+    return;
+  }
+
+  /** FileMaker → lectura `customers` (nombre + apellido desde `full_name`). Secreto: FILEMAKER_CUSTOMERS_GET_SECRET o FILEMAKER_TIPO_G_SECRET. */
+  if (req.method === "GET" && isFilemakerCustomerNameGetPath(url.pathname)) {
+    const expected = filemakerCustomerNameGetSecretExpected();
+    if (!expected) {
+      res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: "FILEMAKER_CUSTOMERS_GET_SECRET_y_TIPO_G_vacíos",
+          detail:
+            "Definí FILEMAKER_CUSTOMERS_GET_SECRET o FILEMAKER_TIPO_G_SECRET; enviá Bearer, X-Filemaker-Secret o ?secret=",
+        })
+      );
+      return;
+    }
+    const provided = filemakerTipoGSecretFromRequest(req, url);
+    if (!timingSafeCompare(provided, expected)) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "no autorizado" }));
+      return;
+    }
+    const qId = url.searchParams.get("customer_id") || url.searchParams.get("id");
+    const qBuyer = url.searchParams.get("ml_buyer_id") || url.searchParams.get("buyer_id");
+    const qPhone = url.searchParams.get("phone");
+    const cid = qId != null && String(qId).trim() !== "" ? Number(qId) : NaN;
+    const bid = qBuyer != null && String(qBuyer).trim() !== "" ? Number(qBuyer) : NaN;
+    const phoneRaw = qPhone != null ? String(qPhone).trim() : "";
+    if (!(Number.isFinite(cid) && cid > 0) && !(Number.isFinite(bid) && bid > 0) && phoneRaw === "") {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: "bad_request",
+          detail: "Usá query customer_id= o id=, ml_buyer_id= o buyer_id=, o phone=",
+        })
+      );
+      return;
+    }
+    try {
+      let rows;
+      if (Number.isFinite(cid) && cid > 0) {
+        const r = await pool.query(
+          `SELECT id, company_id, full_name, phone, phone_2
+           FROM customers
+           WHERE id = $1 AND COALESCE(is_active, TRUE) = TRUE
+           LIMIT 1`,
+          [cid]
+        );
+        rows = r.rows;
+      } else if (Number.isFinite(bid) && bid > 0) {
+        const r = await pool.query(
+          `SELECT c.id, c.company_id, c.full_name, c.phone, c.phone_2
+           FROM customers c
+           WHERE COALESCE(c.is_active, TRUE) = TRUE
+             AND (
+               c.primary_ml_buyer_id = $1
+               OR EXISTS (
+                 SELECT 1 FROM customer_ml_buyers l
+                 WHERE l.customer_id = c.id AND l.ml_buyer_id = $1
+               )
+             )
+           ORDER BY c.id ASC
+           LIMIT 1`,
+          [bid]
+        );
+        rows = r.rows;
+      } else {
+        const r = await pool.query(
+          `SELECT id, company_id, full_name, phone, phone_2
+           FROM customers
+           WHERE COALESCE(is_active, TRUE) = TRUE
+             AND (phone = $1 OR phone_2 = $1)
+           ORDER BY id ASC
+           LIMIT 1`,
+          [phoneRaw]
+        );
+        rows = r.rows;
+      }
+      const row = rows[0];
+      if (!row) {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "not_found" }));
+        return;
+      }
+      const full = row.full_name != null ? String(row.full_name).trim() : "";
+      const parts = full.split(/\s+/).filter(Boolean);
+      const nombre = parts.length ? parts[0] : "";
+      const apellido = parts.length > 1 ? parts.slice(1).join(" ") : "";
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          customer_id: Number(row.id),
+          company_id: row.company_id != null ? Number(row.company_id) : null,
+          full_name: full,
+          nombre,
+          apellido,
+          phone: row.phone != null ? String(row.phone) : null,
+          phone_2: row.phone_2 != null ? String(row.phone_2) : null,
+        })
+      );
+    } catch (e) {
+      const msg = e && e.message ? String(e.message) : String(e);
+      if (/phone_2/.test(msg) && /does not exist/i.test(msg)) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error: "schema",
+            detail: "Falta columna customers.phone_2; ejecutá npm run db:customers-phone2",
+          })
+        );
+        return;
+      }
+      console.error("[filemaker customer-name]", e);
+      res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "internal_error", detail: msg }));
     }
     return;
   }
@@ -7510,17 +7649,17 @@ const server = http.createServer(async (req, res) => {
       const uidRaw = body.user_id;
       const uidNum =
         uidRaw != null && String(uidRaw).trim() !== "" ? Number(uidRaw) : NaN;
-      const known =
-        Number.isFinite(uidNum) &&
-        uidNum > 0 &&
-        (await isMlUserIdInAccounts(uidNum));
-      if (known) {
-        const sid = await insertMlWebhookStaging(body);
+      const sid = await insertMlWebhookStaging(body);
+      if (sid != null) {
         console.log("[db] ml_webhook_staging id=%s (ml_user_id=%s)", sid, uidNum);
-      } else {
+      } else if (Number.isFinite(uidNum) && uidNum > 0) {
         console.log(
           "[db] ml_webhook_staging omitido: user_id=%s no está en ml_accounts (registrá la cuenta en /cuentas)",
-          uidRaw != null ? String(uidRaw) : "—"
+          String(uidNum)
+        );
+      } else {
+        console.log(
+          "[db] ml_webhook_staging omitido: user_id ausente o inválido (se requiere numérico y cuenta en ml_accounts)"
         );
       }
     } catch (e) {
@@ -8589,8 +8728,20 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(
       `POST FileMaker tipo G: http://localhost:${PORT}/filemaker/tipo-g o http://localhost:${PORT}/mensajes-tipo-g (cabecera o ?secret= con FILEMAKER_TIPO_G_SECRET)`
     );
+    console.log(
+      `GET FileMaker customer-name: http://localhost:${PORT}/filemaker/customer-name?customer_id=… (mismo secreto que tipo G si FILEMAKER_CUSTOMERS_GET_SECRET vacío)`
+    );
   } else {
     console.log("[config] FILEMAKER_TIPO_G_SECRET no definido: POST /filemaker/tipo-g responde 503.");
+  }
+  if (
+    process.env.FILEMAKER_CUSTOMERS_GET_SECRET &&
+    String(process.env.FILEMAKER_CUSTOMERS_GET_SECRET).trim() !== "" &&
+    (!process.env.FILEMAKER_TIPO_G_SECRET || String(process.env.FILEMAKER_TIPO_G_SECRET).trim() === "")
+  ) {
+    console.log(
+      `GET FileMaker customer-name: http://localhost:${PORT}/filemaker/customer-name?customer_id=… (FILEMAKER_CUSTOMERS_GET_SECRET)`
+    );
   }
   if (
     process.env.FILEMAKER_INVENTARIO_PRODUCTOS_SECRET &&

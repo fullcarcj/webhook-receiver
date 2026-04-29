@@ -1478,7 +1478,11 @@ function mlWebhookStagingDedupeKey(mlUserId, topic, resource) {
   return `${Number(mlUserId)}\x1f${t}\x1f${r}`;
 }
 
-/** Copia temporal de notificaciones ML (POST /webhook) para consulta y borrado manual. */
+/**
+ * Copia temporal de notificaciones ML (POST /webhook) para consulta y borrado manual.
+ * No inserta ni actualiza fila si `user_id` no está en `ml_accounts` (cualquier `topic`).
+ * @returns {Promise<number|null>} id de fila (nuevo o upsert) o `null` si vendedor no registrado
+ */
 async function insertMlWebhookStaging(payloadObj) {
   await ensureSchema();
   const payload = JSON.stringify(payloadObj != null ? payloadObj : {});
@@ -1493,6 +1497,9 @@ async function insertMlWebhookStaging(payloadObj) {
   }
   if (mlUserId == null) {
     throw new Error("insertMlWebhookStaging requiere ml_user_id numérico");
+  }
+  if (!(await isMlUserIdInAccounts(mlUserId))) {
+    return null;
   }
   const dedupeKey = mlWebhookStagingDedupeKey(mlUserId, topic, resource);
   const { rows } = await pool.query(

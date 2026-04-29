@@ -8,6 +8,7 @@
  * PRODUCT_IMAGE_FIREBASE_BUCKET: nombre del bucket (ej. xxx.firebasestorage.app) para URLs estilo Storage; con PRODUCT_IMAGE_OBJECT_PREFIX (default productos) alinea con upload-firebase-webp.
  * PRODUCT_IMAGE_EXT: extensión (default .webp).
  * FILEMAKER_INVENTARIO_PRODUCTOS_SECRET: POST desde FileMaker a /filemaker/inventario-productos o /mensajes-inventario-productos (mismo patrón que FILEMAKER_TIPO_G_SECRET).
+ * FILEMAKER_CUSTOMERS_GET_SECRET (opcional): GET /filemaker/customer-name; si vacío se usa FILEMAKER_TIPO_G_SECRET (Bearer / X-Filemaker-Secret / ?secret=).
  * firebase-key.json: service account para scripts (p. ej. npm run upload-firebase-webp); no subir a git.
  * Inventario — fabricantes: GET /api/inventory/manufacturers (admin) lista la tabla `manufacturers` en PostgreSQL.
  * Si el listado debe resolverse contra otro backend, define INVENTORY_MANUFACTURERS_PROXY_URL como URL absoluta

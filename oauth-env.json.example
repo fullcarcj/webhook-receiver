@@ -2,6 +2,7 @@
   "WASENDER_WEBHOOK_SECRET": "mismo_valor_que_webhook_secret_en_panel_wasender",
   "ADMIN_SECRET": "clave_secreta_para_vistas_admin_recordatorios_y_cuentas",
   "FILEMAKER_INVENTARIO_PRODUCTOS_SECRET": "clave_post_filemaker_inventario_misma_idea_que_tipo_g",
+  "FILEMAKER_CUSTOMERS_GET_SECRET": "opcional_GET_filemaker_customer_name_si_querés_clave_distinta_a_FILEMAKER_TIPO_G_SECRET",
   "FRONTEND_API_KEY": "clave_larga_solo_para_lectura_catalogo_vite",
   "FRONTEND_CORS_ORIGINS": "https://tu-app.onrender.com",
   "FRONTEND_RATE_LIMIT_MAX": "120",

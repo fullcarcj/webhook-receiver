@@ -553,10 +553,18 @@ function buildForwardHeaders() {
   return h;
 }
 
+/** No reenviar POST si el cuerpo es JSON `null` o objeto vacío `{}` (p. ej. health checks o errores de parseo). */
+function shouldSkipWebhookForwardBody(body) {
+  if (body == null) return true;
+  if (typeof body === "object" && !Array.isArray(body) && Object.keys(body).length === 0) return true;
+  return false;
+}
+
 /** Dispara hasta 4 POST en segundo plano (no bloquea la respuesta al webhook entrante). */
 function forwardWebhookToTargets(body) {
   const urls = getForwardPostUrls();
   if (!urls.length) return;
+  if (shouldSkipWebhookForwardBody(body)) return;
 
   const payload = JSON.stringify(body);
   const headers = buildForwardHeaders();

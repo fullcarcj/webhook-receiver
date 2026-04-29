@@ -27,7 +27,7 @@
 
 const pino = require("pino");
 const { pool } = require("../../../db");
-const { normalizePhone } = require("../../utils/phoneNormalizer");
+const { normalizePhone, expandPhoneMatchKeys } = require("../../utils/phoneNormalizer");
 const { resolveCustomerId, upsertChat } = require("./_shared");
 const {
   pickWaFullNameCandidate,
@@ -90,8 +90,8 @@ function isPriority(normalized) {
 
 /**
  * Regla de negocio Tipo H:
- * - Solo se considera "cliente existente" si senderPn (normalizado) coincide con customers.phone.
- * - No usa crm_customer_identities ni customers.phone_2 para decidir este disparador.
+ * - Coincide el remitente (normalizado + variantes VE: 0414…, 414…, 58…) con `customers.phone`
+ *   y, si no hay en principal, con `customers.phone_2` (mismo criterio que identityResolver).
  * @param {import("pg").PoolClient} db
  * @param {string} phoneRaw
  * @returns {Promise<{customerId:number}|null>}
@@ -101,16 +101,32 @@ async function findExistingCustomerByPhone(db, phoneRaw) {
   const digits = (normalized || String(phoneRaw)).replace(/\D/g, "");
   if (!digits) return null;
 
+  const keys = expandPhoneMatchKeys(normalized || digits);
+  if (!keys.length) return null;
+
   const { rows } = await db.query(
     `SELECT c.id AS customer_id
      FROM customers c
-     WHERE NULLIF(TRIM(c.phone), '') IS NOT NULL
-       AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
-       AND c.is_active = TRUE
+     WHERE (COALESCE(c.is_active, TRUE) = TRUE)
+       AND NULLIF(TRIM(c.phone), '') IS NOT NULL
+       AND REGEXP_REPLACE(c.phone, '\\D', '', 'g') = ANY($1::text[])
+     ORDER BY c.total_orders DESC NULLS LAST
      LIMIT 1`,
-    [digits]
+    [keys]
   );
-  return rows[0] ? { customerId: Number(rows[0].customer_id) } : null;
+  if (rows[0]) return { customerId: Number(rows[0].customer_id) };
+
+  const { rows: r2 } = await db.query(
+    `SELECT c.id AS customer_id
+     FROM customers c
+     WHERE (COALESCE(c.is_active, TRUE) = TRUE)
+       AND NULLIF(TRIM(COALESCE(c.phone_2, '')), '') <> ''
+       AND REGEXP_REPLACE(c.phone_2, '\\D', '', 'g') = ANY($1::text[])
+     ORDER BY c.total_orders DESC NULLS LAST
+     LIMIT 1`,
+    [keys]
+  );
+  return r2[0] ? { customerId: Number(r2[0].customer_id) } : null;
 }
 
 /**

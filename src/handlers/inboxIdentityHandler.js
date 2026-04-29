@@ -125,7 +125,7 @@ async function handleInboxIdentityRequest(req, res, url) {
       }
 
       const cust = await pool.query(
-        `SELECT id, full_name FROM customers WHERE id = $1 AND is_active = true`,
+        `SELECT id, full_name FROM customers WHERE id = $1 AND COALESCE(is_active, TRUE) = TRUE`,
         [customerId]
       );
       if (!cust.rows.length) {

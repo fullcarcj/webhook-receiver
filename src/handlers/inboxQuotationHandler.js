@@ -32,6 +32,7 @@ const {
   resolveExternalMlOrderIdFromSalesLink,
 } = require("../utils/chatMlOrderReference");
 const { parseOrderItems, resolveProductSku } = require("./inboxMlOrderHandler");
+const { manualBankLinkToleranceBs: inboxPaymentHintToleranceBs } = require("../utils/manualBankLinkTolerance");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -648,6 +649,185 @@ function formatSendMessage(row, reference, items, rateRow = null) {
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Créditos Banesco (`bank_statements`) alineados al mismo `chat_id` / `customer_id` que el listado de comprobantes WA:
+ * - `linked_wa_receipt`: movimiento vinculado desde `payment_attempts.linked_bank_statement_id`.
+ * - `order_reconciliation`: aparece en `reconciliation_log` contra una `sales_orders` del chat o cliente.
+ * - `pending_order_amount`: por cada orden `pending` reciente (máx. 3), **un** crédito UNMATCHED/SUGGESTED
+ *   más cercano al total de la orden; tolerancia = max(`manualBankLinkToleranceBs`, 0.05, 2.5% del monto).
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{ where: string, attemptParams: unknown[], chatIdNum: number, customerIdNum: number }} ctx
+ * @returns {Promise<object[]>}
+ */
+async function fetchInboxBankCredits(pool, ctx) {
+  const { where, attemptParams, chatIdNum, customerIdNum } = ctx;
+  const tolBs = inboxPaymentHintToleranceBs();
+  const isoDate = (d) => {
+    if (!d) return null;
+    if (d instanceof Date && !Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    const s = String(d);
+    return s.length >= 10 ? s.slice(0, 10) : s;
+  };
+
+  const PRI = { linked_wa_receipt: 1, order_reconciliation: 2, pending_order_amount: 3 };
+  const merged = new Map();
+
+  const pushRows = (rows, sourceKey, pri) => {
+    for (const r of rows) {
+      const id = String(r.id);
+      const row = {
+        id,
+        tx_date: isoDate(r.tx_date),
+        amount: r.amount != null ? String(r.amount) : null,
+        reference_number: r.reference_number ?? null,
+        description: r.description != null ? String(r.description) : "",
+        reconciliation_status: r.reconciliation_status != null ? String(r.reconciliation_status) : null,
+        bank_credit_source: sourceKey,
+        linked_payment_attempt_id:
+          r.linked_payment_attempt_id != null ? Number(r.linked_payment_attempt_id) : null,
+        hint_sales_order_id: r.hint_sales_order_id != null ? Number(r.hint_sales_order_id) : null,
+        hint_order_total_bs:
+          r.hint_order_total_bs != null && String(r.hint_order_total_bs).trim() !== ""
+            ? String(r.hint_order_total_bs)
+            : null,
+        amount_diff_bs:
+          r.amount_diff_bs != null && String(r.amount_diff_bs).trim() !== ""
+            ? String(r.amount_diff_bs)
+            : null,
+        within_manual_bs_band: r.within_manual_bs_band === true,
+        _pri: pri,
+      };
+      const prev = merged.get(id);
+      if (!prev || pri < prev._pri) merged.set(id, row);
+    }
+  };
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ON (bs.id)
+         bs.id,
+         bs.tx_date,
+         bs.amount::text AS amount,
+         bs.reference_number,
+         bs.description,
+         bs.reconciliation_status::text AS reconciliation_status,
+         pa.id AS linked_payment_attempt_id,
+         NULL::bigint AS hint_sales_order_id,
+         NULL::text AS hint_order_total_bs,
+         NULL::text AS amount_diff_bs,
+         NULL::boolean AS within_manual_bs_band
+       FROM bank_statements bs
+       INNER JOIN payment_attempts pa ON pa.linked_bank_statement_id = bs.id
+       WHERE bs.tx_type = 'CREDIT'::statement_tx_type
+         AND ${where}
+       ORDER BY bs.id, pa.id DESC`,
+      attemptParams
+    );
+    pushRows(rows, "linked_wa_receipt", PRI.linked_wa_receipt);
+  } catch (e) {
+    if (!(e && (e.code === "42703" || e.code === "42P01"))) throw e;
+  }
+
+  const orderScopeConds = [];
+  const orderScopeParams = [];
+  let oi = 1;
+  if (Number.isFinite(chatIdNum)) {
+    orderScopeParams.push(chatIdNum);
+    orderScopeConds.push(`so.conversation_id = $${oi++}`);
+  }
+  if (Number.isFinite(customerIdNum)) {
+    orderScopeParams.push(customerIdNum);
+    orderScopeConds.push(`so.customer_id = $${oi++}`);
+  }
+  const orderScopeSql = orderScopeConds.length ? `(${orderScopeConds.join(" OR ")})` : "FALSE";
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ON (bs.id)
+         bs.id,
+         bs.tx_date,
+         bs.amount::text AS amount,
+         bs.reference_number,
+         bs.description,
+         bs.reconciliation_status::text AS reconciliation_status,
+         NULL::bigint AS linked_payment_attempt_id,
+         rl.order_id AS hint_sales_order_id,
+         so.total_amount_bs::text AS hint_order_total_bs,
+         (bs.amount::numeric - so.total_amount_bs::numeric)::text AS amount_diff_bs,
+         (ABS(bs.amount::numeric - so.total_amount_bs::numeric) <= ${tolBs}::numeric) AS within_manual_bs_band
+       FROM bank_statements bs
+       INNER JOIN reconciliation_log rl ON rl.bank_statement_id = bs.id
+       INNER JOIN sales_orders so ON so.id = rl.order_id
+       WHERE bs.tx_type = 'CREDIT'::statement_tx_type
+         AND rl.bank_statement_id IS NOT NULL
+         AND ${orderScopeSql}
+       ORDER BY bs.id, rl.created_at DESC NULLS LAST, rl.id DESC`,
+      orderScopeParams
+    );
+    pushRows(rows, "order_reconciliation", PRI.order_reconciliation);
+  } catch (e) {
+    if (!(e && (e.code === "42P01" || e.code === "42703"))) throw e;
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT
+         bs.id,
+         bs.tx_date,
+         bs.amount::text AS amount,
+         bs.reference_number,
+         bs.description,
+         bs.reconciliation_status::text AS reconciliation_status,
+         NULL::bigint AS linked_payment_attempt_id,
+         so1.id AS hint_sales_order_id,
+         so1.total_amount_bs::text AS hint_order_total_bs,
+         (bs.amount::numeric - so1.total_amount_bs::numeric)::text AS amount_diff_bs,
+         (ABS(bs.amount::numeric - so1.total_amount_bs::numeric) <= ${tolBs}::numeric) AS within_manual_bs_band
+       FROM (
+         SELECT so.id, so.total_amount_bs
+         FROM sales_orders so
+         WHERE so.payment_status = 'pending'::payment_status_enum
+           AND so.channel_id IN (2, 3, 5)
+           AND so.total_amount_bs IS NOT NULL
+           AND so.total_amount_bs > 0
+           AND (${orderScopeSql})
+         ORDER BY so.created_at DESC NULLS LAST
+         LIMIT 3
+       ) so1
+       INNER JOIN LATERAL (
+         SELECT bs.id, bs.tx_date, bs.amount, bs.reference_number, bs.description, bs.reconciliation_status
+         FROM bank_statements bs
+         WHERE bs.tx_type = 'CREDIT'::statement_tx_type
+           AND bs.reconciliation_status IN (
+             'UNMATCHED'::reconciliation_status,
+             'SUGGESTED'::reconciliation_status
+           )
+           AND ABS(so1.total_amount_bs::numeric - bs.amount::numeric) <=
+               GREATEST(${tolBs}::numeric, 0.05::numeric, ABS(bs.amount::numeric) * 0.025)
+         ORDER BY ABS(bs.amount::numeric - so1.total_amount_bs::numeric) ASC,
+                  bs.tx_date DESC NULLS LAST,
+                  bs.id DESC
+         LIMIT 1
+       ) bs ON TRUE`,
+      orderScopeParams
+    );
+    pushRows(rows, "pending_order_amount", PRI.pending_order_amount);
+  } catch (e) {
+    if (!(e && (e.code === "42P01" || e.code === "42703"))) throw e;
+  }
+
+  return [...merged.values()]
+    .map(({ _pri, ...rest }) => rest)
+    .sort((a, b) => {
+      const da = a.tx_date || "";
+      const db = b.tx_date || "";
+      if (da !== db) return db.localeCompare(da);
+      return Number(b.id) - Number(a.id);
+    })
+    .slice(0, 50);
 }
 
 /**
@@ -1620,10 +1800,12 @@ async function handleInboxQuotationRequest(req, res, url) {
 
       const uniq = [...new Set(productIds)];
       const chk = await pool.query(
-        `SELECT id, COALESCE(stock_qty, 0)::numeric AS stock_qty,
-                COALESCE(is_service, FALSE) AS is_service
-         FROM products
-         WHERE id = ANY($1::bigint[]) AND is_active = true`,
+        `SELECT p.id,
+                COALESCE(i.stock_qty, 0)::numeric AS stock_qty,
+                COALESCE(p.is_service, FALSE) AS is_service
+         FROM products p
+         LEFT JOIN inventory i ON i.product_id = p.id
+         WHERE p.id = ANY($1::bigint[]) AND p.is_active = true`,
         [uniq]
       );
       if (chk.rows.length !== uniq.length) {
@@ -1714,6 +1896,125 @@ async function handleInboxQuotationRequest(req, res, url) {
         ok: true,
         presupuesto: headAfter.rows[0],
         lines: det.rows,
+      });
+      return true;
+    }
+
+    // ─── POST /api/inbox/quotations/presupuesto/:id/link-bank-statement ─────────
+    // Conciliación manual DIRECTA: bank_statements → verificar monto → MATCHED.
+    // NO pasa por payment_attempts. La única condición es: BS en UNMATCHED/SUGGESTED
+    // + monto dentro de tolerancia vs. total de la cotización en Bs.
+    const presupLinkBsMatch = pathname.match(/^\/api\/inbox\/quotations\/presupuesto\/(\d+)\/link-bank-statement$/);
+    if (presupLinkBsMatch && req.method === "POST") {
+      const pid = Number(presupLinkBsMatch[1]);
+      if (!Number.isFinite(pid) || pid <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "id de cotización inválido" });
+        return true;
+      }
+      let bodyLbs = {};
+      try { bodyLbs = await parseJsonBody(req); } catch (_) {
+        writeJson(res, 400, { error: "invalid_json" }); return true;
+      }
+      const bsId = bodyLbs.bank_statement_id != null ? Number(bodyLbs.bank_statement_id) : NaN;
+      if (!Number.isFinite(bsId) || bsId <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "bank_statement_id es obligatorio" });
+        return true;
+      }
+
+      const { rows: cotRows } = await pool.query(
+        `SELECT id, status, total, pipeline_stage FROM inventario_presupuesto WHERE id = $1 LIMIT 1`,
+        [pid]
+      );
+      if (!cotRows.length) {
+        writeJson(res, 404, { error: "not_found", message: "Cotización no encontrada" });
+        return true;
+      }
+      const cot = cotRows[0];
+      const closedStatuses = ["converted", "expired", "cancelled_by_buyer", "cancelled_by_operator"];
+      if (closedStatuses.includes(String(cot.status || ""))) {
+        writeJson(res, 409, { error: "conflict", message: "La cotización ya está cerrada; no se puede conciliar." });
+        return true;
+      }
+
+      const { rows: bsRowsL } = await pool.query(
+        `SELECT id, tx_type::text AS tx_type, reconciliation_status::text AS reconciliation_status,
+                amount::text AS amount
+         FROM bank_statements WHERE id = $1 LIMIT 1`,
+        [bsId]
+      );
+      if (!bsRowsL.length) {
+        writeJson(res, 404, { error: "not_found", message: "Movimiento de extracto no encontrado" });
+        return true;
+      }
+      const bsL = bsRowsL[0];
+      if (String(bsL.tx_type || "").toUpperCase() !== "CREDIT") {
+        writeJson(res, 400, { error: "bad_request", message: "Solo se pueden vincular abonos (crédito)" });
+        return true;
+      }
+      const bsStatus = String(bsL.reconciliation_status || "").toUpperCase();
+      if (!["UNMATCHED", "SUGGESTED"].includes(bsStatus)) {
+        writeJson(res, 409, {
+          error: "conflict",
+          message: "El movimiento ya no está disponible (debe estar sin conciliar o sugerido)",
+        });
+        return true;
+      }
+
+      const cotTotalBs = cot.total != null && String(cot.total).trim() !== "" ? Number(cot.total) : NaN;
+      const bsAmt = bsL.amount != null && String(bsL.amount).trim() !== "" ? Number(String(bsL.amount).replace(",", ".")) : NaN;
+      if (!Number.isFinite(cotTotalBs) || cotTotalBs <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "La cotización no tiene total en Bs definido" });
+        return true;
+      }
+      if (!Number.isFinite(bsAmt)) {
+        writeJson(res, 400, { error: "bad_request", message: "No se pudo leer el monto del extracto" });
+        return true;
+      }
+      const tol = inboxPaymentHintToleranceBs();
+      const diff = Math.abs(cotTotalBs - bsAmt);
+      if (diff > tol) {
+        writeJson(res, 409, {
+          error: "amount_mismatch",
+          message: `Monto del extracto y de la cotización fuera de tolerancia (±${tol} Bs.).`,
+          quotation_bs: cotTotalBs,
+          statement_bs: bsAmt,
+          diff_bs: diff,
+          tolerance_bs: tol,
+        });
+        return true;
+      }
+
+      const clientLbs = await pool.connect();
+      try {
+        await clientLbs.query("BEGIN");
+        await clientLbs.query(
+          `UPDATE bank_statements SET reconciliation_status = 'MATCHED'::reconciliation_status WHERE id = $1`,
+          [bsId]
+        );
+        const closedPipeStages = ["converted", "lost"];
+        const newStage = closedPipeStages.includes(String(cot.pipeline_stage || "")) ? cot.pipeline_stage : "accepted";
+        await clientLbs.query(
+          `UPDATE inventario_presupuesto
+              SET status = 'approved', pipeline_stage = $2, updated_at = NOW()
+            WHERE id = $1`,
+          [pid, newStage]
+        );
+        await clientLbs.query("COMMIT");
+      } catch (e) {
+        await clientLbs.query("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        clientLbs.release();
+      }
+      writeJson(res, 200, {
+        ok: true,
+        quotation_id: pid,
+        bank_statement_id: bsId,
+        quotation_bs: cotTotalBs,
+        statement_bs: bsAmt,
+        diff_bs: diff,
+        tolerance_bs: tol,
+        status: "matched",
       });
       return true;
     }
@@ -2250,8 +2551,12 @@ async function handleInboxQuotationRequest(req, res, url) {
     }
 
     // ─── GET /api/inbox/payment-attempts ──────────────────────────────────────
-    // Devuelve comprobantes de pago sin conciliar (pending / no_match / manual_review)
-    // para un chat o un cliente. Params: ?chat_id=X y/o ?customer_id=Y
+    // `items` = payment_attempts (WA): prefiltro + OCR/IA en media.js; auxiliar — si no pasa, no hay fila aquí.
+    // `bank_credits` = extracto + hints; la garantía operativa es conciliación manual / vínculo a extracto.
+    // Por defecto: comprobantes “abiertos” para vínculo con extracto (no rejected;
+    // matched solo si aún no tienen linked_bank_statement_id). Ver `meta.scope`, `meta.hint_tolerance_bs`.
+    // Params: ?chat_id=X y/o ?customer_id=Y  ·  opcional ?all_statuses=1 (todos salvo útil para diagnóstico; límite 50).
+    // Opcional ?include_bank_credits=0 para omitir queries de extracto (polling muy frecuente).
     if (req.method === "GET" && pathname === "/api/inbox/payment-attempts") {
       const chatIdParam     = url.searchParams.get("chat_id");
       const customerIdParam = url.searchParams.get("customer_id");
@@ -2261,6 +2566,16 @@ async function handleInboxQuotationRequest(req, res, url) {
         writeJson(res, 400, { error: "bad_request", message: "Se requiere chat_id o customer_id" });
         return true;
       }
+      const includeBankRaw = url.searchParams.get("include_bank_credits");
+      const includeBankCredits =
+        includeBankRaw !== "0" && String(includeBankRaw || "").toLowerCase() !== "false";
+
+      const allStatusesRaw = url.searchParams.get("all_statuses");
+      const allStatuses =
+        allStatusesRaw === "1" ||
+        String(allStatusesRaw || "").toLowerCase() === "true" ||
+        String(allStatusesRaw || "").toLowerCase() === "yes";
+
       const conditions = [];
       const params = [];
       if (Number.isFinite(chatIdNum)) {
@@ -2269,9 +2584,26 @@ async function handleInboxQuotationRequest(req, res, url) {
       }
       if (Number.isFinite(customerIdNum)) {
         params.push(customerIdNum);
+        // customer_id directo en el comprobante (insertado cuando el chat ya estaba vinculado al cliente)
         conditions.push(`pa.customer_id = $${params.length}`);
+        // comprobante insertado con customer_id NULL cuando el chat aún no estaba vinculado:
+        // buscar por los chats que pertenecen al cliente ahora
+        conditions.push(`pa.chat_id IN (SELECT id FROM crm_chats WHERE customer_id = $${params.length})`);
       }
       const where = conditions.length ? `(${conditions.join(" OR ")})` : "TRUE";
+      /** Incluir comprobantes ya imputados a cotización/orden si aún no tienen movimiento de extracto. */
+      const statusOpenForBankLink = `(
+             pa.reconciliation_status NOT IN ('matched', 'rejected')
+          OR (
+               pa.reconciliation_status = 'matched'
+           AND (pa.linked_bank_statement_id IS NULL OR pa.linked_bank_statement_id <= 0)
+          )
+        )`;
+      /** Sin columna linked_bank_statement_id: no podemos filtrar matched+ya vinculado; excluir solo rejected. */
+      const statusOpenLegacyNoLinkedCol = `pa.reconciliation_status <> 'rejected'`;
+      const statusFilterMain = allStatuses ? "TRUE" : statusOpenForBankLink;
+      const statusFilterLegacy = allStatuses ? "TRUE" : statusOpenLegacyNoLinkedCol;
+
       let attempts;
       try {
         const r = await pool.query(
@@ -2297,17 +2629,16 @@ async function handleInboxQuotationRequest(req, res, url) {
              pa.created_at
            FROM payment_attempts pa
            WHERE ${where}
-             AND pa.reconciliation_status NOT IN ('matched', 'rejected')
+             AND ${statusFilterMain}
            ORDER BY pa.created_at DESC
            LIMIT 50`,
           params
         );
         attempts = r.rows;
       } catch (e) {
-        // Esquema antiguo: sin extracted_amount_usd y/o sin linked_bank_statement_id.
-        // No repetir columnas que sigan ausentes (p. ej. linked_bank_statement_id — migración
-        // sql/20260422_payment_attempts_linked_bank_statement.sql).
-        if (e && e.code === "42703") {
+        if (!(e && e.code === "42703")) throw e;
+        // 42703 puede ser solo extracted_amount_usd ausente: el catch antiguo excluía matched y vaciaba el panel de extracto.
+        try {
           const r = await pool.query(
             `SELECT
                pa.id,
@@ -2326,24 +2657,153 @@ async function handleInboxQuotationRequest(req, res, url) {
                pa.reconciliation_status,
                pa.reconciled_order_id,
                pa.reconciled_quotation_id,
+               pa.linked_bank_statement_id,
                pa.created_at
              FROM payment_attempts pa
              WHERE ${where}
-               AND pa.reconciliation_status NOT IN ('matched', 'rejected')
+               AND ${statusFilterMain}
              ORDER BY pa.created_at DESC
              LIMIT 50`,
             params
           );
-          attempts = r.rows.map((row) => ({
-            ...row,
-            extracted_amount_usd: null,
-            linked_bank_statement_id: null,
-          }));
-        } else {
-          throw e;
+          attempts = r.rows.map((row) => Object.assign({}, row, { extracted_amount_usd: null }));
+        } catch (e2) {
+          if (!(e2 && e2.code === "42703")) throw e2;
+          // P. ej. falta linked_bank_statement_id pero sí existe extracted_amount_usd.
+          try {
+            const r = await pool.query(
+              `SELECT
+                 pa.id,
+                 pa.chat_id,
+                 pa.customer_id,
+                 pa.firebase_url,
+                 pa.extracted_reference,
+                 pa.extracted_amount_bs::text   AS extracted_amount_bs,
+                 pa.extracted_amount_usd::text  AS extracted_amount_usd,
+                 pa.extracted_date,
+                 pa.extracted_bank,
+                 pa.extracted_payment_type,
+                 pa.extraction_confidence::text AS extraction_confidence,
+                 pa.is_receipt,
+                 pa.prefiler_score::text        AS prefiler_score,
+                 pa.prefiler_reason,
+                 pa.reconciliation_status,
+                 pa.reconciled_order_id,
+                 pa.reconciled_quotation_id,
+                 pa.created_at
+               FROM payment_attempts pa
+               WHERE ${where}
+                 AND ${statusFilterLegacy}
+               ORDER BY pa.created_at DESC
+               LIMIT 50`,
+              params
+            );
+            attempts = r.rows.map((row) =>
+              Object.assign({}, row, { linked_bank_statement_id: null })
+            );
+          } catch (e3) {
+            if (!(e3 && e3.code === "42703")) throw e3;
+            const r = await pool.query(
+              `SELECT
+                 pa.id,
+                 pa.chat_id,
+                 pa.customer_id,
+                 pa.firebase_url,
+                 pa.extracted_reference,
+                 pa.extracted_amount_bs::text   AS extracted_amount_bs,
+                 pa.extracted_date,
+                 pa.extracted_bank,
+                 pa.extracted_payment_type,
+                 pa.extraction_confidence::text AS extraction_confidence,
+                 pa.is_receipt,
+                 pa.prefiler_score::text        AS prefiler_score,
+                 pa.prefiler_reason,
+                 pa.reconciliation_status,
+                 pa.reconciled_order_id,
+                 pa.reconciled_quotation_id,
+                 pa.created_at
+               FROM payment_attempts pa
+               WHERE ${where}
+                 AND ${statusFilterLegacy}
+               ORDER BY pa.created_at DESC
+               LIMIT 50`,
+              params
+            );
+            attempts = r.rows.map((row) =>
+              Object.assign({}, row, {
+                extracted_amount_usd: null,
+                linked_bank_statement_id: null,
+              })
+            );
+          }
         }
       }
-      writeJson(res, 200, { ok: true, items: attempts });
+      // Backfill silencioso: comprobantes encontrados vía chat del cliente pero con customer_id NULL → actualizar.
+      if (Number.isFinite(customerIdNum) && attempts.length) {
+        const toFix = attempts
+          .filter((a) => (a.customer_id == null || Number(a.customer_id) <= 0) && a.chat_id != null)
+          .map((a) => a.id);
+        if (toFix.length) {
+          pool.query(
+            `UPDATE payment_attempts SET customer_id = $1 WHERE id = ANY($2::bigint[]) AND customer_id IS NULL`,
+            [customerIdNum, toFix]
+          ).catch(() => {/* best-effort, no bloquea la respuesta */});
+        }
+      }
+
+      let bankCredits = [];
+      if (includeBankCredits) {
+        try {
+          bankCredits = await fetchInboxBankCredits(pool, {
+            where,
+            attemptParams: params,
+            chatIdNum,
+            customerIdNum,
+          });
+        } catch (e) {
+          logger.warn(
+            { err: e && e.message, chatIdNum, customerIdNum },
+            "payment_attempts: bank_credits omitidos por error"
+          );
+        }
+      }
+
+      const tolBs = inboxPaymentHintToleranceBs();
+      writeJson(res, 200, {
+        ok: true,
+        items: attempts,
+        bank_credits: bankCredits,
+        meta: {
+          chat_id: Number.isFinite(chatIdNum) ? chatIdNum : null,
+          customer_id: Number.isFinite(customerIdNum) ? customerIdNum : null,
+          scope: allStatuses ? "all_statuses" : "open_for_bank_or_pending_match",
+          limit: 50,
+          include_bank_credits: includeBankCredits,
+          bank_credits_count: bankCredits.length,
+          hint_tolerance_bs: tolBs,
+          /**
+           * Conciliación manual ≠ automática: no exige `payment_attempts` (imagen WA).
+           * Si el usuario elige un movimiento del extracto, el front debe poder confirmar
+           * con `POST /api/inbox/quotations/presupuesto/{id}/link-bank-statement` (solo body.bank_statement_id).
+           * Monto cotización vs extracto: ±hint_tolerance_bs (default 100 Bs).
+           */
+          allow_confirm_without_wa_receipt: true,
+          manual_statement_only: {
+            quotation: {
+              method: "POST",
+              path_pattern: "/api/inbox/quotations/presupuesto/{presupuesto_id}/link-bank-statement",
+              body_fields: ["bank_statement_id"],
+              amount_tolerance_bs: tolBs,
+            },
+            sales_order: {
+              method: "POST",
+              path_pattern: "/api/sales/orders/{order_id}/reconcile",
+              body_fields: ["statement_id"],
+              amount_tolerance_bs: tolBs,
+            },
+          },
+        },
+      });
       return true;
     }
 
@@ -2555,6 +3015,9 @@ async function handleInboxQuotationRequest(req, res, url) {
         source_currency:      sourceCurrency,
         allocated_amount:     amountOriginal,
         payment_fully_settled: Boolean(stAfter.fullySettled),
+        /** El comprobante quedó vinculado a la cotización pero aún NO tiene movimiento del extracto bancario.
+         *  La vinculación al extracto (link-bank-statement) es OBLIGATORIA para cerrar el ciclo. */
+        bank_statement_required: true,
       });
       return true;
     }

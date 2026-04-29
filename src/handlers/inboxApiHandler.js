@@ -17,13 +17,11 @@ const {
   CHAT_STAGE_VALUES,
   RESULTS,
 } = require("../services/inboxService");
-const { getTodayRate } = require("../services/currencyService");
-const exceptionsService = require("../services/exceptionsService");
-const { resolveMlOrderReferenceBs } = require("../utils/chatMlOrderReference");
 const {
   ensureWaChatFromCustomerPhone,
   findWaChatIdByPhone,
 } = require("../services/inboxWaContactService");
+const { manualBankLinkToleranceBs } = require("../utils/manualBankLinkTolerance");
 
 function validateSrcCompound(src) {
   if (src == null || src === "") return { ok: true, value: null };
@@ -488,7 +486,9 @@ async function handleInboxApiRequest(req, res, url) {
 
     /**
      * POST /api/inbox/payment-attempts/:id/link-bank-statement
-     * Vincula un comprobante WA a un movimiento de extracto (crédito pendiente).
+     * Vincula comprobante WA ↔ extracto: valida monto (±tolerancia Bs.), extracto no usado en otro PA,
+     * crédito UNMATCHED/SUGGESTED. Sin validaciones extra post-vínculo (cotización/ML/excepciones).
+     * Tolerancia: MANUAL_BANK_LINK_TOLERANCE_BS o INBOX_PAYMENT_HINT_TOLERANCE_BS; default 100.
      * Body: { bank_statement_id: number, chat_id?: number } (chat_id valida pertenencia).
      */
     const paBankLink = normInboxPath.match(/^\/api\/inbox\/payment-attempts\/(\d+)\/link-bank-statement$/);
@@ -524,17 +524,20 @@ async function handleInboxApiRequest(req, res, url) {
         return true;
       }
       const pa = paRows[0];
-      if (String(pa.reconciliation_status) === "matched") {
-        writeJson(res, 409, {
-          error: "conflict",
-          message: "El comprobante ya está marcado como conciliado",
-        });
-        return true;
-      }
-      if (pa.linked_bank_statement_id != null) {
+      const linkedStmt =
+        pa.linked_bank_statement_id != null && Number(pa.linked_bank_statement_id) > 0;
+      if (linkedStmt) {
         writeJson(res, 409, {
           error: "conflict",
           message: "Este comprobante ya tiene un movimiento del extracto vinculado",
+        });
+        return true;
+      }
+      // `matched` suele ser cotización/orden ya imputada; aun así puede faltar el vínculo al extracto Banesco.
+      if (String(pa.reconciliation_status) === "rejected") {
+        writeJson(res, 409, {
+          error: "conflict",
+          message: "El comprobante está rechazado; no se puede vincular al extracto",
         });
         return true;
       }
@@ -547,7 +550,10 @@ async function handleInboxApiRequest(req, res, url) {
       }
 
       const { rows: bsRows } = await pool.query(
-        `SELECT id, tx_type::text AS tx_type, reconciliation_status::text AS reconciliation_status
+        `SELECT id,
+                tx_type::text AS tx_type,
+                reconciliation_status::text AS reconciliation_status,
+                amount::text AS amount
          FROM bank_statements WHERE id = $1`,
         [bankStatementId]
       );
@@ -569,176 +575,105 @@ async function handleInboxApiRequest(req, res, url) {
         return true;
       }
 
-      try {
-        await pool.query(
-          `UPDATE payment_attempts
-           SET linked_bank_statement_id = $1
-           WHERE id = $2`,
-          [bankStatementId, paymentAttemptId]
-        );
-      } catch (err) {
-        const msg = err && err.message ? String(err.message) : "";
-        if (msg.includes("linked_bank_statement_id")) {
-          writeJson(res, 503, {
-            error: "schema_missing",
-            message:
-              "Falta la columna linked_bank_statement_id en payment_attempts. Ejecutá sql/20260422_payment_attempts_linked_bank_statement.sql",
-          });
-          return true;
-        }
-        throw err;
+      const { rows: dupStmt } = await pool.query(
+        `SELECT id FROM payment_attempts
+          WHERE linked_bank_statement_id = $1 AND id <> $2
+          LIMIT 1`,
+        [bankStatementId, paymentAttemptId]
+      );
+      if (dupStmt.length) {
+        writeJson(res, 409, {
+          error: "conflict",
+          message: "Este movimiento del extracto ya está vinculado a otro comprobante",
+        });
+        return true;
       }
 
-      let mismatchPayload = null;
+      const { rows: paAmtRows } = await pool.query(
+        `SELECT extracted_amount_bs::text AS extracted_amount_bs FROM payment_attempts WHERE id = $1`,
+        [paymentAttemptId]
+      );
+      const attRaw = paAmtRows[0] && paAmtRows[0].extracted_amount_bs;
+      const att =
+        attRaw != null && String(attRaw).trim() !== ""
+          ? Number(String(attRaw).replace(",", "."))
+          : NaN;
+      const stmtRaw = bs.amount;
+      const stmtAmt =
+        stmtRaw != null && String(stmtRaw).trim() !== ""
+          ? Number(String(stmtRaw).replace(",", "."))
+          : NaN;
+      if (!Number.isFinite(att) || att <= 0) {
+        writeJson(res, 400, {
+          error: "bad_request",
+          message: "El comprobante no tiene monto en Bs. extraído; la vinculación manual exige comparar montos.",
+        });
+        return true;
+      }
+      if (!Number.isFinite(stmtAmt)) {
+        writeJson(res, 400, { error: "bad_request", message: "No se pudo leer el monto del extracto." });
+        return true;
+      }
+      const tol = manualBankLinkToleranceBs();
+      if (Math.abs(att - stmtAmt) > tol) {
+        writeJson(res, 409, {
+          error: "amount_mismatch",
+          message: `Monto del comprobante y del extracto fuera de tolerancia (±${tol} Bs.).`,
+          attempt_bs: att,
+          statement_bs: stmtAmt,
+          tolerance_bs: tol,
+        });
+        return true;
+      }
+
+      const client = await pool.connect();
       try {
-        const { rows: snap } = await pool.query(
-          `SELECT pa.extracted_amount_bs::text AS extracted_amount_bs,
-                  pa.chat_id,
-                  bs.amount::text AS stmt_amount
-             FROM payment_attempts pa
-             CROSS JOIN bank_statements bs
-            WHERE pa.id = $1 AND bs.id = $2`,
-          [paymentAttemptId, bankStatementId]
-        );
-        const row0 = snap[0] || {};
-        const att = row0.extracted_amount_bs != null ? Number(String(row0.extracted_amount_bs).replace(",", ".")) : NaN;
-        const stmtAmt = row0.stmt_amount != null ? Number(String(row0.stmt_amount).replace(",", ".")) : NaN;
-        const cidChat = row0.chat_id != null ? Number(row0.chat_id) : null;
-
-        let quoteUsd = NaN;
-        let quoteId = null;
-        if (Number.isFinite(cidChat) && cidChat > 0) {
-          const { rows: qR } = await pool.query(
-            `SELECT id, total::numeric AS total, lower(status::text) AS st
-               FROM inventario_presupuesto
-              WHERE chat_id = $1
-                AND status NOT IN ('converted', 'expired')
-              ORDER BY fecha_creacion DESC
-              LIMIT 20`,
-            [cidChat]
+        await client.query("BEGIN");
+        let updPa;
+        try {
+          updPa = await client.query(
+            `UPDATE payment_attempts
+             SET linked_bank_statement_id = $1
+             WHERE id = $2`,
+            [bankStatementId, paymentAttemptId]
           );
-          const pick = qR.find((q) => ["sent", "approved", "rejected"].includes(String(q.st || "")));
-          if (pick) {
-            quoteId = Number(pick.id);
-            quoteUsd = Number(pick.total);
+        } catch (err) {
+          const msg = err && err.message ? String(err.message) : "";
+          if (msg.includes("linked_bank_statement_id")) {
+            await client.query("ROLLBACK");
+            writeJson(res, 503, {
+              error: "schema_missing",
+              message:
+                "Falta la columna linked_bank_statement_id en payment_attempts. Ejecutá sql/20260422_payment_attempts_linked_bank_statement.sql",
+            });
+            return true;
           }
+          throw err;
         }
-
-        const rateRow = await getTodayRate(1).catch(() => null);
-        const activeRate =
-          rateRow && rateRow.active_rate != null ? Number(rateRow.active_rate) : NaN;
-        const quoteBs =
-          Number.isFinite(quoteUsd) && Number.isFinite(activeRate) && activeRate > 0
-            ? quoteUsd * activeRate
-            : NaN;
-
-        /** Referencia en Bs. para validar comprobante/extracto: cotización ERP o, si no hay, total orden ML vinculada al chat. */
-        let referenceBs = quoteBs;
-        let referenceMeta = null;
-        if (Number.isFinite(quoteBs)) {
-          referenceMeta = { type: "quotation", id: quoteId };
-        } else if (Number.isFinite(cidChat) && cidChat > 0) {
-          const mlRef = await resolveMlOrderReferenceBs(pool, cidChat, activeRate);
-          if (Number.isFinite(mlRef.referenceBs)) {
-            referenceBs = mlRef.referenceBs;
-            referenceMeta = mlRef.meta;
-          }
+        if (updPa.rowCount === 0) {
+          await client.query("ROLLBACK");
+          writeJson(res, 404, { error: "not_found", message: "Comprobante no encontrado al actualizar" });
+          return true;
         }
-
-        const tolBank = 0.05;
-        const tolQuoteVs = (bs) => Math.max(1, Math.abs(bs || 0) * 0.005);
-        /** ML: total de plataforma suele no incluir carrera de motorizado u otros cobros por fuera → tolerancia más amplia. */
-        const tolMlOrderVs = (bs) => Math.max(5, Math.abs(bs || 0) * 0.025);
-        const tolRef = (bs) =>
-          referenceMeta && referenceMeta.type === "ml_order" ? tolMlOrderVs(bs) : tolQuoteVs(bs);
-
-        const warnings = [];
-        if (Number.isFinite(att) && Number.isFinite(stmtAmt) && Math.abs(att - stmtAmt) > tolBank) {
-          warnings.push({
-            kind: "attempt_vs_statement",
-            attempt_bs: att,
-            statement_bs: stmtAmt,
-            diff_bs: Math.abs(att - stmtAmt),
-          });
-        }
-        if (
-          Number.isFinite(att) &&
-          Number.isFinite(referenceBs) &&
-          Math.abs(att - referenceBs) > tolRef(referenceBs)
-        ) {
-          const base = {
-            attempt_bs: att,
-            reference_bs: referenceBs,
-            diff_bs: Math.abs(att - referenceBs),
-            reference: referenceMeta,
-          };
-          if (referenceMeta && referenceMeta.type === "ml_order") {
-            warnings.push(Object.assign({ kind: "attempt_vs_ml_order" }, base));
-          } else {
-            warnings.push(
-              Object.assign(
-                {
-                  kind: "attempt_vs_quotation",
-                  quotation_bs: referenceBs,
-                  quotation_id: quoteId,
-                },
-                base
-              )
-            );
-          }
-        }
-        if (
-          Number.isFinite(stmtAmt) &&
-          Number.isFinite(referenceBs) &&
-          Math.abs(stmtAmt - referenceBs) > tolRef(referenceBs)
-        ) {
-          const base = {
-            statement_bs: stmtAmt,
-            reference_bs: referenceBs,
-            diff_bs: Math.abs(stmtAmt - referenceBs),
-            reference: referenceMeta,
-          };
-          if (referenceMeta && referenceMeta.type === "ml_order") {
-            warnings.push(Object.assign({ kind: "statement_vs_ml_order" }, base));
-          } else {
-            warnings.push(
-              Object.assign(
-                {
-                  kind: "statement_vs_quotation",
-                  quotation_bs: referenceBs,
-                  quotation_id: quoteId,
-                },
-                base
-              )
-            );
-          }
-        }
-
-        if (warnings.length && Number.isFinite(cidChat) && cidChat > 0) {
-          mismatchPayload = {
-            warnings,
-            payment_attempt_id: paymentAttemptId,
-            bank_statement_id: bankStatementId,
-          };
-          const sev = warnings.some((w) => w.kind !== "attempt_vs_statement") ? "high" : "medium";
-          await exceptionsService.raise({
-            entityType: "payment",
-            entityId: paymentAttemptId,
-            reason: "bank_statement_link_amount_mismatch",
-            severity: sev,
-            context: mismatchPayload,
-            chatId: cidChat,
-          });
-        }
-      } catch (svcErr) {
-        logger.warn({ err: svcErr && svcErr.message }, "inbox link-bank-statement: mismatch/supervisor notify skipped");
+        await client.query(
+          `UPDATE bank_statements
+             SET reconciliation_status = 'MATCHED'::reconciliation_status
+           WHERE id = $1`,
+          [bankStatementId]
+        );
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+      } finally {
+        client.release();
       }
 
       writeJson(res, 200, {
         ok: true,
         payment_attempt_id: paymentAttemptId,
         bank_statement_id: bankStatementId,
-        mismatch: mismatchPayload,
+        tolerance_bs: tol,
       });
       return true;
     }

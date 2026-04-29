@@ -11,6 +11,9 @@ const { getTodayRate } = require("./currencyService");
 
 const DEFAULT_COMPANY_ID = 1;
 
+/** Mínimo en Bs al comparar comprobante / extracto Banesco / total cotización (redondeos distintos). */
+const MIN_QUOTE_PAYMENT_TOLERANCE_BS = 100;
+
 /** Evita consultar `information_schema` en cada cotización del listado inbox. */
 let _allocationTableExistsCache = null;
 
@@ -18,6 +21,17 @@ let _allocationTableExistsCache = null;
 function toleranceUsd(totalUsd) {
   const t = Math.abs(Number(totalUsd) || 0);
   return Math.max(0.01, t * 0.005);
+}
+
+/**
+ * Tolerancia en Bs: al menos {@link MIN_QUOTE_PAYMENT_TOLERANCE_BS} VES y además 0,5 % del monto de referencia.
+ * Usar al comparar `payment_attempts` / `bank_statements` con total cotización en bolívares.
+ * @param {number|null|undefined} referenceBs
+ * @returns {number}
+ */
+function toleranceBsForQuotationPayment(referenceBs) {
+  const b = Math.abs(Number(referenceBs) || 0);
+  return Math.max(MIN_QUOTE_PAYMENT_TOLERANCE_BS, b * 0.005);
 }
 
 /**
@@ -466,6 +480,7 @@ async function insertCajaApprovedUsdComplement(client, p) {
 module.exports = {
   allocationTableExists,
   toleranceUsd,
+  toleranceBsForQuotationPayment,
   getSettlementState,
   getSettlementStatesForQuotationIds,
   hydrateLegacyMatchedAttempts,

@@ -17,6 +17,7 @@ const sseBroker          = require("../realtime/sseBroker");
 const slaTimerManager    = require("../services/slaTimerManager");
 const { transition: smTransition, EVENTS: SM_EVENTS } = require("../services/crmChatStateMachine");
 const { resolveMlPackFromSaleId } = require("../services/salesMlPackMessaging");
+const { manualBankLinkToleranceBs } = require("../utils/manualBankLinkTolerance");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info", name: "salesApi" });
 
@@ -1617,9 +1618,12 @@ async function handleSalesApiRequest(req, res, url) {
     }
     const so = soRows[0];
 
-    // Verificar que el extracto bancario existe
     const { rows: bsRows } = await pool.query(
-      `SELECT id, amount FROM bank_statements WHERE id = $1 LIMIT 1`,
+      `SELECT id,
+              amount::text AS amount,
+              tx_type::text AS tx_type,
+              reconciliation_status::text AS reconciliation_status
+       FROM bank_statements WHERE id = $1 LIMIT 1`,
       [statementId]
     );
     if (!bsRows.length) {
@@ -1627,20 +1631,55 @@ async function handleSalesApiRequest(req, res, url) {
       return true;
     }
     const bs = bsRows[0];
-
+    if (String(bs.tx_type || "").toUpperCase() !== "CREDIT") {
+      writeJson(res, 400, { error: "bad_request", message: "Solo se pueden vincular abonos (crédito)." });
+      return true;
+    }
+    const stBs = String(bs.reconciliation_status || "").toUpperCase();
+    if (!["UNMATCHED", "SUGGESTED"].includes(stBs)) {
+      writeJson(res, 409, {
+        error: "conflict",
+        message: "El movimiento de extracto no está disponible (debe estar sin conciliar o sugerido).",
+      });
+      return true;
+    }
     const amtOrder = Number(so.total_amount_bs) || 0;
-    const amtSource = Number(bs.amount) || 0;
+    const amtSource =
+      bs.amount != null && String(bs.amount).trim() !== ""
+        ? Number(String(bs.amount).replace(",", "."))
+        : NaN;
+    if (!Number.isFinite(amtSource)) {
+      writeJson(res, 400, { error: "bad_request", message: "No se pudo leer el monto del extracto." });
+      return true;
+    }
+    const tol = manualBankLinkToleranceBs();
     const amtDiff = Math.abs(amtOrder - amtSource);
+    if (amtDiff > tol) {
+      writeJson(res, 409, {
+        error: "amount_mismatch",
+        message: `Monto de la orden y del extracto fuera de tolerancia (±${tol} Bs.).`,
+        order_bs: amtOrder,
+        statement_bs: amtSource,
+        tolerance_bs: tol,
+      });
+      return true;
+    }
 
-    // Insertar en reconciliation_log (manual, match_level=3)
     await pool.query(
       `INSERT INTO reconciliation_log
          (order_id, bank_statement_id, source, match_level, confidence_score,
           amount_order_bs, amount_source_bs, amount_diff_bs, tolerance_used_bs,
           reference_matched, date_matched, resolved_by, status)
-       VALUES ($1, $2, 'bank_statement', 3, 100.0, $3, $4, $5, 0,
+       VALUES ($1, $2, 'bank_statement', 3, 100.0, $3, $4, $5, $6,
                false, false, 'manual_ui', 'approved')`,
-      [orderId, statementId, amtOrder, amtSource, amtDiff]
+      [orderId, statementId, amtOrder, amtSource, amtDiff, tol]
+    );
+
+    await pool.query(
+      `UPDATE bank_statements
+         SET reconciliation_status = 'MATCHED'::reconciliation_status
+       WHERE id = $1`,
+      [statementId]
     );
 
     // Actualizar status de la orden a 'paid' si está en estado previo al pago

@@ -12,6 +12,7 @@ const exceptionsService = require("./exceptionsService");
  *
  *   BANK_STATEMENT:  ±0.05 Bs  (redondeo bancario) — referencia: match PARCIAL (contains)
  *   PAYMENT_ATTEMPT: tolerancia por env `RECONCILIATION_ATTEMPT_TOLERANCE_BS` (default ±0,50 Bs)
+ *   Cotización (Bs): `toleranceBsForQuotationPayment` — mín. 100 VES y 0,5 % del monto (Banesco vs tasa cotización)
  *
  * Niveles de match:
  *   NIVEL 1 — monto + referencia + fecha (−1 a +1 día)  → confidence 1.00 → auto-aprobado
@@ -34,6 +35,7 @@ const {
   emitPaymentManualReview,
   emitPaymentOverdue,
 } = require("./sseService");
+const { toleranceBsForQuotationPayment } = require("./quotationPaymentSettlementService");
 
 // Tolerancia de monto por fuente.
 // PAYMENT_ATTEMPT puede ser mayor a 0.01 porque la tasa de cambio con la que el cliente calculó
@@ -151,11 +153,6 @@ function presupuestoReference(channelId, id) {
   return `COT-${id}`;
 }
 
-/** Misma lógica que PaymentLinkPanel / link-bank-statement: max(1 Bs, 0,5 % del monto). */
-function tolQuotationVsAttemptBs(quotationBs) {
-  return Math.max(1, Math.abs(Number(quotationBs) || 0) * 0.005);
-}
-
 /**
  * Si no hubo match con sales_orders: misma conversación (chat_id), cotización sent|approved,
  * monto comprobante ≈ total USD × tasa, y cliente_id coherente cuando ambos existen.
@@ -204,7 +201,7 @@ async function maybeMatchQuotationFromAttempt(attempt, attemptChatId, attemptCus
       continue;
     }
     const qBs = Number(q.total_usd) * rate;
-    const tol = tolQuotationVsAttemptBs(qBs);
+    const tol = toleranceBsForQuotationPayment(qBs);
     const diff = Math.abs(ext - qBs);
     if (diff <= tol && diff < bestDiff) {
       bestDiff = diff;

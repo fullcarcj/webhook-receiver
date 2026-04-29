@@ -24,7 +24,7 @@ async function listProducts({ limit = 50, offset = 0, alert, category, brand, se
   const ACCENT_FROM = "áéíóúüñàèìòùäëïöõÁÉÍÓÚÜÑÀÈÌÒÙÄËÏÖÕ";
   const ACCENT_TO = "aeiouunaieouaeiouoAEIOUUNAEIOUAEIOU";
 
-  const params = [
+  const filterParams = [
     alert !== undefined ? alert : null,
     category !== undefined ? category : null,
     brand !== undefined ? brand : null,
@@ -41,8 +41,8 @@ async function listProducts({ limit = 50, offset = 0, alert, category, brand, se
         const foldCol = `translate(lower(p.name), '${ACCENT_FROM}', '${ACCENT_TO}')`;
         const pieces = [];
         for (const t of tokens) {
-          params.push(t);
-          const idx = params.length;
+          filterParams.push(t);
+          const idx = filterParams.length;
           pieces.push(
             `${foldCol} LIKE ('%' || translate(lower($${idx}::text), '${ACCENT_FROM}', '${ACCENT_TO}') || '%')`
           );
@@ -50,31 +50,17 @@ async function listProducts({ limit = 50, offset = 0, alert, category, brand, se
         searchWhere = `(${pieces.join(" AND ")})`;
       }
     } else if (safeBy === "sku") {
-      params.push(s);
-      const idx = params.length;
+      filterParams.push(s);
+      const idx = filterParams.length;
       searchWhere = `p.sku ILIKE ('%' || $${idx}::text || '%')`;
     } else {
-      params.push(s);
-      const idx = params.length;
+      filterParams.push(s);
+      const idx = filterParams.length;
       searchWhere = `(p.sku ILIKE '%' || $${idx}::text || '%' OR p.name ILIKE '%' || $${idx}::text || '%')`;
     }
   }
 
-  params.push(limit, offset);
-  const limIdx = params.length - 1;
-  const offIdx = params.length;
-
-  /**
-   * Listado: sin JOIN a inventory_projections (el front solo usa sku, nombre, stock, etc.).
-   * Ese JOIN + ventana COUNT(*) era muy caro en catálogos grandes y en cold start Render.
-   */
-  const listSql = `
-    SELECT
-      p.id, p.sku, p.name, p.description, p.category, p.brand,
-      p.unit_price_usd, p.source, p.is_active,
-      i.stock_qty, i.stock_min, i.stock_max, i.stock_alert,
-      i.lead_time_days, i.safety_factor, i.supplier_id,
-      COUNT(*) OVER() AS total_count
+  const baseFromWhere = `
     FROM products p
     JOIN inventory i ON i.product_id = p.id
     WHERE p.is_active = TRUE
@@ -82,10 +68,6 @@ async function listProducts({ limit = 50, offset = 0, alert, category, brand, se
       AND ($2::text    IS NULL OR p.category = $2)
       AND ($3::text    IS NULL OR p.brand ILIKE '%' || $3 || '%')
       AND ${searchWhere}
-    ORDER BY
-      i.stock_alert DESC,
-      p.name ASC
-    LIMIT $${limIdx} OFFSET $${offIdx}
   `;
 
   const summarySql = `
@@ -97,6 +79,77 @@ async function listProducts({ limit = 50, offset = 0, alert, category, brand, se
     FROM products p
     JOIN inventory i ON i.product_id = p.id
     LEFT JOIN inventory_projections ip ON ip.product_id = p.id
+  `;
+
+  const orderBy = `
+    ORDER BY
+      i.stock_alert DESC,
+      p.name ASC
+  `;
+
+  /** Con búsqueda: evita COUNT(*) OVER() y el summary global con JOIN a proyecciones. */
+  if (s.length >= 1) {
+    /** Evita COUNT(*) sobre todo el conjunto LIKE (puede ser enorme); el UI solo necesita has_more fiable. */
+    const SEARCH_COUNT_CAP = 5001;
+    const listParams = [...filterParams, limit, offset];
+    const limIdx = filterParams.length + 1;
+    const offIdx = filterParams.length + 2;
+    const cappedAggSql = `
+      SELECT COUNT(*)::bigint AS c
+      FROM (
+        SELECT 1
+        ${baseFromWhere}
+        LIMIT ${SEARCH_COUNT_CAP}
+      ) x
+    `;
+    const listSql = `
+      SELECT
+        p.id, p.sku, p.name, p.description, p.category, p.brand,
+        p.unit_price_usd, p.source, p.is_active,
+        i.stock_qty, i.stock_min, i.stock_max, i.stock_alert,
+        i.lead_time_days, i.safety_factor, i.supplier_id
+      ${baseFromWhere}
+      ${orderBy}
+      LIMIT $${limIdx} OFFSET $${offIdx}
+    `;
+    const [{ rows }, aggRes] = await Promise.all([
+      pool.query(listSql, listParams),
+      pool.query(cappedAggSql, filterParams),
+    ]);
+    const agg = aggRes.rows[0] || {};
+    const capped = Number(agg.c) || 0;
+    const total = capped;
+    const hitCap = capped >= SEARCH_COUNT_CAP;
+    const hasMore =
+      rows.length === limit && (hitCap || offset + rows.length < total);
+    return {
+      products: rows,
+      pagination: { total, limit, offset, has_more: hasMore },
+      summary: {
+        total_products:  total,
+        alerts_count:    null,
+        stockout_count:  null,
+        ok_count:        null,
+        search_mode:     true,
+        search_total_capped: hitCap,
+      },
+    };
+  }
+
+  const params = [...filterParams, limit, offset];
+  const limIdx = params.length - 1;
+  const offIdx = params.length;
+
+  const listSql = `
+    SELECT
+      p.id, p.sku, p.name, p.description, p.category, p.brand,
+      p.unit_price_usd, p.source, p.is_active,
+      i.stock_qty, i.stock_min, i.stock_max, i.stock_alert,
+      i.lead_time_days, i.safety_factor, i.supplier_id,
+      COUNT(*) OVER() AS total_count
+    ${baseFromWhere}
+    ${orderBy}
+    LIMIT $${limIdx} OFFSET $${offIdx}
   `;
 
   const [{ rows }, summaryRes] = await Promise.all([

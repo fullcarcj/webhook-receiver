@@ -24,6 +24,35 @@ function normalizePhone(raw) {
   return digits;
 }
 
+/**
+ * Variantes de solo-dígitos para comparar CRM/WA (internacional) con `customers.phone`
+ * guardado a veces como 0414…, 414… o +58… alineado a {@link normalizePhone}.
+ *
+ * @param {string|null|undefined} normalizedDigits — salida típica de `normalizePhone` (sin "+")
+ * @returns {string[]}
+ */
+function expandPhoneMatchKeys(normalizedDigits) {
+  const n = String(normalizedDigits || "").replace(/\D/g, "");
+  const out = new Set();
+  if (!n) return [];
+  out.add(n);
+  const cc = String(process.env.PHONE_DEFAULT_COUNTRY || "58").replace(/\D/g, "") || "58";
+  if (n.startsWith(cc) && n.length > cc.length) {
+    const tail = n.slice(cc.length);
+    if (tail) {
+      out.add(tail);
+      out.add(`0${tail}`);
+    }
+  }
+  if (n.length === 11 && n.startsWith("0")) {
+    out.add(cc + n.slice(1));
+  }
+  if (n.length === 10 && /^\d+$/.test(n) && !n.startsWith(cc)) {
+    out.add(cc + n);
+  }
+  return [...out];
+}
+
 function phonesMatch(a, b) {
   const na = normalizePhone(a);
   const nb = normalizePhone(b);
@@ -31,4 +60,4 @@ function phonesMatch(a, b) {
   return na === nb;
 }
 
-module.exports = { normalizePhone, phonesMatch };
+module.exports = { normalizePhone, expandPhoneMatchKeys, phonesMatch };

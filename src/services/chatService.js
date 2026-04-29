@@ -3,6 +3,10 @@
 const { pool } = require("../../db");
 const { CustomerModel, rowToCustomerApi, mapSchemaError } = require("./crmIdentityService");
 const inboxService = require("./inboxService");
+const {
+  findUniqueCustomerByPhoneForWaChat,
+  tryAutoLinkCustomerByWaPhone,
+} = require("./identityResolver");
 
 /** Límite por defecto al listar mensajes (primera página / scroll); máximo 200 en handler. */
 const DEFAULT_MESSAGES_PAGE_LIMIT = 30;
@@ -222,6 +226,20 @@ async function getChatContext(chatId) {
     if (!resolvedCustomerId && chat.ml_question_id != null) {
       const bid = await findMlQuestionBuyerId(chat.ml_question_id);
       if (bid) resolvedCustomerId = await findCustomerIdFromMlBuyerId(bid);
+    }
+
+    // WA: mismo criterio que identityResolver (teléfono + variantes VE); persiste vínculo si era NULL.
+    if (!resolvedCustomerId && chat.phone) {
+      const pid = await findUniqueCustomerByPhoneForWaChat(pool, chat.phone, chat.source_type);
+      if (pid != null && Number.isFinite(pid) && pid > 0) {
+        const { normalizePhone } = require("../utils/phoneNormalizer");
+        const d =
+          normalizePhone(chat.phone) || String(chat.phone || "").replace(/\D/g, "");
+        if (chat.customer_id == null) {
+          await tryAutoLinkCustomerByWaPhone(id, pid, d);
+        }
+        resolvedCustomerId = pid;
+      }
     }
 
     if (!customer && resolvedCustomerId) {

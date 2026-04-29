@@ -241,29 +241,30 @@ const JOIN_CHAT_STAGE_SCALAR = `
 
 /**
  * Filtro `?pipeline_default=1`: pipeline abierto (≠ closed) con reglas de tiempo/origen.
- * Debe declararse después de `CHAT_STAGE_EXPR`. Requiere JOIN `qwin` si se usa.
+ * Usa `_cs.chat_stage_text` (JOIN_CHAT_STAGE_SCALAR) en lugar de repetir `CHAT_STAGE_EXPR`:
+ * repetir el CASE cinco veces por fila multiplicaba coste CPU/plan en counts y lista.
  */
 const PIPELINE_DEFAULT_SQL = `
 (
   COALESCE(cc.is_operational, FALSE) = FALSE
   AND (
     (
-      ((${CHAT_STAGE_EXPR}))::text <> 'closed'
+      _cs.chat_stage_text <> 'closed'
       AND (
-        ((${CHAT_STAGE_EXPR}))::text IN ('order', 'payment', 'dispatch')
+        _cs.chat_stage_text IN ('order', 'payment', 'dispatch')
         OR (
-          ((${CHAT_STAGE_EXPR}))::text = 'contact'
+          _cs.chat_stage_text = 'contact'
           AND cc.source_type IN ('wa_inbound', 'wa_ml_linked')
           AND COALESCE(cc.last_inbound_at, cc.created_at) >= (NOW() - INTERVAL '24 hours')
           AND cc.sales_default_hidden_at IS NULL
         )
         OR (
-          ((${CHAT_STAGE_EXPR}))::text = 'contact'
+          _cs.chat_stage_text = 'contact'
           AND cc.source_type NOT IN ('wa_inbound', 'wa_ml_linked')
           AND cc.sales_default_hidden_at IS NULL
         )
         OR (
-          ((${CHAT_STAGE_EXPR}))::text = 'quote'
+          _cs.chat_stage_text = 'quote'
           AND COALESCE(
             qwin.quote_started_at,
             cc.ml_question_answered_at,
@@ -760,9 +761,14 @@ async function fetchInboxFacets() {
 // Caché de duración indefinida: los datos son válidos hasta que ocurra un evento
 // de escritura (nuevo mensaje, marcar leído, orden actualizada, etc.).
 // _setCachedCounts no recibe TTL; _invalidate borra todo.
-// Fallback de seguridad: 5 min (evita datos eternamente viejos si falla algún hook).
+// Fallback de seguridad (evita datos eternamente viejos si falla algún hook).
+// Polling del front (`/api/bandeja/counts`) + consulta principal muy pesada: TTL generoso.
 const _countsCache = new Map();
-const COUNTS_CACHE_MAX_AGE_MS = 5 * 60_000; // 5 min — solo como red de seguridad
+const _countsTtlParsed = Number(process.env.INBOX_COUNTS_CACHE_MAX_AGE_MS);
+const COUNTS_CACHE_MAX_AGE_MS =
+  Number.isFinite(_countsTtlParsed) && _countsTtlParsed >= 30_000
+    ? Math.min(_countsTtlParsed, 60 * 60_000)
+    : 15 * 60_000;
 
 function _getCachedCounts(key) {
   const e = _countsCache.get(key);
@@ -789,7 +795,7 @@ function invalidateInboxCountsCache() {
  * Opcional `src`, `stage`, `result`, `search` — mismos query params que `GET /api/inbox`.
  * Así el badge "Sin leer" coincide con la lista cuando hay filtro de etapa/origen/etc.
  *
- * Resultado cacheado 8 s en memoria para reducir carga DB (queries muy pesadas con LATERAL JOINs).
+ * Resultado cacheado en memoria (TTL `INBOX_COUNTS_CACHE_MAX_AGE_MS`, default 15 min + invalidación en escrituras).
  *
  * @param {object} [opts]
  * @param {string|null} [opts.src] compuesto validado (p. ej. `wa,ml`) o null
@@ -882,15 +888,15 @@ async function _runInboxCounts({ srcParts, search, stageList, result, pipelineDe
   // `PENDING_REPLY_EXPR` (alias `last_msg`). Se agregan filas ya resueltas y luego se cuentan.
   const sql = `
     SELECT
-      COUNT(DISTINCT t.cid) AS total,
-      COUNT(DISTINCT t.cid) FILTER (WHERE t.pending_reply) AS unread,
-      COUNT(DISTINCT t.cid) FILTER (WHERE t.so_pay_st = 'pending') AS payment_pending,
-      COUNT(DISTINCT t.cid) FILTER (WHERE t.so_id IS NULL) AS quote,
-      COUNT(DISTINCT t.cid) FILTER (
+      COUNT(*) AS total,
+      COUNT(*) FILTER (WHERE t.pending_reply) AS unread,
+      COUNT(*) FILTER (WHERE t.so_pay_st = 'pending') AS payment_pending,
+      COUNT(*) FILTER (WHERE t.so_id IS NULL) AS quote,
+      COUNT(*) FILTER (
         WHERE t.so_pay_st = 'approved' AND t.so_ff IS NOT NULL
       ) AS dispatch,
-      COUNT(DISTINCT t.cid) FILTER (WHERE t.source_type = 'wa_inbound') AS wa,
-      COUNT(DISTINCT t.cid) FILTER (
+      COUNT(*) FILTER (WHERE t.source_type = 'wa_inbound') AS wa,
+      COUNT(*) FILTER (
         WHERE t.source_type IN ('ml_question','ml_message','wa_ml_linked')
       ) AS ml
     FROM (

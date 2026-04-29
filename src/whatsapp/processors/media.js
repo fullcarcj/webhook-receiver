@@ -15,10 +15,44 @@ const { saveInboundMedia } = require("../media/mediaSaver");
 const { pool } = require("../../../db");
 const { updateWasenderWebhookMediaStatus } = require("../../../db");
 const { getSwitches, isTipoMConsoleAndEnvEnabled } = require("../../services/aiConsoleSwitches");
+const { normalizePhone, expandPhoneMatchKeys } = require("../../utils/phoneNormalizer");
 
 const log = pino({ level: process.env.LOG_LEVEL || "info", name: "media_processor" });
 
 const MEDIA_TYPES = new Set(["image", "audio", "video", "document", "sticker"]);
+
+/**
+ * Misma idea que el hub de texto (messages.js / inbox): claves 0414…, 58…, etc.
+ * Sin esto, el comprobante se inserta con chat_id/customer_id NULL y
+ * GET /api/inbox/payment-attempts?customer_id=… no devuelve items.
+ */
+async function resolveCrmChatForInboundMedia(poolConn, phoneRaw) {
+  const norm = normalizePhone(phoneRaw);
+  const keys = expandPhoneMatchKeys(norm || String(phoneRaw || "").replace(/\D/g, ""));
+  if (!keys.length) return { chat_id: null, customer_id: null };
+  const { rows } = await poolConn.query(
+    `SELECT c.id AS chat_id, c.customer_id
+       FROM crm_chats c
+       LEFT JOIN customers cu ON cu.id = c.customer_id
+      WHERE COALESCE(c.source_type, 'wa_inbound') IN ('wa_inbound', 'wa_ml_linked')
+        AND (
+          regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') = ANY($1::text[])
+          OR (
+            cu.phone IS NOT NULL
+            AND btrim(cu.phone) <> ''
+            AND regexp_replace(COALESCE(cu.phone, ''), '[^0-9]', '', 'g') = ANY($1::text[])
+          )
+          OR (
+            NULLIF(TRIM(COALESCE(cu.phone_2, '')), '') IS NOT NULL
+            AND regexp_replace(COALESCE(cu.phone_2, ''), '[^0-9]', '', 'g') = ANY($1::text[])
+          )
+        )
+      ORDER BY c.last_message_at DESC NULLS LAST, c.id DESC
+      LIMIT 1`,
+    [keys]
+  );
+  return rows[0] || { chat_id: null, customer_id: null };
+}
 
 /**
  * @param {object} normalized — normalized de hookRouter (ya con eventType, fromPhone, etc.)
@@ -106,13 +140,8 @@ async function handle(normalized) {
     }
 
     // 6. Buscar chat existente (opcional — no bloquea el flujo)
-    const { rows: chatRows } = await pool.query(
-      `SELECT c.id AS chat_id, c.customer_id
-       FROM crm_chats c
-       WHERE REGEXP_REPLACE(c.phone, '\\D', '', 'g') = $1
-       LIMIT 1`,
-      [String(normalized.fromPhone).replace(/\D/g, "")]
-    );
+    const chatRow = await resolveCrmChatForInboundMedia(pool, normalized.fromPhone);
+    const chatRows = chatRow.chat_id != null ? [chatRow] : [];
 
     let chatId     = null;
     let customerId = null;
@@ -178,6 +207,16 @@ async function handle(normalized) {
 
           if (!prefilter.isReceipt) return;
 
+          const resolvedForPa = await resolveCrmChatForInboundMedia(pool, normalized.fromPhone);
+          const insChatId =
+            resolvedForPa.chat_id != null ? Number(resolvedForPa.chat_id) : chatId != null ? Number(chatId) : null;
+          const insCustomerId =
+            resolvedForPa.customer_id != null
+              ? Number(resolvedForPa.customer_id)
+              : customerId != null
+                ? Number(customerId)
+                : null;
+
           let swReceipt = { receipt_gemini_vision: true };
           try {
             swReceipt = await getSwitches();
@@ -214,8 +253,8 @@ async function handle(normalized) {
                ON CONFLICT (firebase_url) DO NOTHING
                RETURNING id`,
               [
-                customerId ?? null,
-                chatId ?? null,
+                insCustomerId,
+                insChatId,
                 firebaseUrl,
                 pf.extracted_reference,
                 pf.extracted_amount_bs,
@@ -243,8 +282,8 @@ async function handle(normalized) {
                  ON CONFLICT (firebase_url) DO NOTHING
                  RETURNING id`,
                 [
-                  customerId ?? null,
-                  chatId ?? null,
+                  insCustomerId,
+                  insChatId,
                   firebaseUrl,
                   pf.extracted_reference,
                   pf.extracted_amount_bs,
@@ -264,7 +303,8 @@ async function handle(normalized) {
           const attemptId = attemptRows.rows[0]?.id ?? null;
           log.info(
             {
-              customerId,
+              customerId: insCustomerId,
+              chatId: insChatId,
               attemptId,
               ref: pf.extracted_reference,
               amount: pf.extracted_amount_bs,
@@ -311,8 +351,8 @@ async function handle(normalized) {
           try {
             const { emitReceiptDetected } = require("../../services/sseService");
             emitReceiptDetected({
-              customerId: customerId ?? null,
-              chatId: chatId ?? null,
+              customerId: insCustomerId,
+              chatId: insChatId,
               amountBs: pf.extracted_amount_bs ?? null,
               reference: pf.extracted_reference ?? null,
               bank: pf.extracted_bank ?? null,

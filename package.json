@@ -78,6 +78,8 @@
     "crm-chat-states:cleanup": "node scripts/cleanup-crm-chat-states.js",
     "inbox:mark-all-read": "node scripts/inbox-mark-all-read.js",
     "inbox:mark-all-read:dry": "node scripts/inbox-mark-all-read.js --dry-run",
+    "staging:ml-clear": "node scripts/clear-ml-webhook-staging.js",
+    "staging:ml-clear:dry": "node scripts/clear-ml-webhook-staging.js --dry-run",
     "crm:mark-all-attended": "node scripts/crm-mark-all-attended.js",
     "crm:mark-all-attended:dry": "node scripts/crm-mark-all-attended.js --dry-run",
     "diagnose:crm-welcome": "node scripts/diagnose-crm-welcome.js",

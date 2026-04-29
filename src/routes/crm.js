@@ -23,6 +23,17 @@ function writeText(res, status, text) {
   res.end(text);
 }
 
+/** Campos extra (no BD): primera palabra de `full_name` y el resto — útil para FileMaker / Insert from URL. */
+function customerRowWithNombreApellido(row) {
+  const full = row && row.full_name != null ? String(row.full_name).trim() : "";
+  const parts = full.split(/\s+/).filter(Boolean);
+  return {
+    ...row,
+    nombre: parts.length ? parts[0] : "",
+    apellido: parts.length > 1 ? parts.slice(1).join(" ") : "",
+  };
+}
+
 async function parseJsonBody(req) {
   const chunks = [];
   let total = 0;
@@ -169,7 +180,7 @@ async function handleCrmApiRequest(req, res, url) {
           writeJson(res, 404, { ok: false, error: "not_found", detail: "no_customer_for_ml_buyer" });
           return true;
         }
-        writeJson(res, 200, { ok: true, data: row });
+        writeJson(res, 200, { ok: true, data: customerRowWithNombreApellido(row) });
         return true;
       }
       if (req.method === "POST") {

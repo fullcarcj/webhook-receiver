@@ -1570,14 +1570,16 @@ async function deleteMlWebhookStagingByIds(ids) {
 /**
  * Borra filas cuyo payload / columnas coinciden con criterios de la notificación ML (cuerpo JSON del DELETE).
  * Requiere al menos un criterio “selectivo”: resource, o (topic y user_id), o application_id, o _id en JSON.
+ *
+ * Si hay `user_id` + `resource` (como en insert), borra por `dedupe_key` (misma regla que `insertMlWebhookStaging`):
+ * evita fallos cuando el cuerpo trae `_id`/`application_id` pero el `payload` en BD cambió tras un upsert.
  */
 async function deleteMlWebhookStagingByNotificationMatch(body) {
   await ensureSchema();
   if (!body || typeof body !== "object") return { deleted: 0, skipped: true, reason: "empty_body" };
 
-  const topic = typeof body.topic === "string" && body.topic.trim() ? body.topic.trim() : null;
-  const resource =
-    typeof body.resource === "string" && body.resource.trim() ? body.resource.trim() : null;
+  const topicCol = body && typeof body.topic === "string" ? body.topic : null;
+  const resourceCol = body && typeof body.resource === "string" ? body.resource : null;
   let mlUserId = null;
   if (body.user_id != null && String(body.user_id).trim() !== "") {
     const u = Number(body.user_id);
@@ -1590,12 +1592,23 @@ async function deleteMlWebhookStagingByNotificationMatch(body) {
   const extId =
     body._id != null && String(body._id).trim() !== "" ? String(body._id).trim() : null;
 
+  const resourceNonEmpty = resourceCol != null && resourceCol !== "";
   const selective =
-    Boolean(resource) ||
-    (Boolean(topic) && mlUserId != null) ||
+    resourceNonEmpty ||
+    (Boolean(topicCol) && mlUserId != null) ||
     Boolean(appId) ||
     Boolean(extId);
   if (!selective) return { deleted: 0, skipped: true, reason: "need_resource_or_topic_user_or_app_or_id" };
+
+  if (mlUserId != null && resourceNonEmpty) {
+    const dk = mlWebhookStagingDedupeKey(mlUserId, topicCol, resourceCol);
+    const { rowCount } = await pool.query(`DELETE FROM ml_webhook_staging WHERE dedupe_key = $1`, [dk]);
+    return { deleted: rowCount || 0, skipped: false, mode: "by_dedupe_key" };
+  }
+
+  const topic = typeof body.topic === "string" && body.topic.trim() ? body.topic.trim() : null;
+  const resource =
+    typeof body.resource === "string" && body.resource.trim() ? body.resource.trim() : null;
 
   const parts = [];
   const vals = [];
@@ -1623,7 +1636,7 @@ async function deleteMlWebhookStagingByNotificationMatch(body) {
 
   const sql = `DELETE FROM ml_webhook_staging WHERE ${parts.join(" AND ")}`;
   const { rowCount } = await pool.query(sql, vals);
-  return { deleted: rowCount || 0, skipped: false };
+  return { deleted: rowCount || 0, skipped: false, mode: "by_column_match" };
 }
 
 async function upsertMlAccount(mlUserId, refreshToken, nickname) {

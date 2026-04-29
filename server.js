@@ -321,6 +321,25 @@ function getWasenderWebhookPostPaths() {
   return set;
 }
 
+/**
+ * URL pública del servicio (sin barra final), para armar endpoints en GET /.
+ * Render suele definir `RENDER_EXTERNAL_URL`; opcional `PUBLIC_BASE_URL` / `SERVER_PUBLIC_URL` / `RENDER_URL`.
+ */
+function getPublicBaseUrl() {
+  const candidates = [
+    process.env.PUBLIC_BASE_URL,
+    process.env.SERVER_PUBLIC_URL,
+    process.env.RENDER_EXTERNAL_URL,
+    process.env.RENDER_URL,
+  ];
+  for (const raw of candidates) {
+    if (raw == null) continue;
+    const s = String(raw).trim().replace(/\/+$/, "");
+    if (s) return s;
+  }
+  return null;
+}
+
 function matchesWasenderWebhookPostPath(pathname) {
   return pathname != null && getWasenderWebhookPostPaths().has(pathname);
 }
@@ -2164,12 +2183,24 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/") {
+    const publicBase = getPublicBaseUrl();
+    const filemakerCustomerName = publicBase
+      ? `${publicBase}/filemaker/customer-name`
+      : "/filemaker/customer-name";
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(
       JSON.stringify({
         ok: true,
         service: "webhook-receiver",
         version: pkg.version,
+        public_base_url: publicBase,
+        filemaker_urls: {
+          customer_name_get: filemakerCustomerName,
+          tipo_g_post: publicBase ? `${publicBase}/filemaker/tipo-g` : "/filemaker/tipo-g",
+          inventario_productos_post: publicBase
+            ? `${publicBase}/filemaker/inventario-productos`
+            : "/filemaker/inventario-productos",
+        },
         database: {
           backend: "postgresql",
           info: dbPath,
@@ -7794,7 +7825,13 @@ const server = http.createServer(async (req, res) => {
           const matchRes = await deleteMlWebhookStagingByNotificationMatch(body);
           if (!matchRes.skipped) {
             res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-            res.end(JSON.stringify({ ok: true, deleted: matchRes.deleted, mode: "by_match" }));
+            res.end(
+              JSON.stringify({
+                ok: true,
+                deleted: matchRes.deleted,
+                mode: matchRes.mode || "by_match",
+              })
+            );
             return;
           }
           res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });

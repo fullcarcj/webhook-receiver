@@ -85,7 +85,8 @@ async function runSchemaAndSeed() {
       payload TEXT NOT NULL,
       topic TEXT,
       resource TEXT,
-      ml_user_id BIGINT
+      ml_user_id BIGINT,
+      dedupe_key TEXT NOT NULL
     )`,
     `CREATE INDEX IF NOT EXISTS idx_ml_webhook_staging_received ON ml_webhook_staging(received_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_ml_webhook_staging_ml_user ON ml_webhook_staging(ml_user_id)`,
@@ -662,6 +663,7 @@ async function runSchemaAndSeed() {
   await migrateMlWhatsappWasenderLogTipoEActivationSource();
   await migrateMlFilemakerTipoGLogTipoEActivationSource();
   await migrateMlWhatsappTipoFConfig();
+  await migrateMlWebhookStagingDedupeKey();
   await migratePostSaleMessagesUiColumns();
   await migrateProductosUpdatedAtTrigger();
   await migrateProductosSolomotorColumns();
@@ -797,6 +799,52 @@ async function migrateMlWhatsappTipoFConfig() {
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("[db] migrate ml_whatsapp_tipo_f_config:", e.message);
+  }
+}
+
+/** dedupe_key + índice único: una fila por (ml_user_id, topic, resource); reingreso actualiza payload y received_at. */
+async function migrateMlWebhookStagingDedupeKey() {
+  try {
+    const { rows: tbl } = await pool.query(
+      `SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'ml_webhook_staging'`
+    );
+    if (!tbl.length) return;
+
+    const { rows: col } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'ml_webhook_staging' AND column_name = 'dedupe_key'`
+    );
+    if (!col.length) {
+      await pool.query(`ALTER TABLE ml_webhook_staging ADD COLUMN dedupe_key TEXT`);
+      console.log("[db] ml_webhook_staging: columna dedupe_key añadida (migración)");
+    }
+
+    await pool.query(`
+      UPDATE ml_webhook_staging
+      SET dedupe_key = ml_user_id::text || E'\\x1f' || COALESCE(topic, '') || E'\\x1f' || COALESCE(resource, '')
+      WHERE (dedupe_key IS NULL OR dedupe_key = '') AND ml_user_id IS NOT NULL
+    `);
+    await pool.query(`
+      UPDATE ml_webhook_staging
+      SET dedupe_key = 'legacy:' || id::text
+      WHERE dedupe_key IS NULL OR dedupe_key = ''
+    `);
+
+    await pool.query(`
+      DELETE FROM ml_webhook_staging a
+      USING ml_webhook_staging b
+      WHERE a.dedupe_key = b.dedupe_key
+        AND a.id < b.id
+    `);
+
+    await pool.query(`ALTER TABLE ml_webhook_staging ALTER COLUMN dedupe_key SET NOT NULL`);
+
+    await pool.query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_ml_webhook_staging_dedupe_key ON ml_webhook_staging (dedupe_key)`
+    );
+  } catch (e) {
+    console.error("[db] migrate ml_webhook_staging dedupe_key:", e.message);
   }
 }
 
@@ -1423,6 +1471,13 @@ async function deleteWebhooks(ids) {
   return rowCount;
 }
 
+/** Clave estable para deduplicar notificaciones ML (mismo topic+resource+vendedor → una fila). */
+function mlWebhookStagingDedupeKey(mlUserId, topic, resource) {
+  const t = topic != null && typeof topic === "string" ? topic : "";
+  const r = resource != null && typeof resource === "string" ? resource : "";
+  return `${Number(mlUserId)}\x1f${t}\x1f${r}`;
+}
+
 /** Copia temporal de notificaciones ML (POST /webhook) para consulta y borrado manual. */
 async function insertMlWebhookStaging(payloadObj) {
   await ensureSchema();
@@ -1436,10 +1491,21 @@ async function insertMlWebhookStaging(payloadObj) {
     const u = Number(payloadObj.user_id);
     if (Number.isFinite(u) && u > 0) mlUserId = u;
   }
+  if (mlUserId == null) {
+    throw new Error("insertMlWebhookStaging requiere ml_user_id numérico");
+  }
+  const dedupeKey = mlWebhookStagingDedupeKey(mlUserId, topic, resource);
   const { rows } = await pool.query(
-    `INSERT INTO ml_webhook_staging (payload, topic, resource, ml_user_id)
-     VALUES ($1, $2, $3, $4) RETURNING id`,
-    [payload, topic, resource, mlUserId]
+    `INSERT INTO ml_webhook_staging (payload, topic, resource, ml_user_id, dedupe_key)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (dedupe_key) DO UPDATE SET
+       payload = EXCLUDED.payload,
+       topic = EXCLUDED.topic,
+       resource = EXCLUDED.resource,
+       ml_user_id = EXCLUDED.ml_user_id,
+       received_at = NOW()
+     RETURNING id`,
+    [payload, topic, resource, mlUserId, dedupeKey]
   );
   return Number(rows[0].id);
 }

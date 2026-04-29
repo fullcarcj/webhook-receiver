@@ -1576,6 +1576,18 @@ async function getMlAccount(mlUserId) {
   return rows[0] || undefined;
 }
 
+/** True si existe cuenta OAuth ML registrada para ese vendedor (tabla ml_accounts). */
+async function isMlUserIdInAccounts(mlUserId) {
+  await ensureSchema();
+  const u = Number(mlUserId);
+  if (!Number.isFinite(u) || u <= 0) return false;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM ml_accounts WHERE ml_user_id = $1 LIMIT 1`,
+    [u]
+  );
+  return rows.length > 0;
+}
+
 async function listMlAccounts() {
   await ensureSchema();
   const { rows } = await pool.query(
@@ -4792,6 +4804,7 @@ module.exports = {
   },
   upsertMlAccount,
   getMlAccount,
+  isMlUserIdInAccounts,
   listMlAccounts,
   getMlAccountCookiesNetscape,
   setMlAccountCookiesNetscape,

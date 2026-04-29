@@ -106,6 +106,7 @@ const {
   insertWasenderWebhookEvent,
   listWasenderWebhookEvents,
   upsertMlAccount,
+  isMlUserIdInAccounts,
   listMlAccounts,
   setMlAccountCookiesNetscape,
   clearMlAccountCookiesNetscape,
@@ -4089,6 +4090,8 @@ const server = http.createServer(async (req, res) => {
 <body>
   <h1>Cuentas conectadas</h1>
   <p class="lead">${accounts.length} cuenta(s). Token en vista previa; refresh no se muestra.</p>
+  <p class="lead">La columna <strong>user_id</strong> es el <code>ml_user_id</code> de Mercado Libre vinculado a esta app (tabla <code>ml_accounts</code>). Los POST a <code>/webhook</code> con notificaciones ML solo se duplican en <code>ml_webhook_staging</code> si el <code>user_id</code> del JSON <strong>figura aquí</strong>; si no hay cuenta registrada para ese vendedor, el staging no guarda la fila (sí puede seguir guardándose en <code>webhook_events</code> / <code>/hooks</code>).</p>
+  <p class="lead">Ejemplo de cuerpo ML: <code>topic</code> (<code>orders_feedback</code>, <code>orders_v2</code>, <code>items</code>, …), <code>user_id</code> (debe coincidir con una fila de abajo), <code>resource</code> (ruta del recurso, p. ej. <code>/orders/…/feedback</code>), <code>application_id</code> (app en ML). Campos como <code>_id</code>, <code>received</code>, <code>sent</code>, <code>attempts</code> vienen del feed de notificaciones.</p>
   <table>
     <thead><tr>
       <th>user_id</th><th>Nickname</th><th>Estado</th><th>Token (enmascarado)</th>
@@ -7504,8 +7507,22 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      const sid = await insertMlWebhookStaging(body);
-      console.log("[db] ml_webhook_staging id=%s", sid);
+      const uidRaw = body.user_id;
+      const uidNum =
+        uidRaw != null && String(uidRaw).trim() !== "" ? Number(uidRaw) : NaN;
+      const known =
+        Number.isFinite(uidNum) &&
+        uidNum > 0 &&
+        (await isMlUserIdInAccounts(uidNum));
+      if (known) {
+        const sid = await insertMlWebhookStaging(body);
+        console.log("[db] ml_webhook_staging id=%s (ml_user_id=%s)", sid, uidNum);
+      } else {
+        console.log(
+          "[db] ml_webhook_staging omitido: user_id=%s no está en ml_accounts (registrá la cuenta en /cuentas)",
+          uidRaw != null ? String(uidRaw) : "—"
+        );
+      }
     } catch (e) {
       console.error("[db] ml_webhook_staging no guardado:", e.message);
     }

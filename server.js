@@ -97,6 +97,11 @@ const {
   insertWebhook,
   listWebhooks,
   deleteWebhooks,
+  insertMlWebhookStaging,
+  countMlWebhookStaging,
+  listMlWebhookStaging,
+  deleteAllMlWebhookStaging,
+  deleteMlWebhookStagingByIds,
   insertWasenderWebhookEvent,
   listWasenderWebhookEvents,
   upsertMlAccount,
@@ -7497,6 +7502,13 @@ const server = http.createServer(async (req, res) => {
       console.error("[db] webhook no guardado:", e.message);
     }
 
+    try {
+      const sid = await insertMlWebhookStaging(body);
+      console.log("[db] ml_webhook_staging id=%s", sid);
+    } catch (e) {
+      console.error("[db] ml_webhook_staging no guardado:", e.message);
+    }
+
     forwardWebhookToTargets(body);
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: true, received: true }));
@@ -7538,6 +7550,67 @@ const server = http.createServer(async (req, res) => {
     }
     res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: false, error: "usa DELETE" }));
+    return;
+  }
+
+  /**
+   * Buffer temporal de webhooks Mercado Libre (tabla ml_webhook_staging).
+   * GET: lista (X-Admin-Secret o ?k=). Query: limit (default 100, max 2000), offset.
+   * DELETE: sin ids → borra todo; con ?ids=1,2,3 → borra por id.
+   */
+  if (
+    url.pathname === "/admin/ml-webhook-staging" ||
+    url.pathname === "/admin/ml-webhook-staging/"
+  ) {
+    if (req.method === "GET") {
+      if (rejectAdminSecret(req, res)) return;
+      const limRaw = url.searchParams.get("limit");
+      const offRaw = url.searchParams.get("offset");
+      const lim = limRaw != null && String(limRaw).trim() !== "" ? limRaw : "100";
+      const off = offRaw != null && String(offRaw).trim() !== "" ? offRaw : "0";
+      try {
+        const [total, items] = await Promise.all([
+          countMlWebhookStaging(),
+          listMlWebhookStaging(lim, off, 2000),
+        ]);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, total, count: items.length, items }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+    if (req.method === "DELETE") {
+      if (rejectAdminSecret(req, res)) return;
+      const idsParam = url.searchParams.get("ids") || url.searchParams.get("id");
+      try {
+        if (idsParam != null && String(idsParam).trim() !== "") {
+          const ids = String(idsParam)
+            .split(",")
+            .map((s) => parseInt(s.trim(), 10))
+            .filter((n) => n > 0);
+          if (!ids.length) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "ids inválidos (usá ?ids=1,2 o omití para borrar todo)" }));
+            return;
+          }
+          const deleted = await deleteMlWebhookStagingByIds(ids);
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, deleted, mode: "by_id" }));
+          return;
+        }
+        const deleted = await deleteAllMlWebhookStaging();
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, deleted, mode: "all" }));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "usa GET o DELETE" }));
     return;
   }
 
@@ -8335,6 +8408,9 @@ server.listen(PORT, "0.0.0.0", () => {
   }
 
   console.log("[config] cada POST /webhook guarda el JSON en webhook_events (tabla de /hooks)");
+  console.log(
+    `[config] buffer ML staging: GET|DELETE http://localhost:${PORT}/admin/ml-webhook-staging (ADMIN_SECRET)`
+  );
   if (ML_WEBHOOK_FETCH_RESOURCE) {
     console.log("[config] ML_WEBHOOK_FETCH_RESOURCE=1: tras cada webhook se hace GET a ML y se guarda en ml_topic_fetches");
   } else {

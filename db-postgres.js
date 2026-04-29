@@ -79,6 +79,16 @@ async function runSchemaAndSeed() {
       resource TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_webhook_events_id ON webhook_events(id)`,
+    `CREATE TABLE IF NOT EXISTS ml_webhook_staging (
+      id BIGSERIAL PRIMARY KEY,
+      received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      payload TEXT NOT NULL,
+      topic TEXT,
+      resource TEXT,
+      ml_user_id BIGINT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_webhook_staging_received ON ml_webhook_staging(received_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_ml_webhook_staging_ml_user ON ml_webhook_staging(ml_user_id)`,
     `CREATE TABLE IF NOT EXISTS wasender_webhook_events (
       id BIGSERIAL PRIMARY KEY,
       received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1411,6 +1421,77 @@ async function deleteWebhooks(ids) {
   const ph = list.map((_, i) => `$${i + 1}`).join(",");
   const { rowCount } = await pool.query(`DELETE FROM webhook_events WHERE id IN (${ph})`, list);
   return rowCount;
+}
+
+/** Copia temporal de notificaciones ML (POST /webhook) para consulta y borrado manual. */
+async function insertMlWebhookStaging(payloadObj) {
+  await ensureSchema();
+  const payload = JSON.stringify(payloadObj != null ? payloadObj : {});
+  const topic =
+    payloadObj && typeof payloadObj.topic === "string" ? payloadObj.topic : null;
+  const resource =
+    payloadObj && typeof payloadObj.resource === "string" ? payloadObj.resource : null;
+  let mlUserId = null;
+  if (payloadObj && payloadObj.user_id != null && payloadObj.user_id !== "") {
+    const u = Number(payloadObj.user_id);
+    if (Number.isFinite(u) && u > 0) mlUserId = u;
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO ml_webhook_staging (payload, topic, resource, ml_user_id)
+     VALUES ($1, $2, $3, $4) RETURNING id`,
+    [payload, topic, resource, mlUserId]
+  );
+  return Number(rows[0].id);
+}
+
+async function countMlWebhookStaging() {
+  await ensureSchema();
+  const { rows } = await pool.query(`SELECT COUNT(*)::bigint AS c FROM ml_webhook_staging`);
+  return Number(rows[0].c) || 0;
+}
+
+async function listMlWebhookStaging(limit, offset, maxAllowed) {
+  await ensureSchema();
+  const cap = maxAllowed != null ? maxAllowed : 2000;
+  const lim = Math.min(Math.max(Number(limit) || 100, 1), cap);
+  const off = Math.max(Number(offset) || 0, 0);
+  const { rows } = await pool.query(
+    `SELECT id, received_at, payload, topic, resource, ml_user_id
+     FROM ml_webhook_staging
+     ORDER BY id DESC
+     LIMIT $1 OFFSET $2`,
+    [lim, off]
+  );
+  return rows.map((r) => ({
+    id: Number(r.id),
+    received_at:
+      r.received_at instanceof Date ? r.received_at.toISOString() : String(r.received_at),
+    topic: r.topic,
+    resource: r.resource,
+    ml_user_id: r.ml_user_id != null ? Number(r.ml_user_id) : null,
+    data: (() => {
+      try {
+        return JSON.parse(r.payload);
+      } catch {
+        return null;
+      }
+    })(),
+  }));
+}
+
+async function deleteAllMlWebhookStaging() {
+  await ensureSchema();
+  const { rowCount } = await pool.query(`DELETE FROM ml_webhook_staging`);
+  return rowCount || 0;
+}
+
+async function deleteMlWebhookStagingByIds(ids) {
+  await ensureSchema();
+  const list = ids.filter((x) => Number.isInteger(x) && x > 0);
+  if (!list.length) return 0;
+  const ph = list.map((_, i) => `$${i + 1}`).join(",");
+  const { rowCount } = await pool.query(`DELETE FROM ml_webhook_staging WHERE id IN (${ph})`, list);
+  return rowCount || 0;
 }
 
 async function upsertMlAccount(mlUserId, refreshToken, nickname) {
@@ -4638,6 +4719,11 @@ module.exports = {
   insertWebhook,
   listWebhooks,
   deleteWebhooks,
+  insertMlWebhookStaging,
+  countMlWebhookStaging,
+  listMlWebhookStaging,
+  deleteAllMlWebhookStaging,
+  deleteMlWebhookStagingByIds,
   insertWasenderWebhookEvent,
   updateWasenderWebhookMediaStatus,
   listWasenderWebhookEvents,

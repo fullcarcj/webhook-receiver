@@ -102,6 +102,7 @@ const {
   listMlWebhookStaging,
   deleteAllMlWebhookStaging,
   deleteMlWebhookStagingByIds,
+  deleteMlWebhookStagingByNotificationMatch,
   insertWasenderWebhookEvent,
   listWasenderWebhookEvents,
   upsertMlAccount,
@@ -7556,7 +7557,8 @@ const server = http.createServer(async (req, res) => {
   /**
    * Buffer temporal de webhooks Mercado Libre (tabla ml_webhook_staging).
    * GET: lista (X-Admin-Secret o ?k=). Query: limit (default 100, max 2000), offset.
-   * DELETE: sin ids → borra todo; con ?ids=1,2,3 → borra por id.
+   * DELETE: ?ids=1,2,3 → por id; JSON con criterios ML → borrado por coincidencia;
+   *         vaciar tabla solo con ?delete_all=1 o cuerpo {"delete_all":true} (explícito).
    */
   if (
     url.pathname === "/admin/ml-webhook-staging" ||
@@ -7584,6 +7586,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "DELETE") {
       if (rejectAdminSecret(req, res)) return;
       const idsParam = url.searchParams.get("ids") || url.searchParams.get("id");
+      const contentLen = Number(req.headers["content-length"] || 0);
+      const deleteAllParam = url.searchParams.get("delete_all");
+      const wantsDeleteAllQuery =
+        deleteAllParam === "1" ||
+        /^true$/i.test(String(deleteAllParam || "")) ||
+        /^yes$/i.test(String(deleteAllParam || ""));
       try {
         if (idsParam != null && String(idsParam).trim() !== "") {
           const ids = String(idsParam)
@@ -7592,7 +7600,12 @@ const server = http.createServer(async (req, res) => {
             .filter((n) => n > 0);
           if (!ids.length) {
             res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-            res.end(JSON.stringify({ ok: false, error: "ids inválidos (usá ?ids=1,2 o omití para borrar todo)" }));
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: "ids inválidos. Usá ?ids=1,2 o ?delete_all=1 para vaciar toda la tabla.",
+              })
+            );
             return;
           }
           const deleted = await deleteMlWebhookStagingByIds(ids);
@@ -7600,9 +7613,53 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ ok: true, deleted, mode: "by_id" }));
           return;
         }
-        const deleted = await deleteAllMlWebhookStaging();
-        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: true, deleted, mode: "all" }));
+        if (wantsDeleteAllQuery) {
+          const deleted = await deleteAllMlWebhookStaging();
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: true, deleted, mode: "all" }));
+          return;
+        }
+        if (contentLen > 0) {
+          let body;
+          try {
+            body = await parseJsonBody(req);
+          } catch {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "JSON inválido en el cuerpo" }));
+            return;
+          }
+          const da = body && body.delete_all;
+          if (da === true || da === 1 || String(da).toLowerCase() === "true") {
+            const deleted = await deleteAllMlWebhookStaging();
+            res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: true, deleted, mode: "all" }));
+            return;
+          }
+          const matchRes = await deleteMlWebhookStagingByNotificationMatch(body);
+          if (!matchRes.skipped) {
+            res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: true, deleted: matchRes.deleted, mode: "by_match" }));
+            return;
+          }
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error:
+                "Cuerpo sin criterios reconocibles. Enviá al menos: resource, o topic+y user_id, o application_id, o _id (como en el JSON guardado), o delete_all:true para vaciar.",
+              detail: matchRes.reason,
+            })
+          );
+          return;
+        }
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error:
+              "No se borró nada: indicá ?ids=…, cuerpo JSON con criterios ML, o vaciado explícito ?delete_all=1 (o JSON {\"delete_all\":true}).",
+          })
+        );
       } catch (e) {
         res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: false, error: e.message }));
@@ -8409,7 +8466,7 @@ server.listen(PORT, "0.0.0.0", () => {
 
   console.log("[config] cada POST /webhook guarda el JSON en webhook_events (tabla de /hooks)");
   console.log(
-    `[config] buffer ML staging: GET|DELETE http://localhost:${PORT}/admin/ml-webhook-staging (ADMIN_SECRET)`
+    `[config] buffer ML staging: GET|DELETE http://localhost:${PORT}/admin/ml-webhook-staging — vaciar tabla: ?delete_all=1 o JSON {\"delete_all\":true}`
   );
   if (ML_WEBHOOK_FETCH_RESOURCE) {
     console.log("[config] ML_WEBHOOK_FETCH_RESOURCE=1: tras cada webhook se hace GET a ML y se guarda en ml_topic_fetches");

@@ -1494,6 +1494,65 @@ async function deleteMlWebhookStagingByIds(ids) {
   return rowCount || 0;
 }
 
+/**
+ * Borra filas cuyo payload / columnas coinciden con criterios de la notificación ML (cuerpo JSON del DELETE).
+ * Requiere al menos un criterio “selectivo”: resource, o (topic y user_id), o application_id, o _id en JSON.
+ */
+async function deleteMlWebhookStagingByNotificationMatch(body) {
+  await ensureSchema();
+  if (!body || typeof body !== "object") return { deleted: 0, skipped: true, reason: "empty_body" };
+
+  const topic = typeof body.topic === "string" && body.topic.trim() ? body.topic.trim() : null;
+  const resource =
+    typeof body.resource === "string" && body.resource.trim() ? body.resource.trim() : null;
+  let mlUserId = null;
+  if (body.user_id != null && String(body.user_id).trim() !== "") {
+    const u = Number(body.user_id);
+    if (Number.isFinite(u) && u > 0) mlUserId = u;
+  }
+  const appId =
+    body.application_id != null && String(body.application_id).trim() !== ""
+      ? String(body.application_id).trim()
+      : null;
+  const extId =
+    body._id != null && String(body._id).trim() !== "" ? String(body._id).trim() : null;
+
+  const selective =
+    Boolean(resource) ||
+    (Boolean(topic) && mlUserId != null) ||
+    Boolean(appId) ||
+    Boolean(extId);
+  if (!selective) return { deleted: 0, skipped: true, reason: "need_resource_or_topic_user_or_app_or_id" };
+
+  const parts = [];
+  const vals = [];
+  let n = 1;
+  if (topic != null) {
+    parts.push(`topic = $${n++}`);
+    vals.push(topic);
+  }
+  if (resource != null) {
+    parts.push(`resource = $${n++}`);
+    vals.push(resource);
+  }
+  if (mlUserId != null) {
+    parts.push(`ml_user_id = $${n++}`);
+    vals.push(mlUserId);
+  }
+  if (appId != null) {
+    parts.push(`(payload::jsonb->>'application_id') = $${n++}`);
+    vals.push(appId);
+  }
+  if (extId != null) {
+    parts.push(`(payload::jsonb->>'_id') = $${n++}`);
+    vals.push(extId);
+  }
+
+  const sql = `DELETE FROM ml_webhook_staging WHERE ${parts.join(" AND ")}`;
+  const { rowCount } = await pool.query(sql, vals);
+  return { deleted: rowCount || 0, skipped: false };
+}
+
 async function upsertMlAccount(mlUserId, refreshToken, nickname) {
   await ensureSchema();
   const updated_at = new Date().toISOString();
@@ -4724,6 +4783,7 @@ module.exports = {
   listMlWebhookStaging,
   deleteAllMlWebhookStaging,
   deleteMlWebhookStagingByIds,
+  deleteMlWebhookStagingByNotificationMatch,
   insertWasenderWebhookEvent,
   updateWasenderWebhookMediaStatus,
   listWasenderWebhookEvents,

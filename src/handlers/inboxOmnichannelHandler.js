@@ -62,8 +62,10 @@ async function handleInboxOmnichannelRequest(req, res, url) {
   const discardM = pathname.match(/^\/api\/inbox\/chats\/(\d+)\/discard\/?$/);
   const streamPath =
     pathname === "/api/realtime/stream" || pathname === "/api/realtime/stream/";
+  const cursorPath =
+    pathname === "/api/realtime/cursor" || pathname === "/api/realtime/cursor/";
 
-  if (!takeM && !releaseM && !presenceM && !discardM && !streamPath) {
+  if (!takeM && !releaseM && !presenceM && !discardM && !streamPath && !cursorPath) {
     return false;
   }
 
@@ -403,6 +405,28 @@ async function handleInboxOmnichannelRequest(req, res, url) {
       discarded_at: new Date().toISOString(),
       note,
     });
+    return true;
+  }
+
+  if (cursorPath && req.method === "GET") {
+    const user = await requireAuth(req, res);
+    if (!user) return true;
+
+    try {
+      const { rows } = await pool.query(
+        "SELECT last_value, is_called FROM crm_events_seq"
+      );
+      const current = rows[0] && rows[0].is_called
+        ? String(rows[0].last_value)
+        : "0";
+      writeJson(res, 200, {
+        current,
+        serverTime: new Date().toISOString(),
+      });
+    } catch (err) {
+      logger.error({ err }, "realtime_cursor_error");
+      writeJson(res, 500, { error: "cursor_unavailable" });
+    }
     return true;
   }
 

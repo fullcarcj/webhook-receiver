@@ -1,8 +1,10 @@
 "use strict";
 
+const { pool } = require("../../db");
+const { traceMlQuestion } = require("../utils/mlQuestionTrace");
+
 /** @type {Map<number, Set<import('http').ServerResponse>>} */
 const userSockets = new Map();
-const { traceMlQuestion } = require("../utils/mlQuestionTrace");
 
 const HEARTBEAT_MS = 25000;
 
@@ -13,8 +15,32 @@ function setSseHeaders(res) {
   res.setHeader("X-Accel-Buffering", "no");
 }
 
-function writeEvent(res, eventName, payload) {
-  const line = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
+/**
+ * Obtiene el siguiente valor de la sequence Postgres crm_events_seq.
+ * Retorna el seq como string, o null si la DB falla (el evento se emite sin id:).
+ * @returns {Promise<string|null>}
+ */
+async function getNextSeq() {
+  try {
+    const { rows } = await pool.query("SELECT nextval('crm_events_seq') AS seq");
+    return String(rows[0].seq);
+  } catch (err) {
+    console.warn("[sseBroker] getNextSeq failed, emitting without id:", err.message);
+    return null;
+  }
+}
+
+/**
+ * Escribe un frame SSE en una respuesta HTTP.
+ * Si se proporciona seq, prepende la línea id: para habilitar gap detection en el cliente.
+ * @param {import('http').ServerResponse} res
+ * @param {string} eventName
+ * @param {object} payload
+ * @param {string|null} [seq]
+ */
+function writeEvent(res, eventName, payload, seq) {
+  const idLine = seq != null ? `id: ${seq}\n` : "";
+  const line = `${idLine}event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
   res.write(line);
 }
 
@@ -74,7 +100,15 @@ function unregister(userId, res) {
   }
 }
 
-function broadcast(eventName, payload) {
+/**
+ * Emite un evento a TODOS los usuarios conectados.
+ * El nextval se obtiene UNA sola vez por evento lógico: todos los sockets
+ * reciben el mismo id:, lo que permite dedup multi-pestaña en el cliente.
+ * @param {string} eventName
+ * @param {object} payload
+ * @returns {Promise<void>}
+ */
+async function broadcast(eventName, payload) {
   if (
     payload &&
     typeof payload === "object" &&
@@ -89,10 +123,13 @@ function broadcast(eventName, payload) {
       sockets_user_count: userSockets.size,
     });
   }
+
+  const seq = await getNextSeq();
+
   for (const set of userSockets.values()) {
     for (const res of set) {
       try {
-        writeEvent(res, eventName, payload);
+        writeEvent(res, eventName, payload, seq);
       } catch (_e) {
         /* ignore broken pipe */
       }
@@ -101,17 +138,24 @@ function broadcast(eventName, payload) {
 }
 
 /**
+ * Emite un evento solo al usuario indicado.
+ * El nextval se obtiene UNA sola vez: todas las pestañas del mismo usuario
+ * reciben el mismo id:.
  * @param {number} userId
  * @param {string} eventName
  * @param {object} payload
+ * @returns {Promise<void>}
  */
-function sendToUser(userId, eventName, payload) {
+async function sendToUser(userId, eventName, payload) {
   const uid = Number(userId);
   const set = userSockets.get(uid);
   if (!set) return;
+
+  const seq = await getNextSeq();
+
   for (const res of set) {
     try {
-      writeEvent(res, eventName, payload);
+      writeEvent(res, eventName, payload, seq);
     } catch (_e) {
       /* ignore */
     }

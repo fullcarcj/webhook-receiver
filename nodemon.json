@@ -1,0 +1,31 @@
+{
+  "watch": [
+    "server.js",
+    "src/",
+    "db-postgres.js",
+    "db.js",
+    "load-env-local.js",
+    "oauth-token.js",
+    "wasender-client.js",
+    "ml-post-sale-send.js",
+    "ml-questions-ia-auto.js",
+    "ml-whatsapp-tipo-ef.js",
+    "ml-retiro-broadcast.js",
+    "ml-rating-request-daily.js"
+  ],
+  "ignore": [
+    "node_modules/",
+    "data/",
+    "log.txt",
+    "*.log",
+    "*.html",
+    "banesco-debug/",
+    "banesco-export-debug/"
+  ],
+  "ext": "js,json",
+  "signal": "SIGTERM",
+  "delay": 1500,
+  "env": {
+    "NODE_ENV": "development"
+  }
+}

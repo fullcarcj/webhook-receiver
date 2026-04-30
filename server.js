@@ -8619,7 +8619,7 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ ok: false, error: "no encontrado" }));
 });
 
-server.listen(PORT, "0.0.0.0", () => {
+function onServerListening() {
   const slaTimerManager = require("./src/services/slaTimerManager");
   slaTimerManager.rehydrateOnBoot(pool).catch((e) =>
     console.error("[sla] rehydrate failed", e)
@@ -8799,18 +8799,64 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log("[config] FRONTEND_API_KEY no definido: GET /api/v1/catalog responde 503.");
   }
   console.log(`Token (enmascarado): GET http://localhost:${PORT}/oauth/token-status`);
+}
+
+/** Con `npm run dev` (`node --watch`), el hijo nuevo a veces arranca antes de que Windows suelte el puerto → EADDRINUSE. */
+const isNpmDevListen = process.env.npm_lifecycle_event === "dev";
+let listenEaddrAttempts = 0;
+// En dev con --watch Windows puede tardar hasta ~15s en liberar el socket; 20 reintentos x 800ms = 16s de cobertura.
+const LISTEN_EADDR_MAX = isNpmDevListen ? 20 : 0;
+const LISTEN_EADDR_DELAY_MS = 800;
+
+// Un solo callback: pasar `onServerListening` en cada `listen()` apila listeners internos de `listening` → MaxListenersExceededWarning.
+server.once("listening", onServerListening);
+
+server.on("error", (err) => {
+  if (!err || err.code !== "EADDRINUSE") {
+    console.error("[listen] Error del servidor HTTP:", err && err.message ? err.message : err);
+    process.exit(1);
+  }
+  if (listenEaddrAttempts < LISTEN_EADDR_MAX) {
+    listenEaddrAttempts++;
+    console.warn(
+      `[listen] Puerto ${PORT} ocupado (EADDRINUSE). Reintento ${listenEaddrAttempts}/${LISTEN_EADDR_MAX} en ${LISTEN_EADDR_DELAY_MS}ms. ` +
+        (isNpmDevListen
+          ? "El proceso anterior tarda en liberar el puerto en Windows (TCP TIME_WAIT). Reintentando automáticamente..."
+          : "Cerrá la otra instancia o cambiá PORT en el entorno.")
+    );
+    setTimeout(() => {
+      server.listen(PORT, "0.0.0.0");
+    }, LISTEN_EADDR_DELAY_MS);
+    return;
+  }
+  const retryHint =
+    LISTEN_EADDR_MAX > 0
+      ? `Sigue ocupado tras ${LISTEN_EADDR_MAX} reintentos (probable otro proceso Node u otra terminal, no solo demora del watch).`
+      : "Ocupado (en producción no se reintenta automáticamente).";
+  console.error(
+    `[listen] Puerto ${PORT} — ${retryHint}\n` +
+      "  Cerrá otras instancias (otra terminal, otro `npm run dev`) o: netstat -ano | findstr :" +
+      PORT +
+      "  luego taskkill /PID <pid> /F"
+  );
+  process.exit(1);
 });
+
+server.listen(PORT, "0.0.0.0");
 
 startBanescoMonitor();
 
-process.on("SIGTERM", () => {
+function gracefulHttpShutdown(signal) {
   stopReconciliationWorker();
   stopInventoryWorker();
   stopMlStockWatcher();
   stopAiResetWorker();
   stopAiResponderWorker();
   server.close(() => process.exit(0));
-});
+}
+
+process.on("SIGTERM", () => gracefulHttpShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulHttpShutdown("SIGINT"));
 
 process.on("unhandledRejection", (reason) => {
   const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
@@ -8822,9 +8868,13 @@ process.on("uncaughtException", (err, origin) => {
   const isAddrInUse = (err instanceof Error) && err.code === "EADDRINUSE";
   if (isAddrInUse) {
     console.error(
-      "[uncaughtException] Puerto ocupado (EADDRINUSE) — otro proceso ya usa el puerto.\n" +
-      "  Solución: cerrá el proceso anterior (tasklist | findstr node) o cambiá PORT en el entorno.\n" +
-      "  " + msg.split("\n")[0]
+      "[uncaughtException] Puerto ocupado (EADDRINUSE).\n" +
+      "  Causas típicas: otra terminal con `npm run dev`, `node --watch` reiniciando antes de liberar el puerto (Windows), u otro servicio en PORT.\n" +
+      "  Solución: netstat -ano | findstr :" +
+      PORT +
+      "  → taskkill /PID … /F, o `npm run dev:stable` (sin `--watch`).\n" +
+      "  " +
+      msg.split("\n")[0]
     );
     process.exit(1);
   }

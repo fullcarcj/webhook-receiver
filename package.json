@@ -7,7 +7,9 @@
     "postinstall": "npx playwright install chromium",
     "create-test-users": "node scripts/create-test-users.js",
     "start": "node server.js",
-    "dev": "node --watch server.js",
+    "predev": "node scripts/kill-port.js",
+    "dev": "nodemon server.js",
+    "dev:watch": "node --watch server.js",
     "dev:stable": "node server.js",
     "exchange-code": "node exchange-auth-code.js",
     "test-conexion": "node test-conexion.js",
@@ -238,5 +240,8 @@
     "playwright": "^1.44.0",
     "sharp": "^0.33.5",
     "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
   }
 }

@@ -6,6 +6,7 @@
  * POST /api/inbox/:chatId/quotations/from-ml-order — borrador CH-3 desde orden ML vinculada (tasas con getTodayRate).
  *
  * POST /api/inbox/quotations — ítems:
+ *   - Opcional `display_currency` (`VES`|`USD`): texto del WA en bolívares o catálogo USD cuando va con `send_whatsapp` (default USD).
  *   - Opcional `send_whatsapp: true`: tras crear el borrador, envía el mismo WA que POST …/send (evita carrera guardar→enviar en el front).
  *   - Respuesta 201 incluye `wa_send`: `{ ok, reference, status }` o `{ ok:false, code, message }` si el envío falla (la cotización queda en `draft`).
  *   - `precio_unitario` (USD) cuando la UI cotiza en dólares.
@@ -19,6 +20,8 @@
  * Detalle / edición de ítems (evita colisión con GET …/quotations/:chatId):
  *   GET    /api/inbox/quotations/presupuesto/:id
  *   PATCH  /api/inbox/quotations/presupuesto/:id/items
+ *   POST   /api/inbox/quotations/:id/resend — reenviar WA (sent|approved); borradores usan …/send. Body opcional `{ display_currency }`.
+ *   POST   /api/inbox/quotations/:id/send — body opcional `{ display_currency }` (VES = líneas en Bs alineadas al panel).
  */
 
 const pino = require("pino");
@@ -629,9 +632,10 @@ function formatPaymentMessage(totalUsd, rateRow) {
  * Carga borrador + líneas, envía un solo mensaje WA (cotización + pago Bs) y marca `sent`.
  * Usado por POST …/send y por POST /api/inbox/quotations con `send_whatsapp: true`.
  *
+ * @param {{ displayCurrency?: string }} [waOpts] p. ej. `{ displayCurrency: 'VES' }` para alinear el texto WA al panel en bolívares.
  * @throws {Error} e.code BAD_REQUEST | NOT_FOUND | SERVICE_UNAVAILABLE | WASENDER_ERROR
  */
-async function sendDraftQuotationWhatsApp(presupuestoId, user) {
+async function sendDraftQuotationWhatsApp(presupuestoId, user, waOpts = {}) {
   const pid = Number(presupuestoId);
   if (!Number.isFinite(pid) || pid <= 0) {
     const e = new Error("id inválido");
@@ -690,13 +694,12 @@ async function sendDraftQuotationWhatsApp(presupuestoId, user) {
   } catch (_e) {
     rateRow = null;
   }
-  const msg = formatSendMessage(ip, reference, items, rateRow);
+  const formatted = formatSendMessage(ip, reference, items, rateRow, waOpts);
   const sentBy = String(user.userId != null ? user.userId : ip.created_by || "quotation-send");
-  let outbound = msg;
+  let outbound = formatted.waBody;
   try {
-    const totalUsd = Number(ip.total ?? 0);
-    const payMsg = formatPaymentMessage(totalUsd, rateRow);
-    outbound = `${msg}\n\n${payMsg}`;
+    const payMsg = formatPaymentMessage(formatted.paymentAnchorUsd, rateRow);
+    outbound = `${formatted.waBody}\n\n${payMsg}`;
   } catch (payErr) {
     logger.warn({ err: payErr }, "sendDraftQuotationWhatsApp: sin bloque de pago Bs");
   }
@@ -711,6 +714,104 @@ async function sendDraftQuotationWhatsApp(presupuestoId, user) {
   return { reference, status: STATUS_SENT };
 }
 
+/**
+ * Reenvía por WhatsApp el mensaje de cotización con el estado actual de BD (tras edición).
+ * Solo `sent` o `approved`. Los borradores usan POST …/send.
+ *
+ * @param {{ displayCurrency?: string }} [waOpts] p. ej. `{ displayCurrency: 'VES' }` para alinear el texto WA al panel en bolívares.
+ * @throws {Error} e.code BAD_REQUEST | NOT_FOUND | CONFLICT | SERVICE_UNAVAILABLE | WASENDER_ERROR
+ */
+async function resendSentQuotationWhatsApp(presupuestoId, user, waOpts = {}) {
+  const pid = Number(presupuestoId);
+  if (!Number.isFinite(pid) || pid <= 0) {
+    const e = new Error("id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const { rows } = await pool.query(
+    `SELECT ip.*,
+       COALESCE(
+         json_agg(
+           json_build_object(
+             'name', p.name,
+             'cantidad', idp.cantidad,
+             'subtotal', idp.subtotal
+           )
+         ) FILTER (WHERE idp.id IS NOT NULL),
+         '[]'::json
+       ) AS items
+     FROM inventario_presupuesto ip
+     LEFT JOIN inventario_detallepresupuesto idp
+       ON idp.presupuesto_id = ip.id
+     LEFT JOIN products p
+       ON p.id = idp.producto_id
+     WHERE ip.id = $1
+     GROUP BY ip.id`,
+    [pid]
+  );
+  if (!rows.length) {
+    const e = new Error("not_found");
+    e.code = "NOT_FOUND";
+    throw e;
+  }
+  const ip = rows[0];
+  if (isDraftLike(ip.status)) {
+    const e = new Error(
+      "Para enviar un borrador usá POST /api/inbox/quotations/:id/send."
+    );
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const st = String(ip.status || "").toLowerCase();
+  if (st !== STATUS_SENT && st !== STATUS_APPROVED) {
+    const e = new Error(
+      `Solo se puede reenviar una cotización ya enviada (sent o approved). Estado actual: ${ip.status}.`
+    );
+    e.code = "CONFLICT";
+    throw e;
+  }
+  if (await isQuotationPaymentLocked(pid)) {
+    const e = new Error("Pago cerrado: no se puede reenviar la cotización por WhatsApp.");
+    e.code = "CONFLICT";
+    throw e;
+  }
+  if (ip.chat_id == null) {
+    const e = new Error("El presupuesto no tiene chat_id; no se puede enviar por WhatsApp.");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  let items = ip.items;
+  if (typeof items === "string") items = JSON.parse(items);
+  if (!Array.isArray(items)) items = [];
+  if (!items.length) {
+    const e = new Error("Presupuesto sin líneas.");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const reference = buildReference(ip.channel_id, ip.id);
+  let rateRow = null;
+  try {
+    rateRow = await getTodayRate(1);
+  } catch (_e) {
+    rateRow = null;
+  }
+  const formatted = formatSendMessage(ip, reference, items, rateRow, waOpts);
+  const sentBy = String(user.userId != null ? user.userId : ip.created_by || "quotation-resend");
+  let outbound = formatted.waBody;
+  try {
+    const payMsg = formatPaymentMessage(formatted.paymentAnchorUsd, rateRow);
+    outbound = `${formatted.waBody}\n\n${payMsg}`;
+  } catch (payErr) {
+    logger.warn({ err: payErr }, "resendSentQuotationWhatsApp: sin bloque de pago Bs");
+  }
+  await sendChatMessage(ip.chat_id, outbound, sentBy, { skipThrottle: true });
+  await pool.query(
+    `UPDATE inventario_presupuesto SET updated_at = NOW() WHERE id = $1`,
+    [pid]
+  );
+  return { reference, status: String(ip.status || STATUS_SENT) };
+}
+
 /** Formatea un número en estilo venezolano: separador miles punto, decimales coma. */
 function moneyBs(n) {
   const fixed = Number(n).toFixed(2);
@@ -719,12 +820,44 @@ function moneyBs(n) {
   return `${intFmt},${decPart}`;
 }
 
+/** Misma fórmula que el panel de cotización (VES con Binance + BCV). */
+function vesAdjustedUsdForQuote(usd, binance, bcv) {
+  const b = Number(binance);
+  const c = Number(bcv);
+  const u = Number(usd);
+  if (!(c > 0) || !(b > 0) || !Number.isFinite(u)) return u;
+  return Math.round((u * b / c) * 100) / 100 - 0.04;
+}
+
+function bsFromUsdBinanceForQuote(usd, binance) {
+  const bin = Number(binance);
+  const u = Number(usd);
+  if (!(bin > 0) || !Number.isFinite(u)) return 0;
+  return Math.round(u * bin * 100) / 100;
+}
+
+function usdTieBreakFromBinanceBsForQuote(bs, binance) {
+  const bin = Number(binance);
+  const b = Number(bs);
+  if (!(bin > 0) || !Number.isFinite(b)) return 0;
+  return Math.round((b / bin) * 100) / 100;
+}
+
+/** Normaliza moneda de envío WA desde el body del API. */
+function normalizeWaDisplayCurrency(v) {
+  const s = String(v ?? "USD").trim().toUpperCase();
+  if (s === "VES" || s === "BS" || s === "VEF") return "VES";
+  return "USD";
+}
+
 /**
  * Genera el texto de WhatsApp para una cotización.
  * Formato profesional: encabezado, tabla de ítems alineada y resumen final.
  * @param {object|null} rateRow Fila de getTodayRate (Binance preferida para Bs de cotización).
+ * @param {{ displayCurrency?: 'VES'|'USD' }} [opts] displayCurrency VES = montos en Bs (BCV+Binance o Binance), alineado al panel.
+ * @returns {{ waBody: string, paymentAnchorUsd: number }} paymentAnchorUsd = total en USD de referencia para el bloque de pago Bs.
  */
-function formatSendMessage(row, reference, items, rateRow = null) {
+function formatSendMessage(row, reference, items, rateRow = null, opts = {}) {
   // Trunca nombres largos preservando la parte más informativa
   const shortName = (raw, maxLen = 40) => {
     const n = String(raw ?? "(producto)").trim();
@@ -756,20 +889,100 @@ function formatSendMessage(row, reference, items, rateRow = null) {
         ? ` (${fxLabel})`
         : "";
 
-  const lines = [];
+  const displayCurrency = normalizeWaDisplayCurrency(opts.displayCurrency ?? opts.display_currency);
+  const bin = rateRow ? Number(rateRow.binance_rate ?? 0) : 0;
+  const bcv = rateRow ? Number(rateRow.bcv_rate ?? 0) : 0;
+  const canVesFull =
+    displayCurrency === "VES" &&
+    iva <= 0.005 &&
+    rateRow &&
+    Number.isFinite(bin) &&
+    bin > 0 &&
+    Number.isFinite(bcv) &&
+    bcv > 0;
+  const canVesBinOnly =
+    displayCurrency === "VES" && iva <= 0.005 && rateRow && Number.isFinite(bin) && bin > 0 && !canVesFull;
 
-  // ── Encabezado ──────────────────────────────────────────────
-  lines.push(`🧾 *Cotización ${reference}*`);
-  if (row.cliente_nombre) {
-    lines.push(`👤 ${String(row.cliente_nombre).trim()}`);
+  const pushHeader = (lines) => {
+    lines.push(`🧾 *Cotización ${reference}*`);
+    if (row.cliente_nombre) {
+      lines.push(`👤 ${String(row.cliente_nombre).trim()}`);
+    }
+    lines.push("");
+  };
+
+  const pushObs = (lines) => {
+    const obsClean = cleanObservacionesForQuote(row.observaciones);
+    if (obsClean) lines.push("", `📝 ${obsClean}`);
+  };
+
+  if (canVesFull) {
+    const lines = [];
+    pushHeader(lines);
+    let totalVesUsd = 0;
+    for (const it of items) {
+      const name = shortName(it.name);
+      const cant = Number(it.cantidad ?? 1);
+      const sub = Number(it.subtotal ?? 0);
+      const unitUsd = cant > 0 ? sub / cant : 0;
+      const unitVes = vesAdjustedUsdForQuote(unitUsd, bin, bcv);
+      const lineVesUsd = cant * unitVes;
+      totalVesUsd += lineVesUsd;
+      const lineBs = Math.round(lineVesUsd * bcv * 100) / 100;
+      const unitBs = cant > 1 ? Math.round((lineBs / cant) * 100) / 100 : lineBs;
+      lines.push(`▸ *${name}*`);
+      if (cant > 1) {
+        lines.push(`   ${cant} u × Bs ${moneyBs(unitBs)} c/u → *Bs ${moneyBs(lineBs)}*`);
+      } else {
+        lines.push(`   *Bs ${moneyBs(lineBs)}*`);
+      }
+    }
+    lines.push("");
+    const totalBs = Math.round(totalVesUsd * bcv * 100) / 100;
+    lines.push(`*Total: Bs ${moneyBs(totalBs)}*`);
+    if (vence) lines.push(`Válida hasta: ${vence}`);
+    pushObs(lines);
+    return { waBody: lines.join("\n"), paymentAnchorUsd: totalVesUsd };
   }
-  lines.push("");
 
-  // ── Ítems ───────────────────────────────────────────────────
+  if (canVesBinOnly) {
+    const lines = [];
+    pushHeader(lines);
+    lines.push(
+      "_(Montos en bolívares al tipo Binance del día; el monto a consignar es el del bloque «Pago en Bolívares».)_",
+      ""
+    );
+    let totalBsBin = 0;
+    for (const it of items) {
+      const name = shortName(it.name);
+      const cant = Number(it.cantidad ?? 1);
+      const sub = Number(it.subtotal ?? 0);
+      const unitUsd = cant > 0 ? sub / cant : 0;
+      const lineBs = bsFromUsdBinanceForQuote(sub, bin);
+      totalBsBin += lineBs;
+      const unitBs = bsFromUsdBinanceForQuote(unitUsd, bin);
+      lines.push(`▸ *${name}*`);
+      if (cant > 1) {
+        lines.push(`   ${cant} u × Bs ${moneyBs(unitBs)} c/u → *Bs ${moneyBs(lineBs)}*`);
+      } else {
+        lines.push(`   *Bs ${moneyBs(lineBs)}*`);
+      }
+    }
+    lines.push("");
+    lines.push(`*Total (ref. Binance): Bs ${moneyBs(totalBsBin)}*`);
+    if (vence) lines.push(`Válida hasta: ${vence}`);
+    pushObs(lines);
+    return { waBody: lines.join("\n"), paymentAnchorUsd: Number(row.total ?? 0) };
+  }
+
+  const lines = [];
+  pushHeader(lines);
+
+  // ── Ítems (USD o VES sin tasas completas: misma vista catálogo USD) ──
   for (const it of items) {
     const name = shortName(it.name);
     const cant = Number(it.cantidad ?? 1);
-    const sub  = Number(it.subtotal ?? 0);
+    const sub = Number(it.subtotal ?? 0);
     const unit = cant > 0 ? sub / cant : 0;
     lines.push(`▸ *${name}*`);
     if (cant > 1) {
@@ -793,14 +1006,9 @@ function formatSendMessage(row, reference, items, rateRow = null) {
     lines.push(`*Total: $${money(row.total)}*`);
   }
   if (vence) lines.push(`Válida hasta: ${vence}`);
+  pushObs(lines);
 
-  // ── Observaciones (sin repetir datos de Pago Móvil del bloque automático) ──
-  const obsClean = cleanObservacionesForQuote(row.observaciones);
-  if (obsClean) {
-    lines.push("", `📝 ${obsClean}`);
-  }
-
-  return lines.join("\n");
+  return { waBody: lines.join("\n"), paymentAnchorUsd: Number(row.total ?? 0) };
 }
 
 /**
@@ -1570,10 +1778,44 @@ async function handleInboxQuotationRequest(req, res, url) {
       return true;
     }
 
+    const resendMatch = pathname.match(/^\/api\/inbox\/quotations\/(\d+)\/resend$/);
+    if (resendMatch && req.method === "POST") {
+      const presupuestoId = Number(resendMatch[1]);
+      let resendBody = {};
+      try {
+        resendBody = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const waDc = normalizeWaDisplayCurrency(
+        resendBody.display_currency ?? resendBody.displayCurrency
+      );
+      const out = await resendSentQuotationWhatsApp(presupuestoId, user, { displayCurrency: waDc });
+      writeJson(res, 200, {
+        ok:        true,
+        id:        presupuestoId,
+        reference: out.reference,
+        status:    out.status,
+        resent:    true,
+      });
+      return true;
+    }
+
     const sendMatch = pathname.match(/^\/api\/inbox\/quotations\/(\d+)\/send$/);
     if (sendMatch && req.method === "POST") {
       const presupuestoId = Number(sendMatch[1]);
-      const out = await sendDraftQuotationWhatsApp(presupuestoId, user);
+      let sendBody = {};
+      try {
+        sendBody = await parseJsonBody(req);
+      } catch (_e) {
+        writeJson(res, 400, { error: "invalid_json" });
+        return true;
+      }
+      const waDcSend = normalizeWaDisplayCurrency(
+        sendBody.display_currency ?? sendBody.displayCurrency
+      );
+      const out = await sendDraftQuotationWhatsApp(presupuestoId, user, { displayCurrency: waDcSend });
       writeJson(res, 200, {
         ok:     true,
         id:     presupuestoId,
@@ -1747,7 +1989,12 @@ async function handleInboxQuotationRequest(req, res, url) {
       let waSend = null;
       if (wantWaSend) {
         try {
-          const outWa = await sendDraftQuotationWhatsApp(presupuestoId, user);
+          const waDcCreate = normalizeWaDisplayCurrency(
+            body.display_currency ?? body.displayCurrency
+          );
+          const outWa = await sendDraftQuotationWhatsApp(presupuestoId, user, {
+            displayCurrency: waDcCreate,
+          });
           waSend = { ok: true, reference: outWa.reference, status: outWa.status };
         } catch (eWa) {
           const c = eWa && eWa.code ? String(eWa.code) : "SEND_FAILED";
@@ -1943,10 +2190,12 @@ async function handleInboxQuotationRequest(req, res, url) {
         }
       }
 
-      const previousTotal = Number(cur.total);
+      const prevNum = Number(cur.total);
+      const previousTotal = Number.isFinite(prevNum) ? prevNum : 0;
       const newTotal = lines.reduce((acc, L) => acc + L.subtotal, 0);
       const uidLog = user.userId != null ? Number(user.userId) : null;
       const itemsSnapshot = lines.map((L) => ({ ...L }));
+      const totalStr = (n) => (Number.isFinite(n) ? String(n) : "0");
 
       const client = await pool.connect();
       try {
@@ -1972,13 +2221,32 @@ async function handleInboxQuotationRequest(req, res, url) {
             [
               pid,
               Number.isFinite(uidLog) && uidLog > 0 ? uidLog : null,
-              String(previousTotal),
-              String(newTotal),
+              totalStr(previousTotal),
+              totalStr(newTotal),
               JSON.stringify(itemsSnapshot),
             ]
           );
         } catch (logErr) {
-          if (logErr && logErr.code !== "42P01") throw logErr;
+          if (logErr && logErr.code === "23503" && Number.isFinite(uidLog) && uidLog > 0) {
+            try {
+              await client.query(
+                `INSERT INTO quotation_edit_log (
+                   presupuesto_id, user_id, previous_total, new_total, items_snapshot
+                 ) VALUES ($1, NULL, $2::numeric, $3::numeric, $4::jsonb)`,
+                [pid, totalStr(previousTotal), totalStr(newTotal), JSON.stringify(itemsSnapshot)]
+              );
+            } catch (logErr2) {
+              logger.warn(
+                { err: logErr2, pid, code: logErr2 && logErr2.code },
+                "PATCH presupuesto/items: quotation_edit_log sin user_id también falló"
+              );
+            }
+          } else if (logErr && logErr.code !== "42P01") {
+            logger.warn(
+              { err: logErr, pid, code: logErr && logErr.code },
+              "PATCH presupuesto/items: quotation_edit_log no insertado (cotización sí actualizada)"
+            );
+          }
         }
         await client.query("COMMIT");
       } catch (e) {

@@ -8852,7 +8852,15 @@ function gracefulHttpShutdown(signal) {
   stopMlStockWatcher();
   stopAiResetWorker();
   stopAiResponderWorker();
-  server.close(() => process.exit(0));
+  server.close(() => {
+    pool
+      .end()
+      .then(() => process.exit(0))
+      .catch((e) => {
+        console.warn("[shutdown] pool.end:", e && e.message ? e.message : e);
+        process.exit(0);
+      });
+  });
 }
 
 process.on("SIGTERM", () => gracefulHttpShutdown("SIGTERM"));

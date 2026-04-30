@@ -60,6 +60,14 @@ const pool = new Pool({
   keepAlive: process.env.PG_POOL_KEEPALIVE === "0" ? false : true,
 });
 
+/** Sin listener, errores en clientes *idle* del pool pueden terminar en uncaughtException (p. ej. nodemon, PG reiniciado, TCP cortado). */
+pool.on("error", (err) => {
+  const msg = err && err.message ? err.message : String(err);
+  if (process.env.PG_POOL_LOG_IDLE_ERRORS === "1") {
+    console.warn("[pg pool] error en cliente idle (se descarta el cliente):", msg);
+  }
+});
+
 let initDone = null;
 
 async function ensureSchema() {

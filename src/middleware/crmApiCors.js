@@ -15,7 +15,8 @@ function parseOrigins() {
           .map((s) => s.trim())
           .filter(Boolean)
       : [];
-  const defaults = ["http://localhost:5173"];
+  // Next.js suele usar :3000; Vite :5173 — ambos en dev local sin depender solo de env.
+  const defaults = ["http://localhost:5173", "http://localhost:3000"];
   return [...new Set([...defaults, ...fromEnv])];
 }
 

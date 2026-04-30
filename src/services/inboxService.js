@@ -764,6 +764,10 @@ async function fetchInboxFacets() {
 // Fallback de seguridad (evita datos eternamente viejos si falla algún hook).
 // Polling del front (`/api/bandeja/counts`) + consulta principal muy pesada: TTL generoso.
 const _countsCache = new Map();
+/** Misma clave que caché: una sola ejecución DB si varios clientes piden counts a la vez (cold miss). */
+const _countsInflight = new Map();
+/** Se incrementa en invalidación para no rellenar caché con resultados obsoletos si el fetch ya estaba en curso. */
+let _countsEpoch = 0;
 const _countsTtlParsed = Number(process.env.INBOX_COUNTS_CACHE_MAX_AGE_MS);
 const COUNTS_CACHE_MAX_AGE_MS =
   Number.isFinite(_countsTtlParsed) && _countsTtlParsed >= 30_000
@@ -788,6 +792,8 @@ function _setCachedCounts(key, data) {
  */
 function invalidateInboxCountsCache() {
   _countsCache.clear();
+  _countsInflight.clear();
+  _countsEpoch += 1;
 }
 
 /**
@@ -840,16 +846,32 @@ async function getInboxCounts(opts = {}) {
     const hit = _getCachedCounts(cacheKey);
     if (hit) return hit;
 
-    const _origResult = await _runInboxCounts({
-      srcParts,
-      search,
-      stageList,
-      result,
-      pipelineDefault,
-      skipFacets,
-    });
-    _setCachedCounts(cacheKey, _origResult);
-    return _origResult;
+    let inflight = _countsInflight.get(cacheKey);
+    if (inflight) return await inflight;
+
+    const epochAtStart = _countsEpoch;
+    inflight = (async () => {
+      try {
+        const data = await _runInboxCounts({
+          srcParts,
+          search,
+          stageList,
+          result,
+          pipelineDefault,
+          skipFacets,
+        });
+        if (epochAtStart === _countsEpoch) {
+          _setCachedCounts(cacheKey, data);
+        }
+        return data;
+      } finally {
+        if (_countsInflight.get(cacheKey) === inflight) {
+          _countsInflight.delete(cacheKey);
+        }
+      }
+    })();
+    _countsInflight.set(cacheKey, inflight);
+    return await inflight;
   }
 
   return _runInboxCounts({ srcParts, search, stageList, result, pipelineDefault, skipFacets });

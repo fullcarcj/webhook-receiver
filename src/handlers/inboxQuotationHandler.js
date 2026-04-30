@@ -6,6 +6,8 @@
  * POST /api/inbox/:chatId/quotations/from-ml-order — borrador CH-3 desde orden ML vinculada (tasas con getTodayRate).
  *
  * POST /api/inbox/quotations — ítems:
+ *   - Opcional `send_whatsapp: true`: tras crear el borrador, envía el mismo WA que POST …/send (evita carrera guardar→enviar en el front).
+ *   - Respuesta 201 incluye `wa_send`: `{ ok, reference, status }` o `{ ok:false, code, message }` si el envío falla (la cotización queda en `draft`).
  *   - `precio_unitario` (USD) cuando la UI cotiza en dólares.
  *   - `precio_unitario_bs` (Bs por unidad) cuando la UI cotiza en bolívares; se convierte a USD con `binance_rate` de getTodayRate(company_id).
  *   - Opcional `body.company_id` para la tasa (default 1).
@@ -137,6 +139,59 @@ function resolveQuotationLineUnitUsd(it, rateRow) {
     return { error: "precio_unitario inválido en items" };
   }
   return { pu };
+}
+
+/**
+ * Resuelve automáticamente el `sales_order_id` más adecuado para una cotización nueva.
+ *
+ * Criterios (en cascada):
+ *  1. Si `chatId` está en `sales_orders.conversation_id` → esa orden (más reciente, no cancelada, sin cotización activa).
+ *  2. Si `customerId` tiene exactamente UNA orden activa sin cotización → esa orden.
+ *  3. Si hay más de una orden ambigua → no se vincula (retorna null para evitar asignación errónea).
+ *
+ * @param {number|null} chatId
+ * @param {number}      customerId
+ * @returns {Promise<number|null>} sales_orders.id o null
+ */
+async function resolveSalesOrderIdFromChat(chatId, customerId) {
+  // ── Paso 1: match exacto por conversation_id (chat vinculado a la orden) ──
+  if (chatId != null && Number.isFinite(chatId) && chatId > 0) {
+    const { rows } = await pool.query(
+      `SELECT so.id
+       FROM sales_orders so
+       WHERE so.conversation_id = $1
+         AND so.status NOT IN ('cancelled', 'invalid', 'refunded')
+         AND NOT EXISTS (
+           SELECT 1 FROM inventario_presupuesto ip
+           WHERE ip.sales_order_id = so.id
+             AND ip.status NOT IN ('converted', 'expired')
+         )
+       ORDER BY so.created_at DESC NULLS LAST, so.id DESC
+       LIMIT 1`,
+      [chatId]
+    );
+    if (rows.length) return Number(rows[0].id);
+  }
+
+  // ── Paso 2: único pedido activo del cliente sin cotización ─────────────────
+  const { rows: byCustomer } = await pool.query(
+    `SELECT so.id
+     FROM sales_orders so
+     WHERE so.customer_id = $1
+       AND so.status NOT IN ('cancelled', 'invalid', 'refunded')
+       AND NOT EXISTS (
+         SELECT 1 FROM inventario_presupuesto ip
+         WHERE ip.sales_order_id = so.id
+           AND ip.status NOT IN ('converted', 'expired')
+       )
+     ORDER BY so.created_at DESC NULLS LAST, so.id DESC
+     LIMIT 2`,
+    [customerId]
+  );
+  // Solo vincula si hay EXACTAMENTE una (evita asignación ambigua)
+  if (byCustomer.length === 1) return Number(byCustomer[0].id);
+
+  return null;
 }
 
 /** Expresión SQL alineada con buildReference(channel_id, id). */
@@ -532,6 +587,17 @@ function paymentBsRateAndAmount(totalUsd, rateRow) {
   return { rate, totalBs };
 }
 
+/** Monto en Bs tal como viene de `numeric::text` en PG (p. ej. 23823.56 o 23.823,56). */
+function parsePgAmountBsText(v) {
+  if (v == null) return NaN;
+  const t = String(v).trim();
+  if (!t) return NaN;
+  if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(t)) {
+    return Number(t.replace(/\./g, "").replace(",", "."));
+  }
+  return Number(t.replace(",", "."));
+}
+
 function formatPaymentMessage(totalUsd, rateRow) {
   const rateDate = rateRow ? String(rateRow.rate_date ?? "").slice(0, 10) : null;
   const { rate: usedRate, totalBs } = paymentBsRateAndAmount(totalUsd, rateRow);
@@ -557,6 +623,92 @@ function formatPaymentMessage(totalUsd, rateRow) {
   lines.push("");
   lines.push("Espero el comprobante de pago.");
   return lines.join("\n");
+}
+
+/**
+ * Carga borrador + líneas, envía un solo mensaje WA (cotización + pago Bs) y marca `sent`.
+ * Usado por POST …/send y por POST /api/inbox/quotations con `send_whatsapp: true`.
+ *
+ * @throws {Error} e.code BAD_REQUEST | NOT_FOUND | SERVICE_UNAVAILABLE | WASENDER_ERROR
+ */
+async function sendDraftQuotationWhatsApp(presupuestoId, user) {
+  const pid = Number(presupuestoId);
+  if (!Number.isFinite(pid) || pid <= 0) {
+    const e = new Error("id inválido");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const { rows } = await pool.query(
+    `SELECT ip.*,
+       COALESCE(
+         json_agg(
+           json_build_object(
+             'name', p.name,
+             'cantidad', idp.cantidad,
+             'subtotal', idp.subtotal
+           )
+         ) FILTER (WHERE idp.id IS NOT NULL),
+         '[]'::json
+       ) AS items
+     FROM inventario_presupuesto ip
+     LEFT JOIN inventario_detallepresupuesto idp
+       ON idp.presupuesto_id = ip.id
+     LEFT JOIN products p
+       ON p.id = idp.producto_id
+     WHERE ip.id = $1
+     GROUP BY ip.id`,
+    [pid]
+  );
+  if (!rows.length) {
+    const e = new Error("not_found");
+    e.code = "NOT_FOUND";
+    throw e;
+  }
+  const ip = rows[0];
+  if (!isDraftLike(ip.status)) {
+    const e = new Error(`Solo se puede enviar un presupuesto en estado borrador (actual: ${ip.status}).`);
+    e.code = "CONFLICT";
+    throw e;
+  }
+  if (ip.chat_id == null) {
+    const e = new Error("El presupuesto no tiene chat_id; no se puede enviar por WhatsApp.");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  let items = ip.items;
+  if (typeof items === "string") items = JSON.parse(items);
+  if (!Array.isArray(items)) items = [];
+  if (!items.length) {
+    const e = new Error("Presupuesto sin líneas.");
+    e.code = "BAD_REQUEST";
+    throw e;
+  }
+  const reference = buildReference(ip.channel_id, ip.id);
+  let rateRow = null;
+  try {
+    rateRow = await getTodayRate(1);
+  } catch (_e) {
+    rateRow = null;
+  }
+  const msg = formatSendMessage(ip, reference, items, rateRow);
+  const sentBy = String(user.userId != null ? user.userId : ip.created_by || "quotation-send");
+  let outbound = msg;
+  try {
+    const totalUsd = Number(ip.total ?? 0);
+    const payMsg = formatPaymentMessage(totalUsd, rateRow);
+    outbound = `${msg}\n\n${payMsg}`;
+  } catch (payErr) {
+    logger.warn({ err: payErr }, "sendDraftQuotationWhatsApp: sin bloque de pago Bs");
+  }
+  await sendChatMessage(ip.chat_id, outbound, sentBy, { skipThrottle: true });
+  await pool.query(
+    `UPDATE inventario_presupuesto SET
+       status = $2,
+       updated_at = NOW()
+     WHERE id = $1`,
+    [pid, STATUS_SENT]
+  );
+  return { reference, status: STATUS_SENT };
 }
 
 /** Formatea un número en estilo venezolano: separador miles punto, decimales coma. */
@@ -1421,87 +1573,12 @@ async function handleInboxQuotationRequest(req, res, url) {
     const sendMatch = pathname.match(/^\/api\/inbox\/quotations\/(\d+)\/send$/);
     if (sendMatch && req.method === "POST") {
       const presupuestoId = Number(sendMatch[1]);
-      const { rows } = await pool.query(
-        `SELECT ip.*,
-           COALESCE(
-             json_agg(
-               json_build_object(
-                 'name', p.name,
-                 'cantidad', idp.cantidad,
-                 'subtotal', idp.subtotal
-               )
-             ) FILTER (WHERE idp.id IS NOT NULL),
-             '[]'::json
-           ) AS items
-         FROM inventario_presupuesto ip
-         LEFT JOIN inventario_detallepresupuesto idp
-           ON idp.presupuesto_id = ip.id
-         LEFT JOIN products p
-           ON p.id = idp.producto_id
-         WHERE ip.id = $1
-         GROUP BY ip.id`,
-        [presupuestoId]
-      );
-      if (!rows.length) {
-        writeJson(res, 404, { error: "not_found" });
-        return true;
-      }
-      const ip = rows[0];
-      if (!isDraftLike(ip.status)) {
-        writeJson(res, 409, {
-          error: "conflict",
-          message: "Solo se puede enviar un presupuesto en estado borrador.",
-          status: ip.status,
-        });
-        return true;
-      }
-      if (ip.chat_id == null) {
-        writeJson(res, 400, {
-          error: "bad_request",
-          message: "El presupuesto no tiene chat_id; no se puede enviar por WhatsApp.",
-        });
-        return true;
-      }
-      let items = ip.items;
-      if (typeof items === "string") items = JSON.parse(items);
-      if (!Array.isArray(items)) items = [];
-      if (!items.length) {
-        writeJson(res, 400, { error: "bad_request", message: "Presupuesto sin líneas." });
-        return true;
-      }
-      const reference = buildReference(ip.channel_id, ip.id);
-      let rateRow = null;
-      try {
-        rateRow = await getTodayRate(1);
-      } catch (_e) {
-        rateRow = null;
-      }
-      const msg = formatSendMessage(ip, reference, items, rateRow);
-      const sentBy = String(user.userId != null ? user.userId : ip.created_by || "quotation-send");
-
-      // Un solo mensaje WA: cotización + pago en Bs (evita duplicar datos de Pago Móvil en dos burbujas)
-      let outbound = msg;
-      try {
-        const totalUsd = Number(ip.total ?? 0);
-        const payMsg   = formatPaymentMessage(totalUsd, rateRow);
-        outbound = `${msg}\n\n${payMsg}`;
-      } catch (payErr) {
-        logger.warn({ err: payErr }, "No se pudo anexar bloque de pago en Bs; se envía solo la cotización");
-      }
-      await sendChatMessage(ip.chat_id, outbound, sentBy, { skipThrottle: true });
-
-      await pool.query(
-        `UPDATE inventario_presupuesto SET
-           status = $2,
-           updated_at = NOW()
-         WHERE id = $1`,
-        [presupuestoId, STATUS_SENT]
-      );
+      const out = await sendDraftQuotationWhatsApp(presupuestoId, user);
       writeJson(res, 200, {
-        ok: true,
-        id: presupuestoId,
-        reference,
-        status: STATUS_SENT,
+        ok:     true,
+        id:     presupuestoId,
+        reference: out.reference,
+        status: out.status,
       });
       return true;
     }
@@ -1610,6 +1687,21 @@ async function handleInboxQuotationRequest(req, res, url) {
 
       const total = lines.reduce((acc, L) => acc + L.subtotal, 0);
 
+      // ── Resolución de sales_order_id ─────────────────────────────────────────
+      // Prioridad 1: el frontend lo envía explícitamente (override determinista)
+      // Prioridad 2: resolución automática por chat + customer (Opción A)
+      let salesOrderId = null;
+      const soIdFromBody = body.sales_order_id != null ? Number(body.sales_order_id) : NaN;
+      if (Number.isFinite(soIdFromBody) && soIdFromBody > 0) {
+        salesOrderId = soIdFromBody;
+      } else {
+        try {
+          salesOrderId = await resolveSalesOrderIdFromChat(chatId, clienteId);
+        } catch (_resolveErr) {
+          salesOrderId = null; // resolución opcional: no bloquea la cotización
+        }
+      }
+
       const client = await pool.connect();
       let presupuestoId;
       try {
@@ -1622,6 +1714,7 @@ async function handleInboxQuotationRequest(req, res, url) {
           createdBy,
           chatId,
           channelId,
+          salesOrderId,
           lines,
         });
         await client.query("COMMIT");
@@ -1641,15 +1734,36 @@ async function handleInboxQuotationRequest(req, res, url) {
       );
       const headRes = await pool.query(
         `SELECT id, fecha_creacion, fecha_vencimiento, total, status,
-           cliente_id, chat_id, channel_id, created_by, observaciones
+           cliente_id, chat_id, sales_order_id, channel_id, created_by, observaciones
          FROM inventario_presupuesto WHERE id = $1`,
         [presupuestoId]
       );
       const header = headRes.rows[0];
       const reference = buildReference(header.channel_id, presupuestoId);
+      const wantWaSend =
+        body.send_whatsapp === true ||
+        body.send_whatsapp === 1 ||
+        String(body.send_whatsapp || "").toLowerCase() === "true";
+      let waSend = null;
+      if (wantWaSend) {
+        try {
+          const outWa = await sendDraftQuotationWhatsApp(presupuestoId, user);
+          waSend = { ok: true, reference: outWa.reference, status: outWa.status };
+        } catch (eWa) {
+          const c = eWa && eWa.code ? String(eWa.code) : "SEND_FAILED";
+          waSend = {
+            ok:     false,
+            code:   c,
+            message: eWa && eWa.message ? String(eWa.message) : "Error al enviar por WhatsApp.",
+          };
+          if (eWa && eWa.httpStatus != null) waSend.http_status = eWa.httpStatus;
+        }
+      }
       writeJson(res, 201, {
         presupuesto: { ...header, reference },
         items: det.rows,
+        resolved_sales_order_id: salesOrderId,
+        wa_send: waSend,
       });
       return true;
     }
@@ -1903,7 +2017,7 @@ async function handleInboxQuotationRequest(req, res, url) {
     // ─── POST /api/inbox/quotations/presupuesto/:id/link-bank-statement ─────────
     // Conciliación manual DIRECTA: bank_statements → verificar monto → MATCHED.
     // NO pasa por payment_attempts. La única condición es: BS en UNMATCHED/SUGGESTED
-    // + monto dentro de tolerancia vs. total de la cotización en Bs.
+    // + monto dentro de tolerancia vs. total de la cotización **en Bs** (total en BD = USD → BCV vía getTodayRate).
     const presupLinkBsMatch = pathname.match(/^\/api\/inbox\/quotations\/presupuesto\/(\d+)\/link-bank-statement$/);
     if (presupLinkBsMatch && req.method === "POST") {
       const pid = Number(presupLinkBsMatch[1]);
@@ -1960,12 +2074,24 @@ async function handleInboxQuotationRequest(req, res, url) {
         return true;
       }
 
-      const cotTotalBs = cot.total != null && String(cot.total).trim() !== "" ? Number(cot.total) : NaN;
-      const bsAmt = bsL.amount != null && String(bsL.amount).trim() !== "" ? Number(String(bsL.amount).replace(",", ".")) : NaN;
-      if (!Number.isFinite(cotTotalBs) || cotTotalBs <= 0) {
-        writeJson(res, 400, { error: "bad_request", message: "La cotización no tiene total en Bs definido" });
+      const cotTotalUsd =
+        cot.total != null && String(cot.total).trim() !== ""
+          ? Number(String(cot.total).replace(",", "."))
+          : NaN;
+      if (!Number.isFinite(cotTotalUsd) || cotTotalUsd <= 0) {
+        writeJson(res, 400, { error: "bad_request", message: "La cotización no tiene total en USD válido" });
         return true;
       }
+      const rateRowLbs = await getTodayRate(1).catch(() => null);
+      const { totalBs: cotTotalBs, rate: rateUsedBs } = paymentBsRateAndAmount(cotTotalUsd, rateRowLbs);
+      if (cotTotalBs == null || !Number.isFinite(cotTotalBs) || !(rateUsedBs > 0)) {
+        writeJson(res, 503, {
+          error:   "rate_unavailable",
+          message: "No hay tasa BCV/activa para convertir el total de la cotización (USD) a Bs y compararlo con el extracto.",
+        });
+        return true;
+      }
+      const bsAmt = parsePgAmountBsText(bsL.amount);
       if (!Number.isFinite(bsAmt)) {
         writeJson(res, 400, { error: "bad_request", message: "No se pudo leer el monto del extracto" });
         return true;
@@ -1976,10 +2102,11 @@ async function handleInboxQuotationRequest(req, res, url) {
         writeJson(res, 409, {
           error: "amount_mismatch",
           message: `Monto del extracto y de la cotización fuera de tolerancia (±${tol} Bs.).`,
-          quotation_bs: cotTotalBs,
-          statement_bs: bsAmt,
-          diff_bs: diff,
-          tolerance_bs: tol,
+          quotation_total_usd: cotTotalUsd,
+          quotation_bs:        cotTotalBs,
+          statement_bs:        bsAmt,
+          diff_bs:             diff,
+          tolerance_bs:        tol,
         });
         return true;
       }
@@ -2010,11 +2137,12 @@ async function handleInboxQuotationRequest(req, res, url) {
         ok: true,
         quotation_id: pid,
         bank_statement_id: bsId,
-        quotation_bs: cotTotalBs,
-        statement_bs: bsAmt,
-        diff_bs: diff,
-        tolerance_bs: tol,
-        status: "matched",
+        quotation_total_usd: cotTotalUsd,
+        quotation_bs:        cotTotalBs,
+        statement_bs:        bsAmt,
+        diff_bs:             diff,
+        tolerance_bs:        tol,
+        status:                "matched",
       });
       return true;
     }
@@ -2162,6 +2290,63 @@ async function handleInboxQuotationRequest(req, res, url) {
         delivery_usd: deliveryUsd,
         presupuesto: headRows[0],
         lines: detRows,
+      });
+      return true;
+    }
+
+    // ─── PATCH /api/inbox/quotations/presupuesto/:id/link-sales-order ────────────
+    // Vincula (o desvincula) una cotización existente a una sales_order.
+    // Body: { sales_order_id: number } — para desvincular enviar { sales_order_id: null }
+    const linkSoMatch = pathname.match(/^\/api\/inbox\/quotations\/presupuesto\/(\d+)\/link-sales-order$/);
+    if (linkSoMatch && req.method === "PATCH") {
+      const pid = Number(linkSoMatch[1]);
+      let bodyLs;
+      try { bodyLs = await parseJsonBody(req); } catch (_) {
+        writeJson(res, 400, { error: "invalid_json" }); return true;
+      }
+      const rawSoId = bodyLs.sales_order_id;
+      const newSoId =
+        rawSoId != null && rawSoId !== "" && rawSoId !== false
+          ? Number(rawSoId)
+          : null;
+      if (newSoId !== null && (!Number.isFinite(newSoId) || newSoId <= 0)) {
+        writeJson(res, 400, { error: "bad_request", message: "sales_order_id debe ser un entero positivo o null." });
+        return true;
+      }
+
+      const { rows: pRows } = await pool.query(
+        `SELECT id, status, sales_order_id FROM inventario_presupuesto WHERE id = $1`,
+        [pid]
+      );
+      if (!pRows.length) {
+        writeJson(res, 404, { error: "not_found", message: "Cotización no encontrada." });
+        return true;
+      }
+      const pRow = pRows[0];
+
+      // Verificar que la sales_order existe (si se está vinculando)
+      if (newSoId !== null) {
+        const { rows: soCheckRows } = await pool.query(
+          `SELECT id, status FROM sales_orders WHERE id = $1 LIMIT 1`,
+          [newSoId]
+        );
+        if (!soCheckRows.length) {
+          writeJson(res, 404, { error: "sales_order_not_found", message: `Pedido #${newSoId} no encontrado.` });
+          return true;
+        }
+      }
+
+      await pool.query(
+        `UPDATE inventario_presupuesto SET sales_order_id = $1, updated_at = NOW() WHERE id = $2`,
+        [newSoId, pid]
+      );
+
+      logger.info({ presupuesto_id: pid, old_so_id: pRow.sales_order_id, new_so_id: newSoId }, "link-sales-order actualizado");
+      writeJson(res, 200, {
+        ok: true,
+        presupuesto_id: pid,
+        old_sales_order_id: pRow.sales_order_id != null ? Number(pRow.sales_order_id) : null,
+        new_sales_order_id: newSoId,
       });
       return true;
     }
@@ -3427,6 +3612,10 @@ async function handleInboxQuotationRequest(req, res, url) {
     }
     if (err && err.code === "NOT_FOUND") {
       writeJson(res, 404, { error: "not_found" });
+      return true;
+    }
+    if (err && err.code === "CONFLICT") {
+      writeJson(res, 409, { error: "conflict", message: err.message });
       return true;
     }
     if (err && err.code === "SERVICE_UNAVAILABLE") {

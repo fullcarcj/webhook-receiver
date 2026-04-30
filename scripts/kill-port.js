@@ -16,14 +16,32 @@ if (!port) {
 }
 
 function getPidsWindows(p) {
+  // Preferir PowerShell: el estado es el enum Listen (independiente del idioma de netstat).
   try {
-    const out = execSync(
-      `netstat -ano | findstr :${p} | findstr LISTENING`,
-      { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] }
-    );
+    const ps =
+      "powershell -NoProfile -Command " +
+      `"Get-NetTCPConnection -LocalPort ${p} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique"`;
+    const out = execSync(ps, { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
     const pids = new Set();
     for (const line of out.split(/\r?\n/)) {
-      const m = line.trim().match(/\s+(\d+)$/);
+      const n = parseInt(String(line).trim(), 10);
+      if (n > 0) pids.add(n);
+    }
+    if (pids.size) return [...pids];
+  } catch {
+    /* seguir con netstat */
+  }
+  try {
+    const out = execSync(`netstat -ano | findstr :${p}`, {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"]
+    });
+    const pids = new Set();
+    for (const line of out.split(/\r?\n/)) {
+      const u = line.toUpperCase();
+      // netstat: LISTENING (EN) / ESCUCHANDO (ES). Si falla, PowerShell arriba ya resolvió.
+      if (!u.includes("LISTENING") && !u.includes("ESCUCHANDO")) continue;
+      const m = line.trim().match(/\s+(\d+)\s*$/);
       if (m) pids.add(Number(m[1]));
     }
     return [...pids];

@@ -1327,9 +1327,71 @@ async function listSalesOrders({
              cust.primary_ml_buyer_id AS customer_primary_ml_buyer_id,
              (${lifecycleStageExpr}) AS lifecycle_stage,
              (${waitingBuyerExpr}) AS waiting_buyer_feedback,
-             -- Preview de ítems (máx 3):
-             --   ML raw_json (inmediato desde webhook) > sales_order_items (ERP omnichannel) > sale_lines (POS)
+             -- Presupuesto activo para esta fila: FK a la venta o mismo chat CRM (conversation_id),
+             -- priorizando más líneas (cotización enviada suele ser la completa) y status sent sobre draft.
+             -- Evita que un borrador reciente con sales_order_id opaque una COT enviada sin FK aún.
+             -- Preview de ítems (máx 3 salvo cotización):
+             --   Cotización activa vinculada (todas las líneas, alineado con bandeja) >
+             --   ML raw_json (inmediato desde webhook; máx 3) > sales_order_items (ERP) > sale_lines (POS)
              CASE
+               -- Pedido con COT activa: no usar solo ML raw_json (suele ser 1 línea pack / qty distinta a la COT).
+               WHEN vu.source_table = 'sales_orders'
+                AND EXISTS (
+                  SELECT 1 FROM inventario_presupuesto ipx
+                  WHERE ipx.status NOT IN ('converted', 'expired')
+                    AND (
+                      ipx.sales_order_id = vu.source_id
+                      OR (
+                        so.conversation_id IS NOT NULL
+                        AND BTRIM(so.conversation_id::text) <> ''
+                        AND ipx.chat_id IS NOT NULL
+                        AND ipx.chat_id::text = BTRIM(so.conversation_id::text)
+                      )
+                    )
+                  LIMIT 1
+                )
+               THEN (
+                 SELECT json_agg(
+                   json_build_object(
+                     'sku', COALESCE(p2.sku, ''),
+                     'name', COALESCE(p2.name, ''),
+                     'qty', idp.cantidad,
+                     'unit_price_usd', idp.precio_unitario,
+                     'image_url', th.thumbnail
+                   ) ORDER BY idp.id
+                 )
+                 FROM inventario_detallepresupuesto idp
+                 INNER JOIN (
+                   SELECT ip.id
+                   FROM inventario_presupuesto ip
+                   WHERE ip.status NOT IN ('converted', 'expired')
+                     AND (
+                       ip.sales_order_id = vu.source_id
+                       OR (
+                         so.conversation_id IS NOT NULL
+                         AND BTRIM(so.conversation_id::text) <> ''
+                         AND ip.chat_id IS NOT NULL
+                         AND ip.chat_id::text = BTRIM(so.conversation_id::text)
+                       )
+                     )
+                   ORDER BY
+                     (SELECT COUNT(*)::int FROM inventario_detallepresupuesto d WHERE d.presupuesto_id = ip.id) DESC,
+                     (CASE WHEN lower(COALESCE(ip.status::text, '')) = 'sent' THEN 0 ELSE 1 END) ASC,
+                     (CASE WHEN ip.sales_order_id IS NOT NULL AND ip.sales_order_id = vu.source_id THEN 0 ELSE 1 END) ASC,
+                     ip.fecha_creacion DESC NULLS LAST,
+                     ip.id DESC
+                   LIMIT 1
+                 ) ip_latest ON ip_latest.id = idp.presupuesto_id
+                 LEFT JOIN products p2 ON p2.id = idp.producto_id
+                 LEFT JOIN LATERAL (
+                   SELECT mll2.thumbnail
+                   FROM ml_publications mpub2
+                   INNER JOIN ml_listings mll2 ON mll2.item_id = mpub2.ml_item_id
+                   WHERE p2.id IS NOT NULL AND mpub2.product_id = p2.id
+                   ORDER BY mpub2.id ASC NULLS LAST, mll2.item_id
+                   LIMIT 1
+                 ) th ON true
+               )
                -- ML: extraer ítems directamente del raw_json (misma técnica que linkable-orders)
                WHEN vu.source_table = 'sales_orders' AND mo.raw_json IS NOT NULL
                THEN (
@@ -1371,13 +1433,19 @@ async function listSalesOrders({
                    json_build_object(
                      'sku', soi.sku, 'name', COALESCE(p.name, soi.sku),
                      'qty', soi.quantity, 'unit_price_usd', soi.unit_price_usd,
-                     'image_url', mll.thumbnail
+                     'image_url', th.thumbnail
                    ) ORDER BY soi.id
                  )
                  FROM (SELECT * FROM sales_order_items WHERE sales_order_id = vu.source_id ORDER BY id LIMIT 3) soi
                  LEFT JOIN products p ON p.sku = soi.sku
-                 LEFT JOIN ml_publications mpub ON mpub.product_id = p.id
-                 LEFT JOIN ml_listings mll ON mll.item_id = mpub.ml_item_id
+                 LEFT JOIN LATERAL (
+                   SELECT mll.thumbnail
+                   FROM ml_publications mpub
+                   INNER JOIN ml_listings mll ON mll.item_id = mpub.ml_item_id
+                   WHERE p.id IS NOT NULL AND mpub.product_id = p.id
+                   ORDER BY mpub.id ASC NULLS LAST, mll.item_id
+                   LIMIT 1
+                 ) th ON true
                )
                -- POS mostrador: sale_lines
                WHEN vu.source_table = 'sales'
@@ -1394,16 +1462,16 @@ async function listSalesOrders({
                )
                ELSE NULL
              END AS items_preview_json,
-             -- Cotización activa vinculada (solo sales_orders)
+             -- Cotización activa (solo sales_orders): misma resolución que items_preview_json (chat + prioridad).
              CASE
                WHEN vu.source_table = 'sales_orders'
                THEN (
                  SELECT json_build_object(
-                   'id', ip.id,
-                   'total', ip.total,
-                   'status', ip.status,
+                   'id', win.id,
+                   'total', win.total,
+                   'status', win.status,
                    'items_count', (
-                     SELECT COUNT(*)::int FROM inventario_detallepresupuesto WHERE presupuesto_id = ip.id
+                     SELECT COUNT(*)::int FROM inventario_detallepresupuesto WHERE presupuesto_id = win.id
                    ),
                    'items_preview', (
                      SELECT json_agg(
@@ -1412,23 +1480,43 @@ async function listSalesOrders({
                          'name', COALESCE(p2.name, ''),
                          'qty', idp.cantidad,
                          'unit_price_usd', idp.precio_unitario,
-                         'image_url', mll2.thumbnail
+                         'image_url', th.thumbnail
                        ) ORDER BY idp.id
                      )
-                     FROM (
-                       SELECT * FROM inventario_detallepresupuesto
-                       WHERE presupuesto_id = ip.id ORDER BY id LIMIT 3
-                     ) idp
+                     FROM inventario_detallepresupuesto idp
                      LEFT JOIN products p2 ON p2.id = idp.producto_id
-                     LEFT JOIN ml_publications mpub2 ON mpub2.product_id = p2.id
-                     LEFT JOIN ml_listings mll2 ON mll2.item_id = mpub2.ml_item_id
+                     LEFT JOIN LATERAL (
+                       SELECT mll2.thumbnail
+                       FROM ml_publications mpub2
+                       INNER JOIN ml_listings mll2 ON mll2.item_id = mpub2.ml_item_id
+                       WHERE p2.id IS NOT NULL AND mpub2.product_id = p2.id
+                       ORDER BY mpub2.id ASC NULLS LAST, mll2.item_id
+                       LIMIT 1
+                     ) th ON true
+                     WHERE idp.presupuesto_id = win.id
                    )
                  )
-                 FROM inventario_presupuesto ip
-                 WHERE ip.sales_order_id = vu.source_id
-                   AND ip.status NOT IN ('converted', 'expired')
-                 ORDER BY ip.fecha_creacion DESC
-                 LIMIT 1
+                 FROM (
+                   SELECT ip.id, ip.total, ip.status
+                   FROM inventario_presupuesto ip
+                   WHERE ip.status NOT IN ('converted', 'expired')
+                     AND (
+                       ip.sales_order_id = vu.source_id
+                       OR (
+                         so.conversation_id IS NOT NULL
+                         AND BTRIM(so.conversation_id::text) <> ''
+                         AND ip.chat_id IS NOT NULL
+                         AND ip.chat_id::text = BTRIM(so.conversation_id::text)
+                       )
+                     )
+                   ORDER BY
+                     (SELECT COUNT(*)::int FROM inventario_detallepresupuesto d WHERE d.presupuesto_id = ip.id) DESC,
+                     (CASE WHEN lower(COALESCE(ip.status::text, '')) = 'sent' THEN 0 ELSE 1 END) ASC,
+                     (CASE WHEN ip.sales_order_id IS NOT NULL AND ip.sales_order_id = vu.source_id THEN 0 ELSE 1 END) ASC,
+                     ip.fecha_creacion DESC NULLS LAST,
+                     ip.id DESC
+                   LIMIT 1
+                 ) win
                )
                ELSE NULL
              END AS quote_preview_json,

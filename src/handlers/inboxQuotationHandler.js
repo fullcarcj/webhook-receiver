@@ -3238,7 +3238,7 @@ async function handleInboxQuotationRequest(req, res, url) {
            * Conciliación manual ≠ automática: no exige `payment_attempts` (imagen WA).
            * Si el usuario elige un movimiento del extracto, el front debe poder confirmar
            * con `POST /api/inbox/quotations/presupuesto/{id}/link-bank-statement` (solo body.bank_statement_id).
-           * Monto cotización vs extracto: ±hint_tolerance_bs (default 100 Bs).
+           * Monto cotización vs extracto: ±hint_tolerance_bs (default 300 Bs).
            */
           allow_confirm_without_wa_receipt: true,
           manual_statement_only: {

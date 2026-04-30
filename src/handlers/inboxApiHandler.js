@@ -488,7 +488,7 @@ async function handleInboxApiRequest(req, res, url) {
      * POST /api/inbox/payment-attempts/:id/link-bank-statement
      * Vincula comprobante WA ↔ extracto: valida monto (±tolerancia Bs.), extracto no usado en otro PA,
      * crédito UNMATCHED/SUGGESTED. Sin validaciones extra post-vínculo (cotización/ML/excepciones).
-     * Tolerancia: MANUAL_BANK_LINK_TOLERANCE_BS o INBOX_PAYMENT_HINT_TOLERANCE_BS; default 100.
+     * Tolerancia: MANUAL_BANK_LINK_TOLERANCE_BS o INBOX_PAYMENT_HINT_TOLERANCE_BS; default 300.
      * Body: { bank_statement_id: number, chat_id?: number } (chat_id valida pertenencia).
      */
     const paBankLink = normInboxPath.match(/^\/api\/inbox\/payment-attempts\/(\d+)\/link-bank-statement$/);

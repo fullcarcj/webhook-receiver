@@ -12,7 +12,7 @@ const { getTodayRate } = require("./currencyService");
 const DEFAULT_COMPANY_ID = 1;
 
 /** Mínimo en Bs al comparar comprobante / extracto Banesco / total cotización (redondeos distintos). */
-const MIN_QUOTE_PAYMENT_TOLERANCE_BS = 100;
+const MIN_QUOTE_PAYMENT_TOLERANCE_BS = 300;
 
 /** Evita consultar `information_schema` en cada cotización del listado inbox. */
 let _allocationTableExistsCache = null;

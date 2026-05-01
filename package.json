@@ -113,6 +113,7 @@
     "db:delivery-zones-caracas": "node scripts/run-sql-file-pg.js sql/20260428_delivery_zones_caracas.sql",
     "db:products-search-trgm": "node scripts/run-sql-file-pg.js sql/20260429_products_name_search_trgm.sql",
     "db:inbox-counts-perf": "node scripts/run-sql-file-pg.js sql/20260430_inbox_counts_perf_indexes.sql",
+    "db:quotation-matched-bank-statement": "node scripts/run-sql-file-pg.js sql/20260501_inventario_presupuesto_matched_bank_statement.sql",
     "db:quotation-sales-link": "node scripts/run-sql-file-pg.js sql/20260425_quotation_sales_order_link.sql",
     "db:wa-anti-spam": "node scripts/run-wa-anti-spam-migration.js",
     "db:kits-bundles": "node scripts/run-kits-bundles-migration.js",

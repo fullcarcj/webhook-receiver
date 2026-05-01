@@ -727,17 +727,37 @@ async function fetchSalesOrderOmnichannelDetail(oid, opts) {
               COALESCE(so.records_cash, TRUE) AS records_cash,
               so.ml_user_id,
               so.fulfillment_type::text AS fulfillment_type,
-              rl.bank_statement_id AS reconciled_statement_id
+              COALESCE(
+                (
+                  SELECT r.bank_statement_id
+                  FROM reconciliation_log r
+                  WHERE r.order_id = so.id
+                    AND r.bank_statement_id IS NOT NULL
+                  ORDER BY r.created_at DESC, r.id DESC
+                  LIMIT 1
+                ),
+                (
+                  SELECT ip.matched_bank_statement_id
+                  FROM inventario_presupuesto ip
+                  WHERE ip.matched_bank_statement_id IS NOT NULL
+                    AND (
+                      ip.sales_order_id = so.id
+                      OR (
+                        so.conversation_id IS NOT NULL
+                        AND BTRIM(so.conversation_id::text) <> ''
+                        AND ip.chat_id IS NOT NULL
+                        AND ip.chat_id::text = BTRIM(so.conversation_id::text)
+                      )
+                    )
+                  ORDER BY
+                    (CASE WHEN ip.sales_order_id IS NOT NULL AND ip.sales_order_id = so.id THEN 0 ELSE 1 END),
+                    ip.matched_bank_statement_linked_at DESC NULLS LAST,
+                    ip.id DESC
+                  LIMIT 1
+                )
+              ) AS reconciled_statement_id
               ${lifecycleCols}
        FROM sales_orders so
-       LEFT JOIN LATERAL (
-         SELECT r.bank_statement_id
-         FROM reconciliation_log r
-         WHERE r.order_id = so.id
-           AND r.bank_statement_id IS NOT NULL
-         ORDER BY r.created_at DESC, r.id DESC
-         LIMIT 1
-       ) rl ON TRUE
        WHERE so.id = $1`,
       [oid]
     );
@@ -1256,7 +1276,31 @@ async function listSalesOrders({
              vu.order_total_amount, vu.loyalty_points_earned,
              vu.notes, vu.sold_by, vu.created_at,
              so.updated_at AS sales_order_updated_at,
-             vu.reconciled_statement_id,
+             COALESCE(
+               vu.reconciled_statement_id,
+               CASE
+                 WHEN vu.source_table = 'sales_orders' THEN (
+                   SELECT ip.matched_bank_statement_id::bigint
+                   FROM inventario_presupuesto ip
+                   WHERE ip.matched_bank_statement_id IS NOT NULL
+                     AND (
+                       ip.sales_order_id = vu.source_id
+                       OR (
+                         so.conversation_id IS NOT NULL
+                         AND BTRIM(so.conversation_id::text) <> ''
+                         AND ip.chat_id IS NOT NULL
+                         AND ip.chat_id::text = BTRIM(so.conversation_id::text)
+                       )
+                     )
+                   ORDER BY
+                     (CASE WHEN ip.sales_order_id IS NOT NULL AND ip.sales_order_id = vu.source_id THEN 0 ELSE 1 END),
+                     ip.matched_bank_statement_linked_at DESC NULLS LAST,
+                     ip.id DESC
+                   LIMIT 1
+                 )
+                 ELSE NULL::bigint
+               END
+             ) AS reconciled_statement_id,
              so.ml_user_id AS ml_user_id,
              ma.nickname AS ml_account_nickname,
              so.fulfillment_type::text AS fulfillment_type,
@@ -1266,36 +1310,73 @@ async function listSalesOrders({
              so.exchange_rate_bs_per_usd,
              so.payment_method::text AS payment_method,
              CASE
-               WHEN vu.source_table = 'sales_orders' THEN (
-                 SELECT jsonb_build_object(
-                   'source', r.source,
-                   'match_level', r.match_level,
-                   'resolved_by', r.resolved_by,
-                   'created_at', r.created_at,
-                   'bank_statement_id', r.bank_statement_id,
-                   'payment_attempt_id', r.payment_attempt_id,
-                   'bank', CASE WHEN bs.id IS NOT NULL THEN jsonb_build_object(
-                     'tx_date', bs.tx_date,
-                     'amount', bs.amount,
-                     'description', bs.description,
-                     'reference_number', bs.reference_number,
-                     'payment_type', bs.payment_type
-                   ) END,
-                   'payment_attempt', CASE WHEN pa.id IS NOT NULL THEN jsonb_build_object(
-                     'firebase_url', pa.firebase_url,
-                     'extracted_amount_bs', pa.extracted_amount_bs,
-                     'extracted_date', pa.extracted_date,
-                     'extracted_reference', pa.extracted_reference,
-                     'extracted_bank', pa.extracted_bank,
-                     'extracted_payment_type', pa.extracted_payment_type
-                   ) END
+               WHEN vu.source_table = 'sales_orders' THEN COALESCE(
+                 (
+                   SELECT jsonb_build_object(
+                     'source', r.source,
+                     'match_level', r.match_level,
+                     'resolved_by', r.resolved_by,
+                     'created_at', r.created_at,
+                     'bank_statement_id', r.bank_statement_id,
+                     'payment_attempt_id', r.payment_attempt_id,
+                     'bank', CASE WHEN bs.id IS NOT NULL THEN jsonb_build_object(
+                       'tx_date', bs.tx_date,
+                       'amount', bs.amount,
+                       'description', bs.description,
+                       'reference_number', bs.reference_number,
+                       'payment_type', bs.payment_type
+                     ) END,
+                     'payment_attempt', CASE WHEN pa.id IS NOT NULL THEN jsonb_build_object(
+                       'firebase_url', pa.firebase_url,
+                       'extracted_amount_bs', pa.extracted_amount_bs,
+                       'extracted_date', pa.extracted_date,
+                       'extracted_reference', pa.extracted_reference,
+                       'extracted_bank', pa.extracted_bank,
+                       'extracted_payment_type', pa.extracted_payment_type
+                     ) END
+                   )
+                   FROM reconciliation_log r
+                   LEFT JOIN bank_statements bs ON bs.id = r.bank_statement_id
+                   LEFT JOIN payment_attempts pa ON pa.id = r.payment_attempt_id
+                   WHERE r.order_id = vu.source_id
+                   ORDER BY r.created_at DESC, r.id DESC
+                   LIMIT 1
+                 ),
+                 (
+                   SELECT jsonb_build_object(
+                     'source', 'bank_statement',
+                     'match_level', 3,
+                     'resolved_by', 'manual_ui',
+                     'created_at', ip.matched_bank_statement_linked_at,
+                     'bank_statement_id', ip.matched_bank_statement_id,
+                     'payment_attempt_id', NULL,
+                     'bank', jsonb_build_object(
+                       'tx_date', bs.tx_date,
+                       'amount', bs.amount,
+                       'description', bs.description,
+                       'reference_number', bs.reference_number,
+                       'payment_type', bs.payment_type
+                     ),
+                     'payment_attempt', NULL::jsonb
+                   )
+                   FROM inventario_presupuesto ip
+                   INNER JOIN bank_statements bs ON bs.id = ip.matched_bank_statement_id
+                   WHERE ip.matched_bank_statement_id IS NOT NULL
+                     AND (
+                       ip.sales_order_id = vu.source_id
+                       OR (
+                         so.conversation_id IS NOT NULL
+                         AND BTRIM(so.conversation_id::text) <> ''
+                         AND ip.chat_id IS NOT NULL
+                         AND ip.chat_id::text = BTRIM(so.conversation_id::text)
+                       )
+                     )
+                   ORDER BY
+                     (CASE WHEN ip.sales_order_id IS NOT NULL AND ip.sales_order_id = vu.source_id THEN 0 ELSE 1 END),
+                     ip.matched_bank_statement_linked_at DESC NULLS LAST,
+                     ip.id DESC
+                   LIMIT 1
                  )
-                 FROM reconciliation_log r
-                 LEFT JOIN bank_statements bs ON bs.id = r.bank_statement_id
-                 LEFT JOIN payment_attempts pa ON pa.id = r.payment_attempt_id
-                 WHERE r.order_id = vu.source_id
-                 ORDER BY r.created_at DESC, r.id DESC
-                 LIMIT 1
                )
                ELSE NULL::jsonb
              END AS payment_reconciliation_json,

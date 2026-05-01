@@ -38,6 +38,7 @@ const {
 } = require("../utils/chatMlOrderReference");
 const { parseOrderItems, resolveProductSku } = require("./inboxMlOrderHandler");
 const { manualBankLinkToleranceBs: inboxPaymentHintToleranceBs } = require("../utils/manualBankLinkTolerance");
+const { quotationDisplayTotalBsFromLines } = require("../utils/quotationVesDisplayTotals");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -599,6 +600,215 @@ function parsePgAmountBsText(v) {
     return Number(t.replace(/\./g, "").replace(",", "."));
   }
   return Number(t.replace(",", "."));
+}
+
+/**
+ * Misma forma que `salesApiHandler` (POST pedidos link-bank-statement).
+ * Idempotente por par (order_id, bank_statement_id).
+ */
+async function insertReconciliationLogQuotationBankMatch(client, {
+  orderId,
+  bankStatementId,
+  amountOrderBs,
+  amountSourceBs,
+}) {
+  const o = Number(orderId);
+  const b = Number(bankStatementId);
+  if (!Number.isFinite(o) || o <= 0 || !Number.isFinite(b) || b <= 0) return;
+  const aOrd = Number(amountOrderBs);
+  const aSrc = Number(amountSourceBs);
+  if (!Number.isFinite(aOrd) || !Number.isFinite(aSrc)) return;
+  const amtDiff = Math.abs(aOrd - aSrc);
+  const tol = inboxPaymentHintToleranceBs();
+  try {
+    await client.query(
+      `INSERT INTO reconciliation_log (
+         order_id, bank_statement_id, payment_attempt_id, source,
+         match_level, confidence_score,
+         amount_order_bs, amount_source_bs, amount_diff_bs, tolerance_used_bs,
+         reference_matched, date_matched, resolved_by, status
+       )
+       SELECT $1::bigint, $2::bigint, NULL, 'bank_statement',
+         3, 100.0,
+         $3::numeric, $4::numeric, $5::numeric, $6::numeric,
+         false, false, 'manual_ui', 'approved'
+       WHERE EXISTS (SELECT 1 FROM sales_orders WHERE id = $1::bigint)
+         AND NOT EXISTS (
+           SELECT 1 FROM reconciliation_log r
+           WHERE r.order_id = $1::bigint AND r.bank_statement_id = $2::bigint
+         )`,
+      [o, b, aOrd, aSrc, amtDiff, tol]
+    );
+  } catch (e) {
+    if (e && (e.code === "42P01" || e.code === "42703")) return;
+    throw e;
+  }
+}
+
+/** Tras vincular cotización a pedido: si ya había extracto en la cotización, registra `reconciliation_log`. */
+async function backfillOrderReconciliationFromQuotationBank(poolConn, presupuestoId, salesOrderId) {
+  const pid = Number(presupuestoId);
+  const sid = Number(salesOrderId);
+  if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(sid) || sid <= 0) return;
+  try {
+    const { rows: ipRows } = await poolConn.query(
+      `SELECT matched_bank_statement_id
+       FROM inventario_presupuesto
+       WHERE id = $1 AND matched_bank_statement_id IS NOT NULL`,
+      [pid]
+    );
+    if (!ipRows.length) return;
+    const bsId = Number(ipRows[0].matched_bank_statement_id);
+    if (!Number.isFinite(bsId) || bsId <= 0) return;
+    const { rows: soRows } = await poolConn.query(
+      `SELECT total_amount_bs::text AS total_amount_bs FROM sales_orders WHERE id = $1`,
+      [sid]
+    );
+    if (!soRows.length) return;
+    const ordBs = parsePgAmountBsText(soRows[0].total_amount_bs);
+    const { rows: bsRows } = await poolConn.query(
+      `SELECT amount::text AS amount FROM bank_statements WHERE id = $1`,
+      [bsId]
+    );
+    if (!bsRows.length) return;
+    const stmtBs = parsePgAmountBsText(bsRows[0].amount);
+    if (!Number.isFinite(ordBs) || !Number.isFinite(stmtBs)) return;
+    await insertReconciliationLogQuotationBankMatch(poolConn, {
+      orderId: sid,
+      bankStatementId: bsId,
+      amountOrderBs: ordBs,
+      amountSourceBs: stmtBs,
+    });
+  } catch (e) {
+    if (e && (e.code === "42P01" || e.code === "42703")) return;
+    throw e;
+  }
+}
+
+/**
+ * Crea la sales_order CH-2 automáticamente cuando el pago de una cotización canal 2 pasa a
+ * `fullySettled`. Idempotente (clave: external_order_id = INV-PRESUP-{id}). No lanza errores:
+ * solo loguea. Llamar siempre en setImmediate post-commit para no bloquear la respuesta HTTP.
+ *
+ * @param {number} presupuestoId
+ */
+async function maybeAutoCreateSalesOrderFromQuotation(presupuestoId) {
+  const pid = Number(presupuestoId);
+  if (!Number.isFinite(pid) || pid <= 0) return;
+  try {
+    // 1. Idempotencia: si ya existe la orden, no hacer nada.
+    const extKey = `INV-PRESUP-${pid}`;
+    const { rows: dup } = await pool.query(
+      `SELECT id FROM sales_orders WHERE external_order_id = $1 LIMIT 1`,
+      [extKey]
+    );
+    if (dup.length) return;
+
+    // 2. Cargar cotización.
+    const { rows: ipr } = await pool.query(
+      `SELECT id, status, channel_id, chat_id, cliente_id,
+              delivery_zone_id, delivery_line_bs
+       FROM inventario_presupuesto WHERE id = $1`,
+      [pid]
+    );
+    if (!ipr.length) return;
+    const ip = ipr[0];
+    if (Number(ip.channel_id) !== 2) return;
+    const st = String(ip.status || "").toLowerCase();
+    if (!["sent", "approved"].includes(st)) return;
+    if (ip.chat_id == null || ip.cliente_id == null) return;
+
+    // 3. Verificar pago cerrado.
+    const settlement = await quotationPaymentSettlementService
+      .getSettlementState(pid, null)
+      .catch(() => null);
+    if (!settlement || !settlement.fullySettled) return;
+
+    // 4. Cargar líneas (excluye servicios como delivery).
+    const { rows: lineRows } = await pool.query(
+      `SELECT d.cantidad, d.precio_unitario, pr.sku,
+              COALESCE(pr.is_service, FALSE) AS is_service
+       FROM inventario_detallepresupuesto d
+       INNER JOIN products pr ON pr.id = d.producto_id
+       WHERE d.presupuesto_id = $1
+       ORDER BY d.id`,
+      [pid]
+    );
+    const regularLines = lineRows.filter((L) => !L.is_service);
+    if (!regularLines.length) return;
+
+    // 5. Delivery desde la cotización.
+    const finalZoneId =
+      ip.delivery_zone_id != null && Number(ip.delivery_zone_id) > 0
+        ? Number(ip.delivery_zone_id)
+        : null;
+    const finalDeliveryBs =
+      ip.delivery_line_bs != null && Number(ip.delivery_line_bs) > 0
+        ? Number(ip.delivery_line_bs)
+        : undefined;
+
+    // 6. Crear la sales_order CH-2.
+    const salesService = require("../services/salesService");
+    const created = await salesService.createOrder({
+      source: "social_media",
+      channelId: 2,
+      customerId: Number(ip.cliente_id),
+      items: regularLines.map((L) => ({
+        sku: String(L.sku || "").trim(),
+        quantity: Math.floor(Number(L.cantidad)),
+        unit_price_usd: Number(L.precio_unitario),
+      })),
+      notes: `Desde cotización ${buildReference(ip.channel_id, pid)} (inventario_presupuesto id=${pid})`,
+      soldBy: "sistema",
+      status: "paid",
+      externalOrderId: extKey,
+      paymentMethod: "pago_movil",
+      conversationId: Number(ip.chat_id),
+      zoneId: finalZoneId,
+      deliveryClientPriceBs: finalDeliveryBs,
+    });
+    const orderId = Number(created.id);
+    if (!Number.isFinite(orderId) || orderId <= 0) return;
+
+    // 7. Marcar payment_status = approved.
+    await pool.query(
+      `UPDATE sales_orders SET payment_status = 'approved', updated_at = NOW() WHERE id = $1`,
+      [orderId]
+    );
+
+    // 8. Marcar cotización como convertida.
+    try {
+      await pool.query(
+        `UPDATE inventario_presupuesto
+         SET status = 'converted',
+             pipeline_stage = 'converted',
+             conversion_document_id = $2,
+             conversion_note = $3,
+             converted_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1`,
+        [pid, `SALES_ORDER_${orderId}`, `Orden ERP #${orderId} (CH-2 auto WA/Redes)`]
+      );
+    } catch (convErr) {
+      logger.warn(
+        { err: convErr.message, orderId, pid },
+        "auto-create-sales-order: marcar convertida falló"
+      );
+    }
+
+    // 9. Poblar reconciliation_log con el extracto bancario de la cotización (si lo hay).
+    await backfillOrderReconciliationFromQuotationBank(pool, pid, orderId);
+
+    logger.info(
+      { presupuesto_id: pid, sales_order_id: orderId },
+      "auto-create-sales-order: OK"
+    );
+  } catch (err) {
+    logger.error(
+      { err: err && err.message, presupuesto_id: pid },
+      "auto-create-sales-order: error silencioso"
+    );
+  }
 }
 
 function formatPaymentMessage(totalUsd, rateRow) {
@@ -1301,6 +1511,7 @@ async function handleInboxQuotationRequest(req, res, url) {
         });
         return true;
       }
+      setImmediate(() => maybeAutoCreateSalesOrderFromQuotation(Number(rows[0].quotation_id)));
       writeJson(res, 200, {
         ok: true,
         allocation_id: rows[0].id,
@@ -1430,6 +1641,7 @@ async function handleInboxQuotationRequest(req, res, url) {
     } finally {
       clientCaja.release();
     }
+    setImmediate(() => maybeAutoCreateSalesOrderFromQuotation(qidCaja));
     const stAfterCaja = await quotationPaymentSettlementService.getSettlementState(qidCaja, null);
     writeJson(res, 201, {
       ok:                    true,
@@ -2026,14 +2238,60 @@ async function handleInboxQuotationRequest(req, res, url) {
       const headRes = await pool.query(
         `SELECT ip.id, ip.fecha_creacion, ip.fecha_vencimiento, ip.total, ip.status,
            ip.cliente_id, ip.chat_id, ip.channel_id, ip.created_by, ip.observaciones,
-           ${sqlReferenceExpr("ip")} AS reference
+           ip.sales_order_id,
+           ip.matched_bank_statement_id,
+           ip.matched_bank_statement_linked_at,
+           ${sqlReferenceExpr("ip")} AS reference,
+           stmt.tx_date AS stmt_tx_date,
+           stmt.amount::text AS stmt_amount,
+           stmt.description AS stmt_description,
+           stmt.reference_number AS stmt_reference_number,
+           stmt.payment_type::text AS stmt_payment_type,
+           ba.bank_name AS stmt_bank_name
          FROM inventario_presupuesto ip
+         LEFT JOIN bank_statements stmt ON stmt.id = ip.matched_bank_statement_id
+         LEFT JOIN bank_accounts ba ON ba.id = stmt.bank_account_id
          WHERE ip.id = $1`,
         [pid]
       );
       if (!headRes.rows.length) {
         writeJson(res, 404, { error: "not_found", message: "Cotización no encontrada" });
         return true;
+      }
+      const hr0 = headRes.rows[0];
+      const presRow = {
+        id:               hr0.id,
+        fecha_creacion:   hr0.fecha_creacion,
+        fecha_vencimiento: hr0.fecha_vencimiento,
+        total:            hr0.total,
+        status:           hr0.status,
+        cliente_id:       hr0.cliente_id,
+        chat_id:          hr0.chat_id,
+        channel_id:       hr0.channel_id,
+        created_by:       hr0.created_by,
+        observaciones:    hr0.observaciones,
+        sales_order_id:   hr0.sales_order_id != null ? Number(hr0.sales_order_id) : null,
+        reference:        hr0.reference,
+      };
+      if (hr0.matched_bank_statement_id != null) {
+        presRow.matched_bank_statement_id = Number(hr0.matched_bank_statement_id);
+      }
+      if (hr0.matched_bank_statement_linked_at != null) {
+        presRow.matched_bank_statement_linked_at = hr0.matched_bank_statement_linked_at;
+      }
+      let matched_bank_statement = null;
+      if (hr0.matched_bank_statement_id != null && Number(hr0.matched_bank_statement_id) > 0) {
+        const lid = new Date(hr0.matched_bank_statement_linked_at);
+        matched_bank_statement = {
+          id:               Number(hr0.matched_bank_statement_id),
+          linked_at:        !Number.isNaN(lid.getTime()) ? lid.toISOString() : null,
+          tx_date:          hr0.stmt_tx_date ?? null,
+          amount:           hr0.stmt_amount != null ? String(hr0.stmt_amount) : null,
+          description:      hr0.stmt_description != null ? String(hr0.stmt_description) : "",
+          reference_number: hr0.stmt_reference_number ?? null,
+          payment_type:     hr0.stmt_payment_type ?? null,
+          bank_name:        hr0.stmt_bank_name ?? null,
+        };
       }
       const detRes = await pool.query(
         `SELECT d.id,
@@ -2054,7 +2312,8 @@ async function handleInboxQuotationRequest(req, res, url) {
       );
       writeJson(res, 200, {
         ok: true,
-        presupuesto: headRes.rows[0],
+        presupuesto: presRow,
+        matched_bank_statement,
         lines: detRes.rows,
       });
       return true;
@@ -2304,7 +2563,8 @@ async function handleInboxQuotationRequest(req, res, url) {
       }
 
       const { rows: cotRows } = await pool.query(
-        `SELECT id, status, total, pipeline_stage FROM inventario_presupuesto WHERE id = $1 LIMIT 1`,
+        `SELECT id, status, total, pipeline_stage, sales_order_id
+         FROM inventario_presupuesto WHERE id = $1 LIMIT 1`,
         [pid]
       );
       if (!cotRows.length) {
@@ -2319,9 +2579,18 @@ async function handleInboxQuotationRequest(req, res, url) {
       }
 
       const { rows: bsRowsL } = await pool.query(
-        `SELECT id, tx_type::text AS tx_type, reconciliation_status::text AS reconciliation_status,
-                amount::text AS amount
-         FROM bank_statements WHERE id = $1 LIMIT 1`,
+        `SELECT bs.id,
+                bs.tx_type::text AS tx_type,
+                bs.reconciliation_status::text AS reconciliation_status,
+                bs.amount::text AS amount,
+                bs.tx_date,
+                bs.reference_number,
+                bs.description,
+                bs.payment_type::text AS payment_type,
+                ba.bank_name
+         FROM bank_statements bs
+         LEFT JOIN bank_accounts ba ON ba.id = bs.bank_account_id
+         WHERE bs.id = $1 LIMIT 1`,
         [bsId]
       );
       if (!bsRowsL.length) {
@@ -2351,7 +2620,17 @@ async function handleInboxQuotationRequest(req, res, url) {
         return true;
       }
       const rateRowLbs = await getTodayRate(1).catch(() => null);
-      const { totalBs: cotTotalBs, rate: rateUsedBs } = paymentBsRateAndAmount(cotTotalUsd, rateRowLbs);
+      const convLbs = paymentBsRateAndAmount(cotTotalUsd, rateRowLbs);
+      let cotTotalBs = convLbs.totalBs;
+      const rateUsedBs = convLbs.rate;
+      try {
+        const fromLines = await quotationDisplayTotalBsFromLines(pool, pid, rateRowLbs || {});
+        if (fromLines != null && Number.isFinite(fromLines) && fromLines > 0) {
+          cotTotalBs = fromLines;
+        }
+      } catch (_lineBsErr) {
+        /* mantener convLbs */
+      }
       if (cotTotalBs == null || !Number.isFinite(cotTotalBs) || !(rateUsedBs > 0)) {
         writeJson(res, 503, {
           error:   "rate_unavailable",
@@ -2390,10 +2669,23 @@ async function handleInboxQuotationRequest(req, res, url) {
         const newStage = closedPipeStages.includes(String(cot.pipeline_stage || "")) ? cot.pipeline_stage : "accepted";
         await clientLbs.query(
           `UPDATE inventario_presupuesto
-              SET status = 'approved', pipeline_stage = $2, updated_at = NOW()
+              SET status = 'approved',
+                  pipeline_stage = $2,
+                  matched_bank_statement_id = $3,
+                  matched_bank_statement_linked_at = NOW(),
+                  updated_at = NOW()
             WHERE id = $1`,
-          [pid, newStage]
+          [pid, newStage, bsId]
         );
+        const soLink = cot.sales_order_id != null ? Number(cot.sales_order_id) : NaN;
+        if (Number.isFinite(soLink) && soLink > 0) {
+          await insertReconciliationLogQuotationBankMatch(clientLbs, {
+            orderId:           soLink,
+            bankStatementId:   bsId,
+            amountOrderBs:     cotTotalBs,
+            amountSourceBs:    bsAmt,
+          });
+        }
         await clientLbs.query("COMMIT");
       } catch (e) {
         await clientLbs.query("ROLLBACK").catch(() => {});
@@ -2401,6 +2693,8 @@ async function handleInboxQuotationRequest(req, res, url) {
       } finally {
         clientLbs.release();
       }
+      setImmediate(() => maybeAutoCreateSalesOrderFromQuotation(pid));
+      const linkedAtIso = new Date().toISOString();
       writeJson(res, 200, {
         ok: true,
         quotation_id: pid,
@@ -2411,6 +2705,13 @@ async function handleInboxQuotationRequest(req, res, url) {
         diff_bs:             diff,
         tolerance_bs:        tol,
         status:                "matched",
+        matched_bank_statement_linked_at: linkedAtIso,
+        statement_tx_date:                bsL.tx_date ?? null,
+        statement_reference_number:       bsL.reference_number ?? null,
+        statement_description:            bsL.description != null ? String(bsL.description) : "",
+        statement_payment_type:           bsL.payment_type ?? null,
+        bank_name:                        bsL.bank_name ?? null,
+        sales_order_id:                   cot.sales_order_id != null ? Number(cot.sales_order_id) : null,
       });
       return true;
     }
@@ -2608,6 +2909,9 @@ async function handleInboxQuotationRequest(req, res, url) {
         `UPDATE inventario_presupuesto SET sales_order_id = $1, updated_at = NOW() WHERE id = $2`,
         [newSoId, pid]
       );
+      if (newSoId != null) {
+        await backfillOrderReconciliationFromQuotationBank(pool, pid, newSoId);
+      }
 
       logger.info({ presupuesto_id: pid, old_so_id: pRow.sales_order_id, new_so_id: newSoId }, "link-sales-order actualizado");
       writeJson(res, 200, {
@@ -3459,6 +3763,7 @@ async function handleInboxQuotationRequest(req, res, url) {
       } finally {
         client.release();
       }
+      setImmediate(() => maybeAutoCreateSalesOrderFromQuotation(quotationId));
       const stAfter = await quotationPaymentSettlementService.getSettlementState(quotationId, null);
       writeJson(res, 200, {
         ok: true,

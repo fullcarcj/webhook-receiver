@@ -196,10 +196,35 @@ function buildQuestionAnsweredRow(parsed, mlUserId, notificationId) {
   };
 }
 
+/**
+ * Vendedor dueño de la publicación asociada a la pregunta (API ML GET /questions).
+ * Prioridad sobre body.user_id del webhook cuando difieren (multi-cuenta / routing ML).
+ * @param {object} parsed
+ * @param {number|string|null|undefined} fallbackMlUserId — típico: body.user_id del webhook
+ * @returns {number|null}
+ */
+function resolveQuestionSellerMlUserId(parsed, fallbackMlUserId) {
+  const fb = Number(fallbackMlUserId);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    if (parsed.seller_id != null) {
+      const n = Number(parsed.seller_id);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    if (parsed.seller && typeof parsed.seller === "object" && parsed.seller.id != null) {
+      const n = Number(parsed.seller.id);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  }
+  if (Number.isFinite(fb) && fb > 0) return fb;
+  return null;
+}
+
 function buildQuestionPendingRow(parsed, mlUserId, notificationId) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const id = Number(parsed.id);
   if (!Number.isFinite(id) || id <= 0) return null;
+  const effectiveSellerId = resolveQuestionSellerMlUserId(parsed, mlUserId);
+  if (effectiveSellerId == null) return null;
   let buyerId = null;
   if (parsed.from && typeof parsed.from === "object" && parsed.from.id != null) {
     const b = Number(parsed.from.id);
@@ -216,7 +241,7 @@ function buildQuestionPendingRow(parsed, mlUserId, notificationId) {
   }
   return {
     ml_question_id: id,
-    ml_user_id: mlUserId,
+    ml_user_id: effectiveSellerId,
     item_id: itemId,
     buyer_id: buyerId,
     question_text: text,
@@ -256,6 +281,7 @@ function normalizeQuestionsTopic(topic) {
 
 module.exports = {
   extractQuestionIdFromResource,
+  resolveQuestionSellerMlUserId,
   buildQuestionPendingRow,
   buildQuestionAnsweredRow,
   enrichAnsweredRowFromPendingSnapshot,

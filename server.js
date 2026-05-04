@@ -54,6 +54,7 @@ const {
   isQuestionUnansweredStatus,
   isQuestionAnsweredOrClosedStatus,
 } = require("./ml-question-sync");
+const { syncMlListingForQuestionRow } = require("./src/services/mlQuestionListingSync");
 const { refreshMlQuestionFromApi, syncAllPendingQuestionsFromApi } = require("./ml-question-refresh");
 const {
   tryQuestionIaAutoAnswer,
@@ -1309,11 +1310,17 @@ function scheduleTopicFetchFromWebhook(body) {
               try {
                 const row = buildQuestionPendingRow(parsed, mlUserId, notifId);
                 if (row) {
+                  const qSellerUid = Number(row.ml_user_id);
+                  try {
+                    await syncMlListingForQuestionRow(row);
+                  } catch (eList) {
+                    console.error("[ml questions] sync listing tras hook:", eList.message || eList);
+                  }
                   try {
                     const { traceMlQuestion } = require("./src/utils/mlQuestionTrace");
                     traceMlQuestion("webhook_question_row_built", {
                       ml_question_id: row.ml_question_id != null ? Number(row.ml_question_id) : null,
-                      ml_user_id: mlUserId,
+                      ml_user_id: qSellerUid,
                       notif_id: notifId != null ? String(notifId) : null,
                       ml_status: row.ml_status != null ? String(row.ml_status) : null,
                     });
@@ -1322,7 +1329,7 @@ function scheduleTopicFetchFromWebhook(body) {
                   }
                   if (isQuestionAnsweredOrClosedStatus(row.ml_status)) {
                     const pendingSnap = await getMlQuestionPendingByQuestionId(row.ml_question_id);
-                    const answeredRow = buildQuestionAnsweredRow(parsed, mlUserId, notifId);
+                    const answeredRow = buildQuestionAnsweredRow(parsed, qSellerUid, notifId);
                     if (answeredRow) {
                       enrichAnsweredRowFromPendingSnapshot(answeredRow, pendingSnap, parsed);
                       const answeredId = await upsertMlQuestionAnswered(answeredRow);
@@ -1368,7 +1375,7 @@ function scheduleTopicFetchFromWebhook(body) {
                     if (iaOn) {
                       try {
                         const r = await tryQuestionIaAutoAnswer({
-                          mlUserId,
+                          mlUserId: qSellerUid,
                           pendingRow: row,
                           parsed,
                           notifId,
@@ -1385,7 +1392,7 @@ function scheduleTopicFetchFromWebhook(body) {
                           const { traceMlQuestion } = require("./src/utils/mlQuestionTrace");
                           traceMlQuestion("webhook_question_ia_attempt_result", {
                             ml_question_id: row.ml_question_id != null ? Number(row.ml_question_id) : null,
-                            ml_user_id: mlUserId,
+                            ml_user_id: qSellerUid,
                             ia_on: iaOn,
                             ia_ok: r && r.ok === true,
                             ia_skip: r && r.skip != null ? String(r.skip) : null,
@@ -1435,7 +1442,7 @@ function scheduleTopicFetchFromWebhook(body) {
                         const { traceMlQuestion } = require("./src/utils/mlQuestionTrace");
                         traceMlQuestion("webhook_question_schedule_upsert_chat", {
                           ml_question_id: row.ml_question_id != null ? Number(row.ml_question_id) : null,
-                          ml_user_id: mlUserId,
+                          ml_user_id: qSellerUid,
                         });
                       } catch (_e) {
                         /* trace best-effort */
@@ -1451,7 +1458,7 @@ function scheduleTopicFetchFromWebhook(body) {
                     });
                     if (process.env.ML_WHATSAPP_TIPO_F_ENABLED === "1") {
                       const qidF = row.ml_question_id;
-                      const uidF = mlUserId;
+                      const uidF = qSellerUid;
                       setImmediate(() => {
                         trySendWhatsappTipoFForQuestion({
                           mlUserId: uidF,

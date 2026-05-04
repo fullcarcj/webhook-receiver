@@ -25,6 +25,7 @@ const {
   serializeIaAutoPendingRouteDetail,
 } = require("./ml-questions-ia-auto");
 const { syncAnsweredMlQuestionToCrm } = require("./src/services/mlInboxBridge");
+const { syncMlListingForQuestionRow } = require("./src/services/mlQuestionListingSync");
 
 /**
  * ml_user_id que alguna vez procesaron esta pregunta (webhook GET guardado, IA, WA).
@@ -269,6 +270,12 @@ async function refreshMlQuestionFromApi(args) {
   const row = buildQuestionPendingRow(parsed, uid, notifId);
   if (!row) {
     return { ok: false, error: "no se pudo interpretar el JSON de la pregunta" };
+  }
+
+  try {
+    await syncMlListingForQuestionRow(row);
+  } catch (eList) {
+    console.error("[ml-question-refresh] sync listing tras GET pregunta:", eList.message || eList);
   }
 
   if (isQuestionAnsweredOrClosedStatus(row.ml_status)) {

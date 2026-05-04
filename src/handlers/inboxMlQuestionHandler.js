@@ -8,6 +8,7 @@ const { pool, upsertMlListing, upsertMlQuestionPending } = require("../../db");
 const { upsertMlQuestionChat } = require("../services/mlInboxBridge");
 const { mercadoLibrePostJsonForUser, mercadoLibreFetchForUser } = require("../../oauth-token");
 const { listingRowFromMlItemApi } = require("../../ml-listing-map");
+const { refreshMlQuestionFromApi } = require("../../ml-question-refresh");
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -205,9 +206,8 @@ async function handleInboxMlQuestionRequest(req, res, url) {
 
   try {
     if (req.method === "GET" && mGet) {
-      // Buscar datos de la pregunta ML en pending Y answered (UNION)
-      const { rows } = await pool.query(
-        `SELECT
+      const mqJoinSql = `
+        SELECT
            mq.ml_question_id,
            mq.ml_user_id,
            mq.item_id,
@@ -238,11 +238,9 @@ async function handleInboxMlQuestionRequest(req, res, url) {
          LEFT JOIN ml_listings li ON li.item_id = mq.item_id
          WHERE cc.id = $1
          ORDER BY mq.ml_question_id DESC
-         LIMIT 1`,
-        [chatId]
-      );
+         LIMIT 1`;
+      let { rows } = await pool.query(mqJoinSql, [chatId]);
       if (!rows.length) {
-        // Sin pregunta vinculada: devolver datos mínimos del chat para no perder item_id
         const { rows: chatRows } = await pool.query(
           `SELECT ml_question_id FROM crm_chats WHERE id = $1`, [chatId]
         );
@@ -250,20 +248,43 @@ async function handleInboxMlQuestionRequest(req, res, url) {
           writeJson(res, 200, null);
           return true;
         }
-        // Tiene ml_question_id pero no hay fila en questions → devolver estructura vacía
-        writeJson(res, 200, {
-          question_id: Number(chatRows[0].ml_question_id),
-          item_id: null,
-          question_text: null,
-          ml_status: null,
-          buyer_id: null,
-          date_created: null,
-          ia_already_answered: false,
-          ia_detail: null,
-          item_listing: null,
-          _sync_debug: { attempted: false, reason: "no_question_row_in_db" },
-        });
-        return true;
+        const mlQid = Number(chatRows[0].ml_question_id);
+        let bootstrap = { reason: "no_question_row_in_db", ml_question_id: mlQid };
+        try {
+          const fr = await refreshMlQuestionFromApi({ mlQuestionId: mlQid });
+          bootstrap.refresh = {
+            ok: fr.ok,
+            action: fr.action,
+            error: fr.error,
+            http_status: fr.http_status,
+          };
+          if (fr.ok) {
+            const r2 = await pool.query(mqJoinSql, [chatId]);
+            rows = r2.rows;
+          }
+        } catch (e) {
+          bootstrap.sync_error = e && e.message ? String(e.message) : String(e);
+          logger.warn({ err: bootstrap.sync_error, chatId, mlQid }, "inbox_ml_question: sync pregunta ML falló");
+        }
+        if (!rows.length) {
+          writeJson(res, 200, {
+            question_id: mlQid,
+            item_id: null,
+            question_text: null,
+            ml_status: null,
+            buyer_id: null,
+            date_created: null,
+            ia_already_answered: false,
+            ia_detail: null,
+            item_listing: null,
+            _sync_debug: {
+              attempted: bootstrap.refresh != null,
+              reason: "no_question_row_in_db",
+              ...bootstrap,
+            },
+          });
+          return true;
+        }
       }
       const mq = rows[0];
       const iaDetail = mq.ia_auto_route_detail;

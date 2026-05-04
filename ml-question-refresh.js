@@ -13,6 +13,7 @@ const {
 const {
   getMlQuestionPendingByQuestionId,
   listMlQuestionsPending,
+  listMlAccounts,
   upsertMlQuestionPending,
   upsertMlQuestionAnswered,
   deleteMlQuestionPending,
@@ -37,17 +38,60 @@ async function refreshMlQuestionFromApi(args) {
   let uid = args.mlUserId != null ? Number(args.mlUserId) : null;
   if (!Number.isFinite(uid) || uid <= 0) {
     const pending = await getMlQuestionPendingByQuestionId(qid);
-    if (!pending || pending.ml_user_id == null) {
-      return {
-        ok: false,
-        error:
-          "Pasá ml_user_id= (vendedor) o asegurate de existir una fila en ml_questions_pending con ese question_id",
-      };
+    if (pending && pending.ml_user_id != null) {
+      uid = Number(pending.ml_user_id);
     }
-    uid = Number(pending.ml_user_id);
   }
 
-  const res = await mercadoLibreFetchForUser(uid, `/questions/${qid}`);
+  /** Si no hay pending con ml_user_id, probamos GET /questions/{id} con cada cuenta en ml_accounts hasta que ML devuelva 200 y el id coincida (Bandeja / chat huérfano). */
+  let res = null;
+  if (!Number.isFinite(uid) || uid <= 0) {
+    let accounts = [];
+    try {
+      accounts = await listMlAccounts();
+    } catch (e) {
+      return {
+        ok: false,
+        error: `listMlAccounts: ${e && e.message ? String(e.message) : String(e)}`,
+      };
+    }
+    for (const acc of accounts) {
+      const tryUid = Number(acc.ml_user_id);
+      if (!Number.isFinite(tryUid) || tryUid <= 0) continue;
+      const probe = await mercadoLibreFetchForUser(tryUid, `/questions/${qid}`);
+      let data = probe.data;
+      if (data != null && typeof data === "string") {
+        try {
+          data = JSON.parse(data);
+        } catch {
+          data = null;
+        }
+      }
+      if (
+        probe.ok &&
+        data &&
+        typeof data === "object" &&
+        !Array.isArray(data) &&
+        Number(data.id) === qid
+      ) {
+        uid = tryUid;
+        res = { ...probe, data };
+        break;
+      }
+    }
+  }
+
+  if (!Number.isFinite(uid) || uid <= 0) {
+    return {
+      ok: false,
+      error:
+        "Pasá ml_user_id= (vendedor), o fila en ml_questions_pending, o registrá la cuenta vendedora en ml_accounts con token válido para GET /questions/{id}.",
+    };
+  }
+
+  if (!res) {
+    res = await mercadoLibreFetchForUser(uid, `/questions/${qid}`);
+  }
   if (!res.ok) {
     const st = res.status;
     /** Pregunta borrada o ya no expuesta: evita fantasmas en ml_questions_pending. */

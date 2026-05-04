@@ -11,6 +11,7 @@ const {
   isQuestionUnansweredStatus,
 } = require("./ml-question-sync");
 const {
+  pool,
   getMlQuestionPendingByQuestionId,
   listMlQuestionsPending,
   listMlAccounts,
@@ -24,6 +25,73 @@ const {
   serializeIaAutoPendingRouteDetail,
 } = require("./ml-questions-ia-auto");
 const { syncAnsweredMlQuestionToCrm } = require("./src/services/mlInboxBridge");
+
+/**
+ * ml_user_id que alguna vez procesaron esta pregunta (webhook GET guardado, IA, WA).
+ * Sirve para ordenar el probe cuando no hay fila en ml_questions_* pero el vendedor real
+ * no coincide con el orden alfabético de ml_accounts.
+ * @param {number} qid
+ * @returns {Promise<number[]>}
+ */
+async function hintMlUserIdsForQuestion(qid) {
+  const idStr = String(qid);
+  const ordered = [];
+  const seen = new Set();
+  const push = (mlUserId) => {
+    const n = Number(mlUserId);
+    if (!Number.isFinite(n) || n <= 0 || seen.has(n)) return;
+    seen.add(n);
+    ordered.push(n);
+  };
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT ml_user_id
+         FROM ml_topic_fetches
+        WHERE http_status >= 200 AND http_status < 300
+          AND (
+            resource ILIKE '%/questions/' || $1::text || '%'
+            OR request_path ILIKE '%/questions/' || $1::text || '%'
+          )
+        ORDER BY id DESC
+        LIMIT 25`,
+      [idStr]
+    );
+    for (const r of rows) push(r.ml_user_id);
+  } catch {
+    /* tabla ausente u otro error: ignorar */
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ON (ml_user_id) ml_user_id
+         FROM ml_questions_ia_auto_log
+        WHERE ml_question_id = $1 AND ml_user_id IS NOT NULL
+        ORDER BY ml_user_id, id DESC
+        LIMIT 15`,
+      [qid]
+    );
+    for (const r of rows) push(r.ml_user_id);
+  } catch {
+    /* ignorar */
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT ON (ml_user_id) ml_user_id
+         FROM ml_whatsapp_wasender_log
+        WHERE ml_question_id = $1 AND ml_user_id IS NOT NULL
+        ORDER BY ml_user_id, id DESC
+        LIMIT 15`,
+      [qid]
+    );
+    for (const r of rows) push(r.ml_user_id);
+  } catch {
+    /* ignorar */
+  }
+
+  return ordered;
+}
 
 /**
  * @param {{ mlQuestionId: number|string, mlUserId?: number|string|null }} args
@@ -47,6 +115,8 @@ async function refreshMlQuestionFromApi(args) {
   let res = null;
   let probeNotes = [];
   let probeAccountsCount = 0;
+  let hintedMlUserIds = [];
+  let hintedMissingFromAccounts = [];
   if (!Number.isFinite(uid) || uid <= 0) {
     let accounts = [];
     try {
@@ -58,12 +128,23 @@ async function refreshMlQuestionFromApi(args) {
       };
     }
     probeAccountsCount = accounts.length;
+    const accountIdSet = new Set(accounts.map((a) => Number(a.ml_user_id)));
+    hintedMlUserIds = await hintMlUserIdsForQuestion(qid);
+    hintedMissingFromAccounts = hintedMlUserIds.filter((id) => !accountIdSet.has(Number(id))).slice(0, 8);
+    const hintSet = new Set(hintedMlUserIds.filter((id) => accountIdSet.has(Number(id))));
+
     const preferUid = Number(process.env.INBOX_ML_QUESTION_SYNC_USER_ID || process.env.ML_USER_ID || "");
-    if (Number.isFinite(preferUid) && preferUid > 0 && accounts.length > 0) {
+    if (accounts.length > 0) {
       accounts.sort((a, b) => {
-        const pa = Number(a.ml_user_id) === preferUid ? 0 : 1;
-        const pb = Number(b.ml_user_id) === preferUid ? 0 : 1;
-        return pa - pb;
+        const ua = Number(a.ml_user_id);
+        const ub = Number(b.ml_user_id);
+        const ha = hintSet.has(ua) ? 0 : 1;
+        const hb = hintSet.has(ub) ? 0 : 1;
+        if (ha !== hb) return ha - hb;
+        const pa = Number.isFinite(preferUid) && preferUid > 0 && ua === preferUid ? 0 : 1;
+        const pb = Number.isFinite(preferUid) && preferUid > 0 && ub === preferUid ? 0 : 1;
+        if (pa !== pb) return pa - pb;
+        return ua - ub;
       });
     }
     for (const acc of accounts) {
@@ -95,24 +176,41 @@ async function refreshMlQuestionFromApi(args) {
         res = { ...probe, data };
         break;
       }
-      probeNotes.push({
-        ml_user_id: tryUid,
-        http_status: probe.status,
-        ok: probe.ok,
-        note: idOk ? "unexpected" : "id_mismatch_or_bad_body",
-      });
+      let note;
+      if (!probe.ok) {
+        note = `http_${probe.status}`;
+      } else if (!idOk) {
+        note = "id_mismatch_or_bad_body";
+      } else {
+        note = "unexpected";
+      }
+      const row = { ml_user_id: tryUid, http_status: probe.status, ok: probe.ok, note };
+      if (!probe.ok && probe.rawText) {
+        row.body_snippet = String(probe.rawText).slice(0, 160);
+      }
+      probeNotes.push(row);
     }
   }
 
   if (!Number.isFinite(uid) || uid <= 0) {
+    const hintMsg =
+      hintedMissingFromAccounts.length > 0
+        ? ` En BD hay vendedor(es) asociados a esta pregunta (${hintedMissingFromAccounts.join(
+            ", "
+          )}) que no están en ml_accounts: agregá OAuth para ese ml_user_id.`
+        : hintedMlUserIds.length > 0
+          ? " Pistas en BD no coincidieron con cuentas OAuth (revisá tokens)."
+          : "";
     return {
       ok: false,
       error:
         probeAccountsCount === 0
           ? "No hay filas en ml_accounts: registrá al menos una cuenta OAuth con refresh_token."
-          : "Ninguna cuenta en ml_accounts pudo obtener GET /questions/{id} (revisá tokens y que la pregunta pertenezca a uno de esos vendedores).",
+          : `Ninguna cuenta en ml_accounts pudo obtener GET /questions/{id}.${hintMsg} 404 suele indicar token de otro vendedor o pregunta eliminada en ML.`,
       probe_accounts_tried: probeNotes.slice(0, 12),
       ml_accounts_count: probeAccountsCount,
+      hinted_ml_user_ids: hintedMlUserIds.slice(0, 15),
+      hinted_missing_from_ml_accounts: hintedMissingFromAccounts,
     };
   }
 

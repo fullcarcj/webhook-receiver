@@ -259,6 +259,8 @@ async function handleInboxMlQuestionRequest(req, res, url) {
             http_status: fr.http_status,
             probe_accounts_tried: fr.probe_accounts_tried,
             ml_accounts_count: fr.ml_accounts_count,
+            hinted_ml_user_ids: fr.hinted_ml_user_ids,
+            hinted_missing_from_ml_accounts: fr.hinted_missing_from_ml_accounts,
           };
           if (fr.ok) {
             const r2 = await pool.query(mqJoinSql, [chatId]);

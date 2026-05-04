@@ -12,6 +12,7 @@ const {
 } = require("./ml-question-sync");
 const {
   pool,
+  getMlAccount,
   getMlQuestionPendingByQuestionId,
   listMlQuestionsPending,
   listMlAccounts,
@@ -270,6 +271,21 @@ async function refreshMlQuestionFromApi(args) {
   const row = buildQuestionPendingRow(parsed, uid, notifId);
   if (!row) {
     return { ok: false, error: "no se pudo interpretar el JSON de la pregunta" };
+  }
+
+  const sellerAcc = await getMlAccount(Number(row.ml_user_id));
+  const sellerOAuthOk =
+    sellerAcc &&
+    sellerAcc.refresh_token != null &&
+    String(sellerAcc.refresh_token).trim() !== "";
+  if (!sellerOAuthOk) {
+    return {
+      ok: false,
+      error: `seller_id=${row.ml_user_id} sin OAuth en ml_accounts (sin refresh_token); no se persiste la pregunta ni el listing.`,
+      ml_user_id: row.ml_user_id,
+      ml_question_id: qid,
+      skipped: "seller_not_in_ml_accounts",
+    };
   }
 
   try {

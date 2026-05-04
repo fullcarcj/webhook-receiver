@@ -257,6 +257,7 @@ async function handleInboxMlQuestionRequest(req, res, url) {
             action: fr.action,
             error: fr.error,
             http_status: fr.http_status,
+            skipped: fr.skipped,
             probe_accounts_tried: fr.probe_accounts_tried,
             ml_accounts_count: fr.ml_accounts_count,
             hinted_ml_user_ids: fr.hinted_ml_user_ids,

@@ -1310,6 +1310,17 @@ function scheduleTopicFetchFromWebhook(body) {
               try {
                 const row = buildQuestionPendingRow(parsed, mlUserId, notifId);
                 if (row) {
+                  const sellerAcc = await getMlAccount(Number(row.ml_user_id));
+                  const sellerOAuthOk =
+                    sellerAcc &&
+                    sellerAcc.refresh_token != null &&
+                    String(sellerAcc.refresh_token).trim() !== "";
+                  if (!sellerOAuthOk) {
+                    console.warn(
+                      "[ml questions] persistencia omitida: seller_id=%s sin OAuth en ml_accounts (sin refresh_token); no se guarda pregunta ni listing ni CRM desde este hook",
+                      row.ml_user_id
+                    );
+                  } else {
                   const qSellerUid = Number(row.ml_user_id);
                   try {
                     await syncMlListingForQuestionRow(row);
@@ -1475,6 +1486,7 @@ function scheduleTopicFetchFromWebhook(body) {
                   } else {
                     /** Otros estados (p. ej. UNDER_REVIEW): no mantener en pending. */
                     await deleteMlQuestionPending(row.ml_question_id);
+                  }
                   }
                 }
               } catch (eQ) {

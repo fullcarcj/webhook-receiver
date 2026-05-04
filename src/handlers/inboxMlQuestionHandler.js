@@ -257,6 +257,8 @@ async function handleInboxMlQuestionRequest(req, res, url) {
             action: fr.action,
             error: fr.error,
             http_status: fr.http_status,
+            probe_accounts_tried: fr.probe_accounts_tried,
+            ml_accounts_count: fr.ml_accounts_count,
           };
           if (fr.ok) {
             const r2 = await pool.query(mqJoinSql, [chatId]);
@@ -264,6 +266,7 @@ async function handleInboxMlQuestionRequest(req, res, url) {
           }
         } catch (e) {
           bootstrap.sync_error = e && e.message ? String(e.message) : String(e);
+          bootstrap.refresh = { ok: false, error: bootstrap.sync_error };
           logger.warn({ err: bootstrap.sync_error, chatId, mlQid }, "inbox_ml_question: sync pregunta ML falló");
         }
         if (!rows.length) {
@@ -278,7 +281,7 @@ async function handleInboxMlQuestionRequest(req, res, url) {
             ia_detail: null,
             item_listing: null,
             _sync_debug: {
-              attempted: bootstrap.refresh != null,
+              attempted: true,
               reason: "no_question_row_in_db",
               ...bootstrap,
             },

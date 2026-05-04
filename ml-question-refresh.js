@@ -45,6 +45,8 @@ async function refreshMlQuestionFromApi(args) {
 
   /** Si no hay pending con ml_user_id, probamos GET /questions/{id} con cada cuenta en ml_accounts hasta que ML devuelva 200 y el id coincida (Bandeja / chat huérfano). */
   let res = null;
+  let probeNotes = [];
+  let probeAccountsCount = 0;
   if (!Number.isFinite(uid) || uid <= 0) {
     let accounts = [];
     try {
@@ -55,10 +57,26 @@ async function refreshMlQuestionFromApi(args) {
         error: `listMlAccounts: ${e && e.message ? String(e.message) : String(e)}`,
       };
     }
+    probeAccountsCount = accounts.length;
+    const preferUid = Number(process.env.INBOX_ML_QUESTION_SYNC_USER_ID || process.env.ML_USER_ID || "");
+    if (Number.isFinite(preferUid) && preferUid > 0 && accounts.length > 0) {
+      accounts.sort((a, b) => {
+        const pa = Number(a.ml_user_id) === preferUid ? 0 : 1;
+        const pb = Number(b.ml_user_id) === preferUid ? 0 : 1;
+        return pa - pb;
+      });
+    }
     for (const acc of accounts) {
       const tryUid = Number(acc.ml_user_id);
       if (!Number.isFinite(tryUid) || tryUid <= 0) continue;
-      const probe = await mercadoLibreFetchForUser(tryUid, `/questions/${qid}`);
+      let probe;
+      try {
+        probe = await mercadoLibreFetchForUser(tryUid, `/questions/${qid}`);
+      } catch (e) {
+        const msg = e && e.message ? String(e.message) : String(e);
+        probeNotes.push({ ml_user_id: tryUid, error: msg.slice(0, 200) });
+        continue;
+      }
       let data = probe.data;
       if (data != null && typeof data === "string") {
         try {
@@ -67,17 +85,22 @@ async function refreshMlQuestionFromApi(args) {
           data = null;
         }
       }
-      if (
-        probe.ok &&
+      const idOk =
         data &&
         typeof data === "object" &&
         !Array.isArray(data) &&
-        Number(data.id) === qid
-      ) {
+        (String(data.id) === String(qid) || Number(data.id) === qid);
+      if (probe.ok && idOk) {
         uid = tryUid;
         res = { ...probe, data };
         break;
       }
+      probeNotes.push({
+        ml_user_id: tryUid,
+        http_status: probe.status,
+        ok: probe.ok,
+        note: idOk ? "unexpected" : "id_mismatch_or_bad_body",
+      });
     }
   }
 
@@ -85,7 +108,11 @@ async function refreshMlQuestionFromApi(args) {
     return {
       ok: false,
       error:
-        "Pasá ml_user_id= (vendedor), o fila en ml_questions_pending, o registrá la cuenta vendedora en ml_accounts con token válido para GET /questions/{id}.",
+        probeAccountsCount === 0
+          ? "No hay filas en ml_accounts: registrá al menos una cuenta OAuth con refresh_token."
+          : "Ninguna cuenta en ml_accounts pudo obtener GET /questions/{id} (revisá tokens y que la pregunta pertenezca a uno de esos vendedores).",
+      probe_accounts_tried: probeNotes.slice(0, 12),
+      ml_accounts_count: probeAccountsCount,
     };
   }
 

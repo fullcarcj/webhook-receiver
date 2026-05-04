@@ -9,13 +9,12 @@ const {
   enrichAnsweredRowFromPendingSnapshot,
   isQuestionAnsweredOrClosedStatus,
   isQuestionUnansweredStatus,
+  resolveQuestionSellerMlUserId,
 } = require("./ml-question-sync");
 const {
-  pool,
   getMlAccount,
   getMlQuestionPendingByQuestionId,
   listMlQuestionsPending,
-  listMlAccounts,
   upsertMlQuestionPending,
   upsertMlQuestionAnswered,
   deleteMlQuestionPending,
@@ -27,73 +26,6 @@ const {
 } = require("./ml-questions-ia-auto");
 const { syncAnsweredMlQuestionToCrm } = require("./src/services/mlInboxBridge");
 const { syncMlListingForQuestionRow } = require("./src/services/mlQuestionListingSync");
-
-/**
- * ml_user_id que alguna vez procesaron esta pregunta (webhook GET guardado, IA, WA).
- * Sirve para ordenar el probe cuando no hay fila en ml_questions_* pero el vendedor real
- * no coincide con el orden alfabético de ml_accounts.
- * @param {number} qid
- * @returns {Promise<number[]>}
- */
-async function hintMlUserIdsForQuestion(qid) {
-  const idStr = String(qid);
-  const ordered = [];
-  const seen = new Set();
-  const push = (mlUserId) => {
-    const n = Number(mlUserId);
-    if (!Number.isFinite(n) || n <= 0 || seen.has(n)) return;
-    seen.add(n);
-    ordered.push(n);
-  };
-
-  try {
-    const { rows } = await pool.query(
-      `SELECT ml_user_id
-         FROM ml_topic_fetches
-        WHERE http_status >= 200 AND http_status < 300
-          AND (
-            resource ILIKE '%/questions/' || $1::text || '%'
-            OR request_path ILIKE '%/questions/' || $1::text || '%'
-          )
-        ORDER BY id DESC
-        LIMIT 25`,
-      [idStr]
-    );
-    for (const r of rows) push(r.ml_user_id);
-  } catch {
-    /* tabla ausente u otro error: ignorar */
-  }
-
-  try {
-    const { rows } = await pool.query(
-      `SELECT DISTINCT ON (ml_user_id) ml_user_id
-         FROM ml_questions_ia_auto_log
-        WHERE ml_question_id = $1 AND ml_user_id IS NOT NULL
-        ORDER BY ml_user_id, id DESC
-        LIMIT 15`,
-      [qid]
-    );
-    for (const r of rows) push(r.ml_user_id);
-  } catch {
-    /* ignorar */
-  }
-
-  try {
-    const { rows } = await pool.query(
-      `SELECT DISTINCT ON (ml_user_id) ml_user_id
-         FROM ml_whatsapp_wasender_log
-        WHERE ml_question_id = $1 AND ml_user_id IS NOT NULL
-        ORDER BY ml_user_id, id DESC
-        LIMIT 15`,
-      [qid]
-    );
-    for (const r of rows) push(r.ml_user_id);
-  } catch {
-    /* ignorar */
-  }
-
-  return ordered;
-}
 
 /**
  * @param {{ mlQuestionId: number|string, mlUserId?: number|string|null }} args
@@ -112,113 +44,23 @@ async function refreshMlQuestionFromApi(args) {
       uid = Number(pending.ml_user_id);
     }
   }
-
-  /** Si no hay pending con ml_user_id, probamos GET /questions/{id} con cada cuenta en ml_accounts hasta que ML devuelva 200 y el id coincida (Bandeja / chat huérfano). */
-  let res = null;
-  let probeNotes = [];
-  let probeAccountsCount = 0;
-  let hintedMlUserIds = [];
-  let hintedMissingFromAccounts = [];
   if (!Number.isFinite(uid) || uid <= 0) {
-    let accounts = [];
-    try {
-      accounts = await listMlAccounts();
-    } catch (e) {
-      return {
-        ok: false,
-        error: `listMlAccounts: ${e && e.message ? String(e.message) : String(e)}`,
-      };
-    }
-    probeAccountsCount = accounts.length;
-    const accountIdSet = new Set(accounts.map((a) => Number(a.ml_user_id)));
-    hintedMlUserIds = await hintMlUserIdsForQuestion(qid);
-    hintedMissingFromAccounts = hintedMlUserIds.filter((id) => !accountIdSet.has(Number(id))).slice(0, 8);
-    const hintSet = new Set(hintedMlUserIds.filter((id) => accountIdSet.has(Number(id))));
-
-    const preferUid = Number(process.env.INBOX_ML_QUESTION_SYNC_USER_ID || process.env.ML_USER_ID || "");
-    if (accounts.length > 0) {
-      accounts.sort((a, b) => {
-        const ua = Number(a.ml_user_id);
-        const ub = Number(b.ml_user_id);
-        const ha = hintSet.has(ua) ? 0 : 1;
-        const hb = hintSet.has(ub) ? 0 : 1;
-        if (ha !== hb) return ha - hb;
-        const pa = Number.isFinite(preferUid) && preferUid > 0 && ua === preferUid ? 0 : 1;
-        const pb = Number.isFinite(preferUid) && preferUid > 0 && ub === preferUid ? 0 : 1;
-        if (pa !== pb) return pa - pb;
-        return ua - ub;
-      });
-    }
-    for (const acc of accounts) {
-      const tryUid = Number(acc.ml_user_id);
-      if (!Number.isFinite(tryUid) || tryUid <= 0) continue;
-      let probe;
-      try {
-        probe = await mercadoLibreFetchForUser(tryUid, `/questions/${qid}`);
-      } catch (e) {
-        const msg = e && e.message ? String(e.message) : String(e);
-        probeNotes.push({ ml_user_id: tryUid, error: msg.slice(0, 200) });
-        continue;
-      }
-      let data = probe.data;
-      if (data != null && typeof data === "string") {
-        try {
-          data = JSON.parse(data);
-        } catch {
-          data = null;
-        }
-      }
-      const idOk =
-        data &&
-        typeof data === "object" &&
-        !Array.isArray(data) &&
-        (String(data.id) === String(qid) || Number(data.id) === qid);
-      if (probe.ok && idOk) {
-        uid = tryUid;
-        res = { ...probe, data };
-        break;
-      }
-      let note;
-      if (!probe.ok) {
-        note = `http_${probe.status}`;
-      } else if (!idOk) {
-        note = "id_mismatch_or_bad_body";
-      } else {
-        note = "unexpected";
-      }
-      const row = { ml_user_id: tryUid, http_status: probe.status, ok: probe.ok, note };
-      if (!probe.ok && probe.rawText) {
-        row.body_snippet = String(probe.rawText).slice(0, 160);
-      }
-      probeNotes.push(row);
+    const envUid = Number(process.env.INBOX_ML_QUESTION_SYNC_USER_ID || process.env.ML_USER_ID || "");
+    if (Number.isFinite(envUid) && envUid > 0) {
+      uid = envUid;
     }
   }
-
   if (!Number.isFinite(uid) || uid <= 0) {
-    const hintMsg =
-      hintedMissingFromAccounts.length > 0
-        ? ` En BD hay vendedor(es) asociados a esta pregunta (${hintedMissingFromAccounts.join(
-            ", "
-          )}) que no están en ml_accounts: agregá OAuth para ese ml_user_id.`
-        : hintedMlUserIds.length > 0
-          ? " Pistas en BD no coincidieron con cuentas OAuth (revisá tokens)."
-          : "";
     return {
       ok: false,
       error:
-        probeAccountsCount === 0
-          ? "No hay filas en ml_accounts: registrá al menos una cuenta OAuth con refresh_token."
-          : `Ninguna cuenta en ml_accounts pudo obtener GET /questions/{id}.${hintMsg} 404 suele indicar token de otro vendedor o pregunta eliminada en ML.`,
-      probe_accounts_tried: probeNotes.slice(0, 12),
-      ml_accounts_count: probeAccountsCount,
-      hinted_ml_user_ids: hintedMlUserIds.slice(0, 15),
-      hinted_missing_from_ml_accounts: hintedMissingFromAccounts,
+        "Sin cuenta vendedor para GET /questions: pasá mlUserId en args, o debe existir ml_questions_pending con ml_user_id, o definí ML_USER_ID / INBOX_ML_QUESTION_SYNC_USER_ID. No se iteran cuentas.",
+      skipped: "no_ml_user_id",
+      ml_question_id: qid,
     };
   }
 
-  if (!res) {
-    res = await mercadoLibreFetchForUser(uid, `/questions/${qid}`);
-  }
+  const res = await mercadoLibreFetchForUser(uid, `/questions/${qid}`);
   if (!res.ok) {
     const st = res.status;
     /** Pregunta borrada o ya no expuesta: evita fantasmas en ml_questions_pending. */
@@ -265,6 +107,17 @@ async function refreshMlQuestionFromApi(args) {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "respuesta GET /questions no es un objeto JSON" };
+  }
+
+  const resolvedSeller = resolveQuestionSellerMlUserId(parsed, uid);
+  if (resolvedSeller != null && Number(resolvedSeller) !== Number(uid)) {
+    return {
+      ok: false,
+      error: `seller_id del JSON (${resolvedSeller}) no coincide con la cuenta del GET (${uid}); no se persiste. Usá OAuth del vendedor dueño o pasá mlUserId correcto en args.`,
+      skipped: "seller_token_mismatch",
+      ml_user_id: uid,
+      ml_question_id: qid,
+    };
   }
 
   const notifId = null;

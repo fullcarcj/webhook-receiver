@@ -1315,10 +1315,21 @@ function scheduleTopicFetchFromWebhook(body) {
                     sellerAcc &&
                     sellerAcc.refresh_token != null &&
                     String(sellerAcc.refresh_token).trim() !== "";
+                  const hookUid = Number(mlUserId);
+                  const sellerMatchesHook =
+                    !Number.isFinite(hookUid) ||
+                    hookUid <= 0 ||
+                    Number(row.ml_user_id) === hookUid;
                   if (!sellerOAuthOk) {
                     console.warn(
                       "[ml questions] persistencia omitida: seller_id=%s sin OAuth en ml_accounts (sin refresh_token); no se guarda pregunta ni listing ni CRM desde este hook",
                       row.ml_user_id
+                    );
+                  } else if (!sellerMatchesHook) {
+                    console.warn(
+                      "[ml questions] persistencia omitida: seller_id=%s del JSON no coincide con user_id del webhook (%s); no se almacena",
+                      row.ml_user_id,
+                      hookUid
                     );
                   } else {
                   const qSellerUid = Number(row.ml_user_id);
